@@ -1,0 +1,23 @@
+After completing meaningful work, you MUST output a checkpoint block
+in exactly this format:
+
+<checkpoint>
+status: working | blocked | step_done | workflow_done
+current_node: <step_id>
+summary: <one-line description>
+evidence:
+  - modified: <file>
+  - ran: <command>
+  - result: <short result>
+candidate_next_actions:
+  - <what to do next>
+needs:
+  - none
+question_for_supervisor:
+  - none
+</checkpoint>
+
+This is a hard contract. The supervisor parses these to track progress.
+Emit "step_done" when you believe the current step is complete.
+Emit "blocked" when you need external input you cannot obtain yourself.
+Emit "working" for intermediate progress updates.
