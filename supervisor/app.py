@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -125,17 +126,30 @@ def cmd_run(args):
     print(f"  poll interval: {config.poll_interval_sec}s")
     print(f"  state: {config.runtime_dir}/state.json")
 
+    if args.daemon:
+        _daemonize()
+        # Child continues here — redirect logging to file
+        log_path = Path(config.runtime_dir) / "supervisor.log"
+        logging.basicConfig(
+            filename=str(log_path), level=logging.INFO, force=True,
+            format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        )
+
     try:
         final_state = loop.run_sidecar(
             spec, state, terminal,
             poll_interval=config.poll_interval_sec,
             read_lines=config.read_lines,
         )
-        print(f"\nRun finished: {final_state.top_state.value}")
-        print(json.dumps(final_state.to_dict(), ensure_ascii=False, indent=2))
+        if not args.daemon:
+            print(f"\nRun finished: {final_state.top_state.value}")
+            print(json.dumps(final_state.to_dict(), ensure_ascii=False, indent=2))
     except KeyboardInterrupt:
         store.save(state)
-        print(f"\nInterrupted. State saved. Resume with: thin-supervisor run {args.spec_path} --pane {config.pane_target}")
+        if not args.daemon:
+            print(f"\nInterrupted. State saved. Resume with: thin-supervisor run {args.spec_path} --pane {config.pane_target}")
+    finally:
+        Path(PID_FILE).unlink(missing_ok=True)
 
     return 0
 
@@ -199,6 +213,133 @@ def _run_event_file(event_file: str, spec, state, store, loop):
 
 
 # ------------------------------------------------------------------
+# Bridge subcommand — tmux pane operations
+# ------------------------------------------------------------------
+
+
+def cmd_bridge(args):
+    """Tmux pane operations (read, type, keys, list, id, doctor)."""
+    from supervisor.terminal.adapter import TerminalAdapter, TerminalAdapterError
+
+    action = args.bridge_action
+
+    if action == "id":
+        import os
+        pane_id = os.environ.get("TMUX_PANE", "")
+        if pane_id:
+            print(pane_id)
+        else:
+            print("error: not inside a tmux pane", file=sys.stderr)
+            return 1
+        return 0
+
+    if action == "doctor":
+        adapter = TerminalAdapter(args.target or "%0")
+        info = adapter.doctor()
+        print(f"Socket:  {info['socket']}")
+        print(f"Panes:   {info['pane_count']}")
+        if info["issues"]:
+            for issue in info["issues"]:
+                print(f"  Issue: {issue}")
+        print(f"Status:  {'OK' if info['ok'] else 'ISSUES FOUND'}")
+        return 0 if info["ok"] else 1
+
+    if action == "list":
+        adapter = TerminalAdapter("%0")
+        try:
+            panes = adapter.list_panes()
+        except TerminalAdapterError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"{'TARGET':<8} {'SESSION:WIN':<15} {'SIZE':<12} {'PROCESS':<12} {'LABEL':<12} {'CWD'}")
+        for p in panes:
+            print(f"{p.pane_id:<8} {p.session_window:<15} {p.size:<12} {p.process:<12} {p.label or '-':<12} {p.cwd}")
+        return 0
+
+    # Commands that need a target
+    if not args.target:
+        print("error: target pane required (label or %id)", file=sys.stderr)
+        return 1
+
+    adapter = TerminalAdapter(args.target)
+
+    try:
+        if action == "read":
+            lines = int(args.extra[0]) if args.extra else 50
+            text = adapter.read(lines=lines)
+            print(text, end="")
+        elif action == "type":
+            if not args.extra:
+                print("error: text argument required", file=sys.stderr)
+                return 1
+            adapter.read()  # satisfy guard
+            adapter.type_text(" ".join(args.extra))
+        elif action == "keys":
+            if not args.extra:
+                print("error: key argument(s) required", file=sys.stderr)
+                return 1
+            adapter.read()  # satisfy guard
+            adapter.send_keys(*args.extra)
+        elif action == "name":
+            if not args.extra:
+                print("error: label argument required", file=sys.stderr)
+                return 1
+            adapter.name_pane(args.extra[0])
+        else:
+            print(f"error: unknown bridge action '{action}'", file=sys.stderr)
+            return 1
+    except TerminalAdapterError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+# ------------------------------------------------------------------
+# Daemon helpers
+# ------------------------------------------------------------------
+
+PID_FILE = ".supervisor/runtime/supervisor.pid"
+
+
+def _daemonize():
+    """Fork to background, write PID file."""
+    pid = os.fork()
+    if pid > 0:
+        # Parent — print PID and exit
+        print(f"Supervisor daemon started (PID {pid})")
+        Path(PID_FILE).parent.mkdir(parents=True, exist_ok=True)
+        Path(PID_FILE).write_text(str(pid))
+        sys.exit(0)
+    # Child — detach
+    os.setsid()
+    # Redirect stdio to /dev/null
+    devnull = os.open(os.devnull, os.O_RDWR)
+    os.dup2(devnull, 0)
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
+    os.close(devnull)
+
+
+def cmd_stop(args):
+    """Stop the supervisor daemon."""
+    import signal
+    pid_path = Path(PID_FILE)
+    if not pid_path.exists():
+        print("No daemon PID file found.")
+        return 1
+    pid = int(pid_path.read_text().strip())
+    try:
+        os.kill(pid, signal.SIGTERM)
+        print(f"Sent SIGTERM to PID {pid}")
+        pid_path.unlink(missing_ok=True)
+    except ProcessLookupError:
+        print(f"Process {pid} not found (already stopped?).")
+        pid_path.unlink(missing_ok=True)
+    return 0
+
+
+# ------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------
 
@@ -225,10 +366,21 @@ def main():
     p_run.add_argument("--config", default=None, help="Path to config YAML")
     p_run.add_argument("--event-file", default=None, help="Process a single JSON event (testing)")
     p_run.add_argument("--dry-run", action="store_true", help="Show initial state without starting loop")
+    p_run.add_argument("--daemon", "-d", action="store_true", help="Run as background daemon")
+
+    # stop
+    sub.add_parser("stop", help="Stop the supervisor daemon")
 
     # status
     p_status = sub.add_parser("status", help="Show current run state")
     p_status.add_argument("--config", default=None, help="Path to config YAML")
+
+    # bridge
+    p_bridge = sub.add_parser("bridge", help="Tmux pane operations")
+    p_bridge.add_argument("bridge_action", choices=["read", "type", "keys", "list", "id", "doctor", "name"],
+                          help="Bridge action")
+    p_bridge.add_argument("target", nargs="?", default=None, help="Pane target (label or %%id)")
+    p_bridge.add_argument("extra", nargs="*", help="Additional arguments")
 
     args = parser.parse_args()
 
@@ -243,8 +395,12 @@ def main():
         sys.exit(cmd_deinit(args))
     elif args.command == "run":
         sys.exit(cmd_run(args))
+    elif args.command == "stop":
+        sys.exit(cmd_stop(args))
     elif args.command == "status":
         sys.exit(cmd_status(args))
+    elif args.command == "bridge":
+        sys.exit(cmd_bridge(args))
     else:
         parser.print_help()
         sys.exit(0)
