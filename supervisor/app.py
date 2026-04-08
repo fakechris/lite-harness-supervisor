@@ -133,10 +133,10 @@ def cmd_run(args):
             existing_pid = int(pid_path.read_text().strip())
             os.kill(existing_pid, 0)  # check if alive
             print(f"Error: supervisor daemon already running (PID {existing_pid}).")
-            print("  Use 'thin-supervisor stop' first, or --force to override.")
+            print("  Use 'thin-supervisor stop' first.")
             return 1
-        except (ProcessLookupError, ValueError):
-            pid_path.unlink(missing_ok=True)  # stale PID file
+        except (ProcessLookupError, PermissionError, ValueError):
+            pid_path.unlink(missing_ok=True)  # stale or inaccessible PID
 
     if args.daemon:
         _daemonize()
@@ -374,6 +374,9 @@ def cmd_stop(args):
     except ProcessLookupError:
         print(f"Process {pid} not found (already stopped?).")
         pid_path.unlink(missing_ok=True)
+    except PermissionError:
+        print(f"Error: no permission to signal PID {pid}.")
+        return 1
     return 0
 
 
