@@ -104,6 +104,34 @@ class TestTargetResolution:
             adapter.read()
 
 
+class TestInject:
+    """inject() combines type_text + Enter in one guarded call."""
+
+    @patch("subprocess.run")
+    def test_inject_succeeds_after_read(self, mock_run):
+        mock_run.return_value = _mock_run(stdout="output\n")
+        adapter = TerminalAdapter("%0")
+        adapter.read()
+        adapter.inject("hello world")
+        # Should have called tmux 3 times: read, send-keys -l (text), send-keys Enter
+        assert mock_run.call_count == 3
+
+    @patch("subprocess.run")
+    def test_inject_without_read_raises(self, mock_run):
+        adapter = TerminalAdapter("%0")
+        with pytest.raises(ReadGuardError):
+            adapter.inject("hello")
+
+    @patch("subprocess.run")
+    def test_inject_clears_guard(self, mock_run):
+        mock_run.return_value = _mock_run(stdout="output\n")
+        adapter = TerminalAdapter("%0")
+        adapter.read()
+        adapter.inject("hello")
+        with pytest.raises(ReadGuardError):
+            adapter.inject("again")
+
+
 class TestListPanes:
 
     @patch("subprocess.run")

@@ -65,9 +65,13 @@ def cmd_deinit(args):
     if not args.force:
         state_file = Path(RUNTIME_DIR) / "state.json"
         if state_file.exists():
-            state = json.loads(state_file.read_text())
-            if state.get("top_state") not in ("COMPLETED", "FAILED", "ABORTED"):
-                print(f"Active run detected (state={state.get('top_state')}). Use --force to remove anyway.")
+            try:
+                state = json.loads(state_file.read_text())
+                if state.get("top_state") not in ("COMPLETED", "FAILED", "ABORTED"):
+                    print(f"Active run detected (state={state.get('top_state')}). Use --force to remove anyway.")
+                    return 1
+            except json.JSONDecodeError:
+                print("Warning: state.json is corrupt. Use --force to remove anyway.")
                 return 1
 
     shutil.rmtree(base)

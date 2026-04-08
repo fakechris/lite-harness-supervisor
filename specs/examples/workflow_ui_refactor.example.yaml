@@ -17,7 +17,7 @@ nodes:
     verify:
       - type: artifact
         path: runtime/screen_inspection.json
-        exists: false
+        exists: true
 
   - id: applicability_gate
     type: decision

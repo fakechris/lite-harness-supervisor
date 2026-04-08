@@ -1,7 +1,7 @@
 class CodexRunner:
     '''
     V1 placeholder.
-    真实集成时可替换为：
+    真实集成时可替换为:
     - 调 Codex CLI
     - 订阅 stdout / transcript
     - 注入 next_instruction

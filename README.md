@@ -18,7 +18,7 @@ thin-supervisor run .supervisor/specs/my-plan.yaml --pane codex
 
 ## Architecture
 
-```
+```text
 ┌──────────────────────────┐  ┌─────────────────────┐
 │  Agent Pane (visible)    │  │ Supervisor (sidecar) │
 │  Claude Code / Codex     │  │ reads pane output    │
@@ -113,7 +113,7 @@ Override with environment variables: `SUPERVISOR_PANE_TARGET`, `SUPERVISOR_JUDGE
 
 Agents must emit structured checkpoints for the supervisor to parse:
 
-```
+```text
 <checkpoint>
 status: working | blocked | step_done | workflow_done
 current_node: step_id
@@ -151,7 +151,7 @@ Then invoke `/supervisor` in Claude Code to generate a spec from natural languag
 ## Development
 
 ```bash
-git clone https://github.com/user/lite-harness-supervisor
+git clone https://github.com/fakechris/lite-harness-supervisor
 cd lite-harness-supervisor
 pip install -e ".[dev]"
 pytest -q

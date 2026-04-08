@@ -72,6 +72,19 @@ class TerminalAdapter:
             self._tmux("send-keys", "-t", target, key)
         self._read_guard.discard(target)
 
+    def inject(self, text: str) -> None:
+        """Type text and press Enter in one guarded operation.
+
+        This avoids the ReadGuardError that would occur if ``type_text()``
+        and ``send_keys("Enter")`` were called separately, since
+        ``type_text()`` clears the read guard.
+        """
+        target = self._resolve_target()
+        self._require_read(target)
+        self._tmux("send-keys", "-t", target, "-l", "--", text)
+        self._tmux("send-keys", "-t", target, "Enter")
+        self._read_guard.discard(target)
+
     def list_panes(self) -> list[PaneInfo]:
         """Return metadata for every pane visible to the tmux server."""
         fmt = "#{pane_id}\t#{session_name}:#{window_index}\t#{pane_width}x#{pane_height}\t#{pane_current_command}\t#{@name}\t#{pane_current_path}"

@@ -97,7 +97,7 @@ thin-supervisor run .supervisor/specs/<goal-slug>.yaml --pane $(tmux display-mes
 After completing meaningful work, output a checkpoint block. This is
 **mandatory** — the supervisor parses these to track progress.
 
-```
+```text
 <checkpoint>
 status: working | blocked | step_done | workflow_done
 current_node: <step_id from spec>

@@ -72,6 +72,18 @@ class SupervisorLoop:
             state.top_state = TopState.VERIFYING
             return
 
+        if kind == DecisionType.RETRY.value:
+            state.current_attempt += 1
+            state.retry_budget.used_global += 1
+            if (
+                state.current_attempt >= state.retry_budget.per_node
+                or state.retry_budget.used_global >= state.retry_budget.global_limit
+            ):
+                state.top_state = TopState.PAUSED_FOR_HUMAN
+            else:
+                state.top_state = TopState.RUNNING
+            return
+
         if kind == DecisionType.ESCALATE_TO_HUMAN.value:
             state.top_state = TopState.PAUSED_FOR_HUMAN
             state.human_escalations.append(decision)
@@ -175,8 +187,7 @@ class SupervisorLoop:
             if state.top_state == TopState.RUNNING:
                 node = spec.get_node(state.current_node_id)
                 instruction = self._build_instruction(node, state)
-                terminal.type_text(instruction)
-                terminal.send_keys("Enter")
+                terminal.inject(instruction)
 
             # 7. Persist
             self.store.save(state)

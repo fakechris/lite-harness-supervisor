@@ -31,8 +31,15 @@ class MockTerminal:
         self._read_done = False
 
     def send_keys(self, *keys: str) -> None:
-        assert self._read_done or self.injected, "read guard violated"
+        assert self._read_done, "read guard violated"
         self.keys_sent.extend(keys)
+        self._read_done = False
+
+    def inject(self, text: str) -> None:
+        """Type text + Enter in one guarded operation (matches real adapter)."""
+        assert self._read_done, "read guard violated"
+        self.injected.append(text)
+        self.keys_sent.append("Enter")
         self._read_done = False
 
 
