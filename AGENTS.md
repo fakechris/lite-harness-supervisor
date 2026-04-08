@@ -1,0 +1,51 @@
+# Supervisor Checkpoint Protocol
+
+This project uses `thin-supervisor` to drive long-running tasks with
+deterministic verification. When a supervisor is active, you MUST follow
+the checkpoint protocol described below.
+
+## Check if supervisor is active
+
+```bash
+thin-supervisor status
+```
+
+If status shows an active run, follow the protocol below.
+
+## Checkpoint protocol
+
+After completing meaningful work on a step, output a checkpoint block:
+
+```text
+<checkpoint>
+status: working | blocked | step_done | workflow_done
+current_node: <step_id>
+summary: <one-line description>
+evidence:
+  - modified: <file path>
+  - ran: <command>
+  - result: <short result>
+candidate_next_actions:
+  - <next action>
+needs:
+  - none
+question_for_supervisor:
+  - none
+</checkpoint>
+```
+
+### Status values
+
+| Status | When to use |
+|--------|-------------|
+| `working` | Still making progress on current step |
+| `blocked` | Cannot proceed without external input |
+| `step_done` | Current step is complete, ready for verification |
+| `workflow_done` | All steps complete |
+
+## Rules
+
+1. Do NOT ask "should I continue?" — the supervisor decides
+2. Do NOT skip steps or verification
+3. Emit checkpoints after every significant action
+4. The supervisor will inject next-step instructions when ready
