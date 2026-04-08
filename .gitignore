@@ -1,4 +1,13 @@
 node_modules/
 *.pyc
+__pycache__/
 .DS_Store
+.pytest_cache/
+dist/
+*.egg-info/
 
+# Supervisor runtime (generated per-project)
+.supervisor/runtime/
+runtime/state.json
+runtime/event_log.jsonl
+runtime/decision_log.jsonl
