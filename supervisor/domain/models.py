@@ -61,8 +61,11 @@ class WorkflowSpec:
         nodes = self.ordered_nodes()
         if self.kind == "linear_plan":
             ids = [x.id for x in nodes]
-            idx = ids.index(current_node_id)
-            return ids[idx + 1] if idx + 1 < len(ids) else None
+            try:
+                idx = ids.index(current_node_id)
+                return ids[idx + 1] if idx + 1 < len(ids) else None
+            except ValueError:
+                return None
         node = self.get_node(current_node_id)
         return node.next
 

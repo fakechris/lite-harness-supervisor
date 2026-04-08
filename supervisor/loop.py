@@ -135,7 +135,6 @@ class SupervisorLoop:
             Number of terminal lines to capture per read.
         """
         adapter = TranscriptAdapter()
-        last_checkpoint_summary: str | None = None
 
         # If state is READY, move to RUNNING
         if state.top_state == TopState.READY:
@@ -146,13 +145,11 @@ class SupervisorLoop:
             # 1. Read pane output
             text = terminal.read(lines=read_lines)
 
-            # 2. Parse checkpoint
+            # 2. Parse checkpoint (compare full dict to detect status changes)
             checkpoint = adapter.parse_checkpoint(text)
-            if not checkpoint or checkpoint.get("summary") == last_checkpoint_summary:
+            if not checkpoint or checkpoint == state.last_agent_checkpoint:
                 time.sleep(poll_interval)
                 continue
-
-            last_checkpoint_summary = checkpoint.get("summary")
             logger.info("checkpoint: %s", checkpoint.get("summary", ""))
 
             # 3. Build event

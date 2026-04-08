@@ -2,14 +2,28 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import yaml
+
+
 class TranscriptAdapter:
     CHECKPOINT_RE = re.compile(r"<checkpoint>(.*?)</checkpoint>", re.S)
 
     def parse_checkpoint(self, text: str) -> dict:
-        m = self.CHECKPOINT_RE.search(text)
-        if not m:
+        matches = self.CHECKPOINT_RE.findall(text)
+        if not matches:
             return {}
-        block = m.group(1)
+        # Use the most recent checkpoint in the buffer
+        block = matches[-1]
+        try:
+            result = yaml.safe_load(block)
+            if isinstance(result, dict):
+                return result
+        except yaml.YAMLError:
+            pass
+        # Fallback: manual line-by-line parsing for non-YAML checkpoint format
+        return self._parse_lines(block)
+
+    def _parse_lines(self, block: str) -> dict:
         lines = [x.strip() for x in block.splitlines() if x.strip()]
         result = {"evidence": [], "candidate_next_actions": [], "needs": [], "question_for_supervisor": []}
         current_list = None
