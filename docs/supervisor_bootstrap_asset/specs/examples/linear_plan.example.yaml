@@ -1,0 +1,38 @@
+kind: linear_plan
+id: example_linear_plan
+goal: implement a tiny feature with deterministic verification
+finish_policy:
+  require_all_steps_done: true
+  require_verification_pass: true
+  require_clean_or_committed_repo: false
+policy:
+  default_continue: true
+  max_retries_per_node: 3
+  max_retries_global: 6
+
+steps:
+  - id: write_test
+    type: task
+    objective: write a failing test
+    outputs:
+      - tests/test_example.py
+    verify:
+      - type: artifact
+        path: tests/test_example.py
+        exists: true
+
+  - id: implement_feature
+    type: task
+    objective: implement feature until tests pass
+    verify:
+      - type: command
+        run: python -c "print('ok')"
+        expect: contains:ok
+
+  - id: final_verify
+    type: task
+    objective: run full verification
+    verify:
+      - type: command
+        run: python -c "print('all pass')"
+        expect: contains:all pass

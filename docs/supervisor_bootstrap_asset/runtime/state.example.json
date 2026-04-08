@@ -1,0 +1,37 @@
+{
+  "run_id": "run_2026_04_08_001",
+  "spec_id": "example_linear_plan",
+  "mode": "linear_plan",
+  "top_state": "RUNNING",
+  "current_node_id": "implement_feature",
+  "current_attempt": 1,
+  "node_status": "CURRENT_STEP_RUNNING",
+  "done_node_ids": ["write_test"],
+  "branch_history": [],
+  "human_escalations": [],
+  "retry_budget": {
+    "per_node": 3,
+    "global_limit": 6,
+    "used_global": 1
+  },
+  "last_agent_checkpoint": {
+    "status": "working",
+    "current_node": "implement_feature",
+    "summary": "implemented feature skeleton and ran a targeted check",
+    "evidence": [
+      "modified: app/example.py",
+      "ran: python -m pytest -q tests/test_example.py"
+    ],
+    "candidate_next_actions": [
+      "fix failing assertion",
+      "rerun targeted tests"
+    ],
+    "needs": ["none"],
+    "question_for_supervisor": ["none"]
+  },
+  "verification": {
+    "last_status": "pending"
+  },
+  "last_event": {},
+  "last_decision": {}
+}

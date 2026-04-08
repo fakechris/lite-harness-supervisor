@@ -1,0 +1,78 @@
+kind: linear_plan
+id: paddle_canonical_company_profile
+goal: materialize canonical consumption layer and company profile outputs
+finish_policy:
+  require_all_steps_done: true
+  require_verification_pass: true
+  require_clean_or_committed_repo: false
+policy:
+  default_continue: true
+  max_retries_per_node: 3
+  max_retries_global: 12
+
+steps:
+  - id: task1_contract_tests
+    type: task
+    objective: lock canonical consumption contract with failing tests
+    outputs:
+      - tests/test_paddle_canonical_consumption.py
+    verify:
+      - type: artifact
+        path: tests/test_paddle_canonical_consumption.py
+        exists: true
+
+  - id: task2_canonical_tables
+    type: task
+    objective: add canonical tables and store methods
+    verify:
+      - type: command
+        run: PYTHONPATH=. python -m pytest -q tests/test_paddle_canonical_consumption.py
+        expect: pass
+
+  - id: task3_refresh_builder
+    type: task
+    objective: add canonical refresh builder
+    verify:
+      - type: command
+        run: PYTHONPATH=. python -m pytest -q tests/test_paddle_canonical_consumption.py
+        expect: pass
+
+  - id: task4_company_master
+    type: task
+    objective: add company_master and alias mapping
+    verify:
+      - type: command
+        run: PYTHONPATH=. python -m pytest -q tests/test_paddle_company_master.py
+        expect: pass
+
+  - id: task5_company_document_profile
+    type: task
+    objective: build company_document_profile
+    verify:
+      - type: command
+        run: PYTHONPATH=. python -m pytest -q tests/test_paddle_company_document_profile.py
+        expect: pass
+
+  - id: task6_analysis_output
+    type: task
+    objective: add analysis-ready output
+    verify:
+      - type: command
+        run: PYTHONPATH=. python -m pytest -q tests/test_paddle_company_document_analysis.py
+        expect: pass
+
+  - id: task7_refresh_docs
+    type: task
+    objective: refresh docs and summaries
+    verify:
+      - type: artifact
+        path: docs/135-paddle-canonical-consumption-layer.md
+        exists: true
+
+  - id: task8_end_to_end_verify
+    type: task
+    objective: run focused and full verification
+    verify:
+      - type: command
+        run: PYTHONPATH=. python -m pytest -q
+        expect: pass

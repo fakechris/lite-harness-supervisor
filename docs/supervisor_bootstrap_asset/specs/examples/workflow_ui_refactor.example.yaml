@@ -1,0 +1,46 @@
+kind: conditional_workflow
+id: example_ui_refactor
+goal: finish refactor workflow for one screen
+finish_policy:
+  require_all_steps_done: true
+  require_verification_pass: true
+policy:
+  default_continue: true
+  max_retries_per_node: 2
+  max_retries_global: 4
+
+nodes:
+  - id: inspect_screen
+    type: task
+    objective: inspect current screen and collect evidence
+    next: applicability_gate
+    verify:
+      - type: artifact
+        path: runtime/screen_inspection.json
+        exists: false
+
+  - id: applicability_gate
+    type: decision
+    objective: choose whether the workflow applies
+    options:
+      - id: applicable
+        next: run_clarify
+      - id: skip
+        next: finish_skip
+
+  - id: run_clarify
+    type: task
+    objective: perform clarify pass
+    next: finish_skip
+    verify:
+      - type: command
+        run: python -c "print('clarify done')"
+        expect: contains:clarify done
+
+  - id: finish_skip
+    type: task
+    objective: finalize current screen
+    verify:
+      - type: command
+        run: python -c "print('done')"
+        expect: contains:done

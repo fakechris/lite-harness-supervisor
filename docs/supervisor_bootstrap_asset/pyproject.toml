@@ -1,0 +1,14 @@
+[project]
+name = "thin-supervisor"
+version = "0.1.0"
+description = "Thin supervisor for long-running Codex workflows"
+requires-python = ">=3.11"
+dependencies = [
+  "PyYAML>=6.0"
+]
+
+[project.scripts]
+thin-supervisor = "supervisor.app:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
