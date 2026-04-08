@@ -10,7 +10,16 @@ class ContinueGate:
         question = context.get("last_agent_question", "")
         checkpoint = context.get("last_agent_checkpoint", {}) or {}
 
-        hit = classify_text(question) or classify_checkpoint(checkpoint)
+        text_hit = classify_text(question)
+        cp_hit = classify_checkpoint(checkpoint)
+
+        # Prioritize escalation signals over soft confirmations.
+        # A dangerous checkpoint must not be masked by a soft text hit.
+        escalation_classes = {"MISSING_EXTERNAL_INPUT", "DANGEROUS_ACTION"}
+        if text_hit in escalation_classes or cp_hit in escalation_classes:
+            hit = text_hit if text_hit in escalation_classes else cp_hit
+        else:
+            hit = text_hit or cp_hit
 
         if hit == "SOFT_CONFIRMATION":
             return {

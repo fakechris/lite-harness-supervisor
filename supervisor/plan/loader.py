@@ -38,6 +38,8 @@ def _parse_nodes(items):
 
 def load_spec(path: str) -> WorkflowSpec:
     data = yaml.safe_load(pathlib.Path(path).read_text())
+    if not isinstance(data, dict):
+        raise SpecValidationError("spec must be a YAML mapping")
     for key in ["kind", "id", "goal"]:
         if key not in data:
             raise SpecValidationError(f"spec missing `{key}`")

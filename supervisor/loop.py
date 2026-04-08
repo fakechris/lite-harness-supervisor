@@ -27,9 +27,14 @@ def build_context(spec, state) -> dict:
     }
 
 class SupervisorLoop:
-    def __init__(self, store):
+    def __init__(self, store, judge_model: str | None = None,
+                 judge_temperature: float = 0.1, judge_max_tokens: int = 512):
         self.store = store
-        self.judge_client = JudgeClient()
+        self.judge_client = JudgeClient(
+            model=judge_model,
+            temperature=judge_temperature,
+            max_tokens=judge_max_tokens,
+        )
         self.continue_gate = ContinueGate(self.judge_client)
         self.verifier_suite = VerifierSuite()
 

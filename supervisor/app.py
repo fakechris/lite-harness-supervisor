@@ -89,7 +89,12 @@ def cmd_run(args):
 
     store = StateStore(config.runtime_dir)
     state = store.load_or_init(spec)
-    loop = SupervisorLoop(store)
+    loop = SupervisorLoop(
+        store,
+        judge_model=config.judge_model,
+        judge_temperature=config.judge_temperature,
+        judge_max_tokens=config.judge_max_tokens,
+    )
 
     # --event-file mode: process a single event (for testing / offline use)
     if args.event_file:

@@ -3,4 +3,13 @@ Pick a branch only from the allowed options.
 Use the large model's evidence, but do not trust unsupported claims.
 Prefer deterministic signals first.
 Escalate if confidence is low.
-Return JSON only.
+
+Return exactly one JSON object in this shape:
+{
+  "decision": "<one of the allowed option IDs, or escalate_to_human>",
+  "reason": "<one sentence>",
+  "confidence": <0.0-1.0>,
+  "needs_human": <true|false>
+}
+
+Return JSON only. No explanation outside the JSON object.

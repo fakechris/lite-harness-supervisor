@@ -13,4 +13,13 @@ Policy:
 - A soft confirmation request is NOT escalation.
 - Be conservative about finish: only finish if verifier-compatible completion appears likely.
 
-Return JSON only.
+Return exactly one JSON object in this shape:
+{
+  "decision": "continue|verify_step|escalate_to_human|finish|retry",
+  "reason": "<one sentence>",
+  "confidence": <0.0-1.0>,
+  "needs_human": <true|false>,
+  "next_instruction": "<optional instruction for the agent>"
+}
+
+Return JSON only. No explanation outside the JSON object.

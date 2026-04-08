@@ -198,11 +198,11 @@ class TerminalAdapter:
 
     def _socket_alive(self, sock: str) -> bool:
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["tmux", "-S", sock, "list-sessions"],
                 capture_output=True, timeout=3,
             )
-            return True
+            return result.returncode == 0
         except (subprocess.SubprocessError, FileNotFoundError):
             return False
 
