@@ -148,7 +148,11 @@ def cmd_status(args):
         print("No active run found.")
         return 1
 
-    state = json.loads(state_path.read_text())
+    try:
+        state = json.loads(state_path.read_text())
+    except json.JSONDecodeError:
+        print("Error: state.json is corrupt.")
+        return 1
     print(f"Run:     {state.get('run_id', '?')}")
     print(f"Spec:    {state.get('spec_id', '?')}")
     print(f"State:   {state.get('top_state', '?')}")
