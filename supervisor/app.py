@@ -363,14 +363,20 @@ def cmd_stop(args):
         os.kill(pid, signal.SIGTERM)
         print(f"Sent SIGTERM to PID {pid}")
         # Wait for process to exit (up to 5s)
+        exited = False
         for _ in range(50):
             try:
                 os.kill(pid, 0)
                 _time.sleep(0.1)
             except ProcessLookupError:
+                exited = True
                 break
-        pid_path.unlink(missing_ok=True)
-        print("Daemon stopped.")
+        if exited:
+            pid_path.unlink(missing_ok=True)
+            print("Daemon stopped.")
+        else:
+            print(f"Warning: PID {pid} did not exit within 5s. PID file retained.")
+            return 1
     except ProcessLookupError:
         print(f"Process {pid} not found (already stopped?).")
         pid_path.unlink(missing_ok=True)
