@@ -85,11 +85,12 @@ Save the spec to `.supervisor/specs/<goal-slug>.yaml`.
 ## Step 3: Start the supervisor
 
 ```bash
-# Initialize if not already done
-thin-supervisor init 2>/dev/null
+# Initialize (idempotent)
+thin-supervisor init --force
 
-# Start the sidecar (runs in background, watches this pane)
-thin-supervisor run .supervisor/specs/<goal-slug>.yaml --pane $(tmux display-message -p '#{pane_id}') &
+# Start the sidecar daemon (watches this pane)
+thin-supervisor run .supervisor/specs/<goal-slug>.yaml \
+  --pane "$(thin-supervisor bridge id)" --daemon
 ```
 
 ## Step 4: Follow the checkpoint protocol

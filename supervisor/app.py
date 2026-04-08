@@ -126,6 +126,18 @@ def cmd_run(args):
     print(f"  poll interval: {config.poll_interval_sec}s")
     print(f"  state: {config.runtime_dir}/state.json")
 
+    # Check for existing daemon
+    pid_path = Path(PID_FILE)
+    if pid_path.exists():
+        try:
+            existing_pid = int(pid_path.read_text().strip())
+            os.kill(existing_pid, 0)  # check if alive
+            print(f"Error: supervisor daemon already running (PID {existing_pid}).")
+            print("  Use 'thin-supervisor stop' first, or --force to override.")
+            return 1
+        except (ProcessLookupError, ValueError):
+            pid_path.unlink(missing_ok=True)  # stale PID file
+
     if args.daemon:
         _daemonize()
         # Child continues here — redirect logging to file
@@ -149,7 +161,8 @@ def cmd_run(args):
         if not args.daemon:
             print(f"\nInterrupted. State saved. Resume with: thin-supervisor run {args.spec_path} --pane {config.pane_target}")
     finally:
-        Path(PID_FILE).unlink(missing_ok=True)
+        if args.daemon:
+            pid_path.unlink(missing_ok=True)
 
     return 0
 
@@ -224,7 +237,6 @@ def cmd_bridge(args):
     action = args.bridge_action
 
     if action == "id":
-        import os
         pane_id = os.environ.get("TMUX_PANE", "")
         if pane_id:
             print(pane_id)
@@ -265,7 +277,16 @@ def cmd_bridge(args):
 
     try:
         if action == "read":
-            lines = int(args.extra[0]) if args.extra else 50
+            if args.extra:
+                try:
+                    lines = int(args.extra[0])
+                    if lines <= 0:
+                        raise ValueError
+                except ValueError:
+                    print(f"error: lines must be a positive integer, got '{args.extra[0]}'", file=sys.stderr)
+                    return 1
+            else:
+                lines = 50
             text = adapter.read(lines=lines)
             print(text, end="")
         elif action == "type":
@@ -324,15 +345,32 @@ def _daemonize():
 def cmd_stop(args):
     """Stop the supervisor daemon."""
     import signal
+    import time as _time
+
     pid_path = Path(PID_FILE)
     if not pid_path.exists():
         print("No daemon PID file found.")
         return 1
-    pid = int(pid_path.read_text().strip())
+
+    try:
+        pid = int(pid_path.read_text().strip())
+    except (ValueError, OSError):
+        print("Error: PID file is corrupt.")
+        pid_path.unlink(missing_ok=True)
+        return 1
+
     try:
         os.kill(pid, signal.SIGTERM)
         print(f"Sent SIGTERM to PID {pid}")
+        # Wait for process to exit (up to 5s)
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+                _time.sleep(0.1)
+            except ProcessLookupError:
+                break
         pid_path.unlink(missing_ok=True)
+        print("Daemon stopped.")
     except ProcessLookupError:
         print(f"Process {pid} not found (already stopped?).")
         pid_path.unlink(missing_ok=True)

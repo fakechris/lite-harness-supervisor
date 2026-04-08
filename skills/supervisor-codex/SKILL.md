@@ -75,7 +75,7 @@ Save the spec to `.supervisor/specs/<goal-slug>.yaml`.
 ## Step 3: Start the supervisor
 
 ```bash
-thin-supervisor init 2>/dev/null
+thin-supervisor init --force
 thin-supervisor run .supervisor/specs/<goal-slug>.yaml \
   --pane "$(thin-supervisor bridge id)" --daemon
 ```

@@ -9,8 +9,8 @@ STATE_FILE=".supervisor/runtime/state.json"
 
 # Check if supervisor daemon is running
 if [ -f "$PID_FILE" ]; then
-    PID=$(cat "$PID_FILE" 2>/dev/null || echo "0")
-    if kill -0 "$PID" 2>/dev/null; then
+    PID=$(cat "$PID_FILE" 2>/dev/null || echo "")
+    if [ -n "$PID" ] && [ "$PID" -gt 0 ] 2>/dev/null && kill -0 "$PID" 2>/dev/null; then
         # Daemon is alive — check state
         if [ -f "$STATE_FILE" ]; then
             STATUS=$(python3 -c "
