@@ -133,3 +133,22 @@ def test_sidecar_skips_duplicate_checkpoints(tmp_path):
 
     final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
     assert final.top_state == TopState.COMPLETED
+
+
+def test_sidecar_injects_initial_instruction_before_first_checkpoint(tmp_path):
+    """The first node objective should be injected even when the pane is initially idle."""
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    terminal = MockTerminal([
+        "",
+        _make_checkpoint("step_done", "write_test", "wrote the test"),
+        _make_checkpoint("step_done", "implement_feature", "feature done"),
+        _make_checkpoint("step_done", "final_verify", "all done"),
+    ])
+
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+    assert final.top_state == TopState.COMPLETED
+    assert terminal.injected[0].startswith("write a failing test")

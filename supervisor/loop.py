@@ -152,15 +152,22 @@ class SupervisorLoop:
             Number of terminal lines to capture per read.
         """
         adapter = TranscriptAdapter()
+        pending_text = None
 
         # If state is READY, move to RUNNING
         if state.top_state == TopState.READY:
             state.top_state = TopState.RUNNING
             self.store.save(state)
+            pending_text = terminal.read(lines=read_lines)
+            if not adapter.parse_checkpoint(pending_text):
+                node = spec.get_node(state.current_node_id)
+                terminal.inject(self._build_instruction(node, state))
+                pending_text = None
 
         while not self.is_final(state) and state.top_state != TopState.PAUSED_FOR_HUMAN:
             # 1. Read pane output
-            text = terminal.read(lines=read_lines)
+            text = pending_text if pending_text is not None else terminal.read(lines=read_lines)
+            pending_text = None
 
             # 2. Parse checkpoint (compare full dict to detect status changes)
             checkpoint = adapter.parse_checkpoint(text)
@@ -200,17 +207,10 @@ class SupervisorLoop:
         return state
 
     def _build_instruction(self, node, state) -> str:
-        """Compose the instruction to inject into the agent pane."""
-        parts = [node.objective]
+        """Compose a concise instruction to inject into the agent pane.
 
-        # Include next_instruction from the gate decision if present
-        next_inst = state.last_decision.get("next_instruction", "")
-        if next_inst and next_inst != node.objective:
-            parts.append(next_inst)
-
-        # Remind agent of checkpoint protocol
-        parts.append(
-            "When done, output a <checkpoint> block with status, current_node, "
-            "summary, evidence, candidate_next_actions, needs, question_for_supervisor."
-        )
-        return " ".join(parts)
+        Keep it short — the agent already knows the checkpoint protocol
+        from the Skill/AGENTS.md.  Only send the objective for the
+        current node.
+        """
+        return node.objective
