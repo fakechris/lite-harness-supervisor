@@ -10,10 +10,12 @@ from supervisor.domain.models import Checkpoint
 class TranscriptAdapter:
     CHECKPOINT_RE = re.compile(r"<checkpoint>(.*?)</checkpoint>", re.S)
 
-    def parse_checkpoint(self, text: str) -> Checkpoint | None:
+    def parse_checkpoint(self, text: str, *, run_id: str = "", surface_id: str = "") -> Checkpoint | None:
         """Parse the most recent checkpoint from terminal output.
 
         Returns a Checkpoint dataclass or None if no checkpoint found.
+        *run_id* and *surface_id* are filled in by the caller (supervisor loop)
+        to ensure identity even if the agent omitted them.
         """
         matches = self.CHECKPOINT_RE.findall(text)
         if not matches:
@@ -39,8 +41,9 @@ class TranscriptAdapter:
             status=raw.get("status", ""),
             current_node=raw.get("current_node", ""),
             summary=raw.get("summary", ""),
-            run_id=str(raw.get("run_id", "")),
+            run_id=str(raw.get("run_id", "")) or run_id,
             checkpoint_seq=self._safe_int(raw.get("checkpoint_seq", 0)),
+            surface_id=str(raw.get("surface_id", "")) or surface_id,
             evidence=raw.get("evidence", []),
             candidate_next_actions=raw.get("candidate_next_actions", []),
             needs=raw.get("needs", []),

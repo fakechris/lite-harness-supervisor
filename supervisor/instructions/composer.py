@@ -1,20 +1,19 @@
-"""Composes concise instructions for injection into the agent pane."""
+"""Composes HandoffInstruction objects for injection into the agent pane."""
 from __future__ import annotations
+
+from supervisor.domain.models import HandoffInstruction
 
 
 class InstructionComposer:
-    """Builds injection text from node + state context.
+    """Builds HandoffInstruction from node + state + decision context."""
 
-    Default: just the node objective.
-    Adds context only when meaningful (retry failures, gate guidance).
-    Never repeats the checkpoint protocol — agent knows it from Skill/AGENTS.md.
-    """
-
-    def build(self, node, state, *, verification: dict | None = None) -> str:
+    def build(self, node, state, *, triggered_by_decision_id: str = "",
+              trigger_type: str = "node_advance",
+              verification: dict | None = None) -> HandoffInstruction:
         parts = [node.objective]
 
         # Append non-generic gate guidance
-        next_inst = state.last_decision.get("next_instruction", "")
+        next_inst = state.last_decision.get("next_instruction") if isinstance(state.last_decision, dict) else getattr(state.last_decision, "next_instruction", None)
         if next_inst and next_inst != node.objective:
             generic = ["Continue with the highest-priority", "Do not ask the user"]
             if not any(p in next_inst for p in generic):
@@ -31,4 +30,12 @@ class InstructionComposer:
                 )
                 parts.append(f"Previous verification failed: {details}")
 
-        return " ".join(parts)
+        content = " ".join(parts)
+
+        return HandoffInstruction.make(
+            content=content,
+            node_id=node.id,
+            current_attempt=state.current_attempt,
+            triggered_by_decision_id=triggered_by_decision_id,
+            trigger_type=trigger_type,
+        )

@@ -1,20 +1,20 @@
 from __future__ import annotations
 from supervisor.domain.enums import DecisionType
+from supervisor.domain.models import SupervisorDecision
 from supervisor.gates.rules import classify_text, classify_checkpoint
+
 
 class ContinueGate:
     def __init__(self, judge_client):
         self.judge_client = judge_client
 
-    def decide(self, context: dict) -> dict:
+    def decide(self, context: dict, *, triggered_by_seq: int = 0) -> SupervisorDecision:
         question = context.get("last_agent_question", "")
         checkpoint = context.get("last_agent_checkpoint", {}) or {}
 
         text_hit = classify_text(question)
         cp_hit = classify_checkpoint(checkpoint)
 
-        # Prioritize escalation signals over soft confirmations.
-        # A dangerous checkpoint must not be masked by a soft text hit.
         escalation_classes = {"MISSING_EXTERNAL_INPUT", "DANGEROUS_ACTION"}
         if text_hit in escalation_classes or cp_hit in escalation_classes:
             hit = text_hit if text_hit in escalation_classes else cp_hit
@@ -22,32 +22,48 @@ class ContinueGate:
             hit = text_hit or cp_hit
 
         if hit == "SOFT_CONFIRMATION":
-            return {
-                "decision": DecisionType.CONTINUE.value,
-                "reason": "soft confirmation only",
-                "confidence": 0.95,
-                "needs_human": False,
-                "next_instruction": (
+            return SupervisorDecision.make(
+                decision=DecisionType.CONTINUE.value,
+                reason="soft confirmation only",
+                gate_type="continue",
+                confidence=0.95,
+                needs_human=False,
+                triggered_by_seq=triggered_by_seq,
+                next_instruction=(
                     "Continue with the highest-priority remaining action in the current node. "
                     "Do not ask the user for confirmation unless blocked by missing authority, "
                     "missing external input, or destructive irreversible action."
                 ),
-            }
+            )
 
         if hit == "MISSING_EXTERNAL_INPUT":
-            return {
-                "decision": DecisionType.ESCALATE_TO_HUMAN.value,
-                "reason": "missing external input",
-                "confidence": 0.98,
-                "needs_human": True,
-            }
+            return SupervisorDecision.make(
+                decision=DecisionType.ESCALATE_TO_HUMAN.value,
+                reason="missing external input",
+                gate_type="continue",
+                confidence=0.98,
+                needs_human=True,
+                triggered_by_seq=triggered_by_seq,
+            )
 
         if hit == "DANGEROUS_ACTION":
-            return {
-                "decision": DecisionType.ESCALATE_TO_HUMAN.value,
-                "reason": "dangerous irreversible action",
-                "confidence": 0.99,
-                "needs_human": True,
-            }
+            return SupervisorDecision.make(
+                decision=DecisionType.ESCALATE_TO_HUMAN.value,
+                reason="dangerous irreversible action",
+                gate_type="continue",
+                confidence=0.99,
+                needs_human=True,
+                triggered_by_seq=triggered_by_seq,
+            )
 
-        return self.judge_client.continue_or_escalate(context)
+        # LLM judge fallback — returns dict, wrap it
+        raw = self.judge_client.continue_or_escalate(context)
+        return SupervisorDecision.make(
+            decision=raw.get("decision", "continue").upper(),
+            reason=raw.get("reason", ""),
+            gate_type="continue",
+            confidence=raw.get("confidence", 0.5),
+            needs_human=raw.get("needs_human", False),
+            triggered_by_seq=triggered_by_seq,
+            next_instruction=raw.get("next_instruction"),
+        )

@@ -2,27 +2,24 @@
 from __future__ import annotations
 
 from supervisor.domain.enums import DecisionType
+from supervisor.domain.models import SupervisorDecision
 
 
 class BranchGate:
-    """Selects a branch for decision nodes.
-
-    Uses the LLM judge to pick from allowed options based on
-    the agent's checkpoint evidence. Falls back to escalation
-    if confidence is too low.
-    """
-
     def __init__(self, judge_client, confidence_threshold: float = 0.75):
         self.judge_client = judge_client
         self.confidence_threshold = confidence_threshold
 
-    def decide(self, spec, state, node) -> dict:
+    def decide(self, spec, state, node, *, triggered_by_seq: int = 0) -> SupervisorDecision:
         if not node.options:
-            return {
-                "decision": DecisionType.ESCALATE_TO_HUMAN.value,
-                "reason": "decision node has no options defined",
-                "needs_human": True,
-            }
+            return SupervisorDecision.make(
+                decision=DecisionType.ESCALATE_TO_HUMAN.value,
+                reason="decision node has no options defined",
+                gate_type="branch",
+                confidence=0.0,
+                needs_human=True,
+                triggered_by_seq=triggered_by_seq,
+            )
 
         context = {
             "spec_id": spec.id,
@@ -37,25 +34,26 @@ class BranchGate:
         selected_id = result.get("decision", "")
         confidence = result.get("confidence", 0)
 
-        # Validate the selected branch exists
         option_map = {o.id: o for o in node.options}
 
         if selected_id in option_map and confidence >= self.confidence_threshold:
             selected = option_map[selected_id]
-            return {
-                "decision": DecisionType.BRANCH.value,
-                "selected_branch": selected_id,
-                "next_node_id": selected.next,
-                "reason": result.get("reason", ""),
-                "confidence": confidence,
-                "needs_human": False,
-            }
+            return SupervisorDecision.make(
+                decision=DecisionType.BRANCH.value,
+                reason=result.get("reason", ""),
+                gate_type="branch",
+                confidence=confidence,
+                needs_human=False,
+                triggered_by_seq=triggered_by_seq,
+                selected_branch=selected_id,
+                next_node_id=selected.next,
+            )
 
-        # Low confidence or invalid selection → escalate
-        return {
-            "decision": DecisionType.ESCALATE_TO_HUMAN.value,
-            "reason": f"branch confidence too low ({confidence}) or invalid selection ({selected_id})",
-            "confidence": confidence,
-            "needs_human": True,
-            "options": [o.id for o in node.options],
-        }
+        return SupervisorDecision.make(
+            decision=DecisionType.ESCALATE_TO_HUMAN.value,
+            reason=f"branch confidence too low ({confidence}) or invalid selection ({selected_id})",
+            gate_type="branch",
+            confidence=confidence,
+            needs_human=True,
+            triggered_by_seq=triggered_by_seq,
+        )
