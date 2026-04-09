@@ -189,6 +189,7 @@ class SupervisorLoop:
         """
         adapter = TranscriptAdapter()
         pending_text = None
+        last_injected_attempt = -1
 
         # If state is READY, move to RUNNING and inject first instruction
         if state.top_state == TopState.READY:
@@ -267,17 +268,19 @@ class SupervisorLoop:
                 self.apply_verification(spec, state, verification, cwd=cwd)
                 logger.info("verification ok=%s, state=%s", verification.get("ok"), state.top_state.value)
 
-            # 6. B: event-driven injection — only inject on node change or retry
+            # 6. B: event-driven injection — only inject on node change or new retry
             if state.top_state == TopState.RUNNING:
-                should_inject = (
-                    state.current_node_id != state.last_injected_node_id
-                    or state.current_attempt > 0
+                node_changed = state.current_node_id != state.last_injected_node_id
+                new_retry = (
+                    state.current_attempt > 0
+                    and state.current_attempt != last_injected_attempt
                 )
-                if should_inject:
+                if node_changed or new_retry:
                     node = spec.get_node(state.current_node_id)
                     instruction = self.composer.build(node, state)
                     terminal.inject(instruction)
                     state.last_injected_node_id = state.current_node_id
+                    last_injected_attempt = state.current_attempt
                     self.store.append_session_event(
                         state.run_id, "injection", {"node_id": node.id, "instruction": instruction}
                     )

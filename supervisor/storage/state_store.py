@@ -39,7 +39,7 @@ class StateStore:
                 archive = self.runtime_dir / f"state.{state.run_id}.json"
                 self.state_path.rename(archive)
             else:
-                self._session_seq = state.checkpoint_seq
+                self._session_seq = self._read_last_seq()
                 return state
 
         state = SupervisorState(
@@ -85,6 +85,19 @@ class StateStore:
     def next_checkpoint_seq(self) -> int:
         self._session_seq += 1
         return self._session_seq
+
+    def _read_last_seq(self) -> int:
+        """Read the last sequence number from the session log."""
+        if not self.session_log_path.exists():
+            return 0
+        last_seq = 0
+        try:
+            for line in self.session_log_path.read_text().strip().splitlines():
+                record = json.loads(line)
+                last_seq = max(last_seq, record.get("seq", 0))
+        except (json.JSONDecodeError, OSError):
+            pass
+        return last_seq
 
     @staticmethod
     def _hash_spec(path: str) -> str:

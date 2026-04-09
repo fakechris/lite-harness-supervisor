@@ -10,6 +10,15 @@ class GitVerifier:
                 ["git", "status", "--porcelain"],
                 text=True, capture_output=True, cwd=cwd,
             )
+            if result.returncode != 0:
+                return {
+                    "type": "git",
+                    "ok": False,
+                    "check": "dirty",
+                    "reason": f"git status failed (rc={result.returncode}): {result.stderr.strip()}",
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                }
             dirty = bool(result.stdout.strip())
             expect = check.get("expect", True)
             return {

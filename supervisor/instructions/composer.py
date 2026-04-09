@@ -26,7 +26,7 @@ class InstructionComposer:
             failed = [r for r in vf.get("results", []) if not r.get("ok")]
             if failed:
                 details = "; ".join(
-                    f"{r.get('type', '?')}: {r.get('stderr', r.get('reason', ''))[:200]}"
+                    f"{r.get('type', '?')}: {(r.get('stderr') or r.get('reason') or '')[:200]}"
                     for r in failed[:3]
                 )
                 parts.append(f"Previous verification failed: {details}")

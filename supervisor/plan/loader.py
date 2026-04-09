@@ -16,6 +16,20 @@ def _parse_verify(items):
         out.append(VerifyCheck(type=item["type"], payload=payload))
     return out
 
+def _parse_options(items):
+    options = []
+    for o in items or []:
+        if not isinstance(o, dict):
+            raise SpecValidationError("branch option must be a mapping")
+        for key in ["id", "next"]:
+            if key not in o:
+                raise SpecValidationError(f"branch option missing `{key}`")
+        options.append(BranchOption(
+            id=o["id"], next=o["next"],
+            label=o.get("label"), when_hint=o.get("when_hint"),
+        ))
+    return options
+
 def _parse_nodes(items):
     nodes = []
     for item in items or []:
@@ -31,13 +45,7 @@ def _parse_nodes(items):
                 outputs=item.get("outputs", []),
                 verify=_parse_verify(item.get("verify", [])),
                 next=item.get("next"),
-                options=[
-                    BranchOption(
-                        id=o["id"], next=o["next"],
-                        label=o.get("label"), when_hint=o.get("when_hint"),
-                    )
-                    for o in item.get("options", [])
-                ],
+                options=_parse_options(item.get("options", [])),
             )
         )
     return nodes

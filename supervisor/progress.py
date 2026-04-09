@@ -24,4 +24,5 @@ def write_progress(state, spec, runtime_dir: str) -> None:
         "escalations": len(state.human_escalations),
     }
     path = Path(runtime_dir) / "progress.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(progress, ensure_ascii=False, indent=2))

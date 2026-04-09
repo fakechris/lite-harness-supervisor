@@ -40,7 +40,7 @@ class TranscriptAdapter:
             current_node=raw.get("current_node", ""),
             summary=raw.get("summary", ""),
             run_id=str(raw.get("run_id", "")),
-            checkpoint_seq=int(raw.get("checkpoint_seq", 0)),
+            checkpoint_seq=self._safe_int(raw.get("checkpoint_seq", 0)),
             evidence=raw.get("evidence", []),
             candidate_next_actions=raw.get("candidate_next_actions", []),
             needs=raw.get("needs", []),
@@ -74,6 +74,13 @@ class TranscriptAdapter:
                 if current_list:
                     result[current_list].append(line[2:].strip())
         return result
+
+    @staticmethod
+    def _safe_int(val, default: int = 0) -> int:
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return default
 
     def read_text(self, path: str) -> str:
         return Path(path).read_text(encoding="utf-8")
