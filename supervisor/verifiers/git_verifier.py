@@ -8,7 +8,7 @@ class GitVerifier:
         if mode == "dirty":
             result = subprocess.run(
                 ["git", "status", "--porcelain"],
-                text=True, capture_output=True, cwd=cwd,
+                text=True, capture_output=True, cwd=cwd, timeout=30,
             )
             if result.returncode != 0:
                 return {

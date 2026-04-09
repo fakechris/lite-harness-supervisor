@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import signal
 import time
 
 from supervisor.domain.enums import TopState, DecisionType
@@ -68,7 +69,18 @@ class SupervisorLoop:
             return self.branch_gate.decide(spec, state, node, triggered_by_seq=triggered_by_seq)
 
         cp = state.last_agent_checkpoint or {}
-        if cp.get("status") == "step_done":
+        cp_status = cp.get("status", "")
+
+        if cp_status == "blocked":
+            return SupervisorDecision.make(
+                decision=DecisionType.ESCALATE_TO_HUMAN.value,
+                reason="checkpoint says blocked",
+                gate_type="checkpoint_status",
+                confidence=1.0,
+                needs_human=True,
+                triggered_by_seq=triggered_by_seq,
+            )
+        if cp_status == "step_done":
             return SupervisorDecision.make(
                 decision=DecisionType.VERIFY_STEP.value,
                 reason="checkpoint says step_done",
@@ -76,7 +88,7 @@ class SupervisorLoop:
                 confidence=1.0,
                 triggered_by_seq=triggered_by_seq,
             )
-        if cp.get("status") == "workflow_done":
+        if cp_status == "workflow_done":
             return SupervisorDecision.make(
                 decision=DecisionType.VERIFY_STEP.value,
                 reason="checkpoint says workflow_done",
@@ -88,7 +100,14 @@ class SupervisorLoop:
 
     def verify_current_node(self, spec, state, *, cwd: str | None = None) -> dict:
         node = spec.get_node(state.current_node_id)
-        context = {"current_node_done": state.current_node_id in state.done_node_ids}
+        # Node is "done" if already in done list OR if checkpoint says step_done
+        # (the node gets added to done_node_ids after verification passes)
+        cp_status = (state.last_agent_checkpoint or {}).get("status", "")
+        node_done = (
+            state.current_node_id in state.done_node_ids
+            or cp_status in ("step_done", "workflow_done")
+        )
+        context = {"current_node_done": node_done}
         return self.verifier_suite.run(node.verify, context, cwd=cwd)
 
     def apply_decision(self, spec, state, decision: SupervisorDecision | dict):
@@ -182,6 +201,10 @@ class SupervisorLoop:
         adapter = TranscriptAdapter()
         pending_text = None
         last_injected_attempt = -1
+        node_mismatch_count = 0
+        max_node_mismatch = 5
+        interrupted = False
+
         surface_id = ""
         if hasattr(terminal, "session_id"):
             try:
@@ -189,29 +212,78 @@ class SupervisorLoop:
             except Exception:
                 pass
 
+        # #20: SIGTERM handler — save state before exit
+        def _sigterm_handler(signum, frame):
+            nonlocal interrupted
+            interrupted = True
+            logger.info("SIGTERM received, saving state and exiting")
+
+        prev_handler = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+
+        try:
+            self._run_sidecar_inner(
+                spec, state, terminal, adapter, surface_id,
+                poll_interval=poll_interval, read_lines=read_lines,
+                last_injected_attempt=last_injected_attempt,
+                node_mismatch_count=node_mismatch_count,
+                max_node_mismatch=max_node_mismatch,
+                interrupted_ref=lambda: interrupted,
+            )
+        except Exception:
+            logger.exception("sidecar loop error")
+            self.store.save(state)
+            raise
+        finally:
+            signal.signal(signal.SIGTERM, prev_handler)
+
+        return state
+
+    def _run_sidecar_inner(
+        self, spec, state, terminal, adapter, surface_id, *,
+        poll_interval, read_lines, last_injected_attempt,
+        node_mismatch_count, max_node_mismatch, interrupted_ref,
+    ):
+        pending_text = None
+
         # READY → RUNNING: inject first instruction
         if state.top_state == TopState.READY:
             state.top_state = TopState.RUNNING
             self.store.save(state)
             pending_text = terminal.read(lines=read_lines)
-            if not adapter.parse_checkpoint(pending_text, run_id=state.run_id, surface_id=surface_id):
+            cp = adapter.parse_checkpoint(pending_text, run_id=state.run_id, surface_id=surface_id)
+            # #2: validate run_id on startup to avoid stale pane content
+            if cp and cp.run_id and cp.run_id != state.run_id:
+                cp = None  # stale checkpoint from previous run
+            if not cp:
                 node = spec.get_node(state.current_node_id)
                 instruction = self.composer.build(
                     node, state,
                     triggered_by_decision_id="",
                     trigger_type="init",
                 )
-                terminal.inject(instruction.content)
+                # #11: save state BEFORE inject to avoid replay on crash
                 state.last_injected_node_id = state.current_node_id
                 last_injected_attempt = 0
+                self.store.save(state)
+                terminal.inject(instruction.content)
                 self.store.append_session_event(
                     state.run_id, "injection", instruction.to_dict()
                 )
                 pending_text = None
 
         while not self.is_final(state) and state.top_state != TopState.PAUSED_FOR_HUMAN:
+            if interrupted_ref():
+                self.store.save(state)
+                return
+
             # 1. Read pane
-            text = pending_text if pending_text is not None else terminal.read(lines=read_lines)
+            try:
+                text = pending_text if pending_text is not None else terminal.read(lines=read_lines)
+            except Exception as e:
+                logger.warning("terminal read failed: %s", e)
+                time.sleep(poll_interval)
+                continue
             pending_text = None
 
             # 2. Parse checkpoint with identity
@@ -220,11 +292,19 @@ class SupervisorLoop:
                 time.sleep(poll_interval)
                 continue
 
-            # Seq-based dedup
-            if checkpoint.checkpoint_seq > 0 and checkpoint.checkpoint_seq <= state.checkpoint_seq:
+            # #2: reject checkpoints from wrong run
+            if checkpoint.run_id and checkpoint.run_id != state.run_id:
                 time.sleep(poll_interval)
                 continue
-            # Content-based dedup (ignore auto-generated checkpoint_id/timestamp)
+
+            # #7: seq-based dedup with reset tolerance
+            if checkpoint.checkpoint_seq > 0:
+                if checkpoint.checkpoint_seq <= state.checkpoint_seq:
+                    # Allow seq reset if gap is large (agent restarted)
+                    if state.checkpoint_seq - checkpoint.checkpoint_seq < 100:
+                        time.sleep(poll_interval)
+                        continue
+            # Content-based dedup
             last_cp = state.last_agent_checkpoint
             if (last_cp
                     and checkpoint.status == last_cp.get("status")
@@ -234,15 +314,29 @@ class SupervisorLoop:
                 time.sleep(poll_interval)
                 continue
 
-            # Node mismatch detection
+            # #5: node mismatch — escalate after N consecutive
             if checkpoint.current_node != state.current_node_id:
-                logger.warning("checkpoint node mismatch: cp=%s state=%s", checkpoint.current_node, state.current_node_id)
+                node_mismatch_count += 1
+                logger.warning("checkpoint node mismatch (%d/%d): cp=%s state=%s",
+                               node_mismatch_count, max_node_mismatch,
+                               checkpoint.current_node, state.current_node_id)
                 self.store.append_session_event(
                     state.run_id, "checkpoint_mismatch",
-                    {"checkpoint_node": checkpoint.current_node, "state_node": state.current_node_id},
+                    {"checkpoint_node": checkpoint.current_node, "state_node": state.current_node_id,
+                     "count": node_mismatch_count},
                 )
+                if node_mismatch_count >= max_node_mismatch:
+                    state.top_state = TopState.PAUSED_FOR_HUMAN
+                    state.human_escalations.append({
+                        "reason": f"node mismatch persisted for {node_mismatch_count} checkpoints",
+                        "checkpoint_node": checkpoint.current_node,
+                        "state_node": state.current_node_id,
+                    })
+                    self.store.save(state)
+                    return
                 time.sleep(poll_interval)
                 continue
+            node_mismatch_count = 0  # reset on match
 
             if checkpoint.checkpoint_seq > 0:
                 state.checkpoint_seq = checkpoint.checkpoint_seq
@@ -255,7 +349,7 @@ class SupervisorLoop:
             self.store.append_session_event(state.run_id, "checkpoint", cp_dict)
             self.handle_event(state, event)
 
-            # 4. Gate → SupervisorDecision (with causality)
+            # 4. Gate → SupervisorDecision
             decision: SupervisorDecision | None = None
             if state.top_state == TopState.GATING:
                 decision = self.gate(spec, state, triggered_by_seq=checkpoint.checkpoint_seq)
@@ -267,13 +361,17 @@ class SupervisorLoop:
             # 5. Verify
             if state.top_state == TopState.VERIFYING:
                 cwd = self._get_cwd(terminal)
-                verification = self.verify_current_node(spec, state, cwd=cwd)
+                try:
+                    verification = self.verify_current_node(spec, state, cwd=cwd)
+                except Exception as e:
+                    logger.error("verification error: %s", e)
+                    verification = {"ok": False, "results": [{"type": "error", "ok": False, "reason": str(e)}]}
                 self.store.append_event({"type": "verification_finished", "payload": verification})
                 self.store.append_session_event(state.run_id, "verification", verification)
                 self.apply_verification(spec, state, verification, cwd=cwd)
                 logger.info("verification ok=%s, state=%s", verification.get("ok"), state.top_state.value)
 
-            # 6. Inject → HandoffInstruction (with causality)
+            # 6. Inject — #11: save BEFORE inject
             if state.top_state == TopState.RUNNING:
                 node_changed = state.current_node_id != state.last_injected_node_id
                 new_retry = state.current_attempt > 0 and state.current_attempt != last_injected_attempt
@@ -286,18 +384,19 @@ class SupervisorLoop:
                         triggered_by_decision_id=decision_id,
                         trigger_type=trigger,
                     )
-                    terminal.inject(instruction.content)
+                    # Save state BEFORE inject to prevent replay on crash
                     state.last_injected_node_id = state.current_node_id
                     last_injected_attempt = state.current_attempt
+                    self.store.save(state)
+                    terminal.inject(instruction.content)
                     self.store.append_session_event(
                         state.run_id, "injection", instruction.to_dict()
                     )
                     logger.info("injected: %s (id=%s, trigger=%s)", node.id, instruction.instruction_id, trigger)
+                    continue  # skip double save
 
             # 7. Persist
             self.store.save(state)
-
-        return state
 
     def _get_cwd(self, terminal) -> str | None:
         if hasattr(terminal, "current_cwd"):

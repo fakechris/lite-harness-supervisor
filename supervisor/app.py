@@ -37,6 +37,8 @@ def cmd_init(args):
     base.mkdir(parents=True, exist_ok=True)
     Path(RUNTIME_DIR).mkdir(parents=True, exist_ok=True)
     Path(SPECS_DIR).mkdir(parents=True, exist_ok=True)
+    Path(f"{SUPERVISOR_DIR}/clarify").mkdir(parents=True, exist_ok=True)
+    Path(f"{SUPERVISOR_DIR}/plans").mkdir(parents=True, exist_ok=True)
 
     config = RuntimeConfig()
     Path(CONFIG_FILE).write_text(config.default_config_yaml(), encoding="utf-8")
@@ -89,7 +91,12 @@ def cmd_run(args):
         config.pane_target = args.pane
 
     store = StateStore(config.runtime_dir)
-    state = store.load_or_init(spec)
+    state = store.load_or_init(
+        spec,
+        spec_path=args.spec_path,
+        pane_target=config.pane_target,
+        workspace_root=os.getcwd(),
+    )
     loop = SupervisorLoop(
         store,
         judge_model=config.judge_model,

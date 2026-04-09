@@ -15,7 +15,7 @@ class ContinueGate:
         text_hit = classify_text(question)
         cp_hit = classify_checkpoint(checkpoint)
 
-        escalation_classes = {"MISSING_EXTERNAL_INPUT", "DANGEROUS_ACTION"}
+        escalation_classes = {"MISSING_EXTERNAL_INPUT", "DANGEROUS_ACTION", "BLOCKED"}
         if text_hit in escalation_classes or cp_hit in escalation_classes:
             hit = text_hit if text_hit in escalation_classes else cp_hit
         else:
@@ -52,6 +52,16 @@ class ContinueGate:
                 reason="dangerous irreversible action",
                 gate_type="continue",
                 confidence=0.99,
+                needs_human=True,
+                triggered_by_seq=triggered_by_seq,
+            )
+
+        if hit == "BLOCKED":
+            return SupervisorDecision.make(
+                decision=DecisionType.ESCALATE_TO_HUMAN.value,
+                reason="agent reported blocked",
+                gate_type="continue",
+                confidence=0.95,
                 needs_human=True,
                 triggered_by_seq=triggered_by_seq,
             )
