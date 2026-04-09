@@ -207,10 +207,33 @@ class SupervisorLoop:
         return state
 
     def _build_instruction(self, node, state) -> str:
-        """Compose a concise instruction to inject into the agent pane.
+        """Compose instruction to inject into the agent pane.
 
-        Keep it short — the agent already knows the checkpoint protocol
-        from the Skill/AGENTS.md.  Only send the objective for the
-        current node.
+        Always starts with the node objective.  Appends context only
+        when the gate decision includes a meaningful next_instruction
+        (e.g. retry guidance, verification failure details).
+        Does NOT repeat the checkpoint protocol — the agent knows it
+        from Skill/AGENTS.md.
         """
-        return node.objective
+        parts = [node.objective]
+
+        # Append gate context only if it adds real information
+        next_inst = state.last_decision.get("next_instruction", "")
+        if next_inst and next_inst != node.objective:
+            # Skip generic "continue" boilerplate
+            generic_phrases = ["Continue with the highest-priority", "Do not ask the user"]
+            if not any(p in next_inst for p in generic_phrases):
+                parts.append(next_inst)
+
+        # Append verification failure details on retry
+        verification = state.verification or {}
+        if state.current_attempt > 0 and not verification.get("ok", True):
+            failed = [r for r in verification.get("results", []) if not r.get("ok")]
+            if failed:
+                details = "; ".join(
+                    f"{r.get('type', '?')}: {r.get('stderr', r.get('reason', ''))[:200]}"
+                    for r in failed[:3]
+                )
+                parts.append(f"Previous verification failed: {details}")
+
+        return " ".join(parts)
