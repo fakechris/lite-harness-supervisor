@@ -19,7 +19,7 @@ def test_branch_gate_selects_option(tmp_path):
 
     decision = loop.gate(spec, state)
     # Stub judge returns escalate_to_human for branches (low confidence)
-    assert decision["decision"] in ("BRANCH", "ESCALATE_TO_HUMAN")
+    assert decision.decision in ("BRANCH", "ESCALATE_TO_HUMAN")
 
 
 def test_apply_branch_decision(tmp_path):
@@ -29,14 +29,16 @@ def test_apply_branch_decision(tmp_path):
     state = store.load_or_init(spec)
     loop = SupervisorLoop(store)
 
+    from supervisor.domain.models import SupervisorDecision
     state.current_node_id = "applicability_gate"
-    decision = {
-        "decision": "BRANCH",
-        "selected_branch": "applicable",
-        "next_node_id": "run_clarify",
-        "reason": "test",
-        "confidence": 0.9,
-    }
+    decision = SupervisorDecision.make(
+        decision="BRANCH",
+        reason="test",
+        gate_type="branch",
+        confidence=0.9,
+        selected_branch="applicable",
+        next_node_id="run_clarify",
+    )
     loop.apply_decision(spec, state, decision)
 
     assert state.current_node_id == "run_clarify"

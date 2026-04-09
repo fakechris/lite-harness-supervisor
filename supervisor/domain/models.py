@@ -1,5 +1,7 @@
 from __future__ import annotations
+import uuid
 from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
 from typing import Any
 
 from .enums import TopState, NodeStatus
@@ -24,10 +26,19 @@ class Checkpoint:
     summary: str
     run_id: str = ""
     checkpoint_seq: int = 0
+    checkpoint_id: str = ""
+    timestamp: str = ""
+    surface_id: str = ""
     evidence: list[str] = field(default_factory=list)
     candidate_next_actions: list[str] = field(default_factory=list)
     needs: list[str] = field(default_factory=list)
     question_for_supervisor: list[str] = field(default_factory=list)
+
+    def __post_init__(self):
+        if not self.checkpoint_id:
+            self.checkpoint_id = f"cp_{uuid.uuid4().hex[:12]}"
+        if not self.timestamp:
+            self.timestamp = datetime.now(timezone.utc).isoformat()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -97,6 +108,69 @@ class RetryBudget:
     per_node: int = 3
     global_limit: int = 12
     used_global: int = 0
+
+@dataclass
+class SupervisorDecision:
+    """First-class gate decision object."""
+    decision_id: str
+    decision: str              # DecisionType value (uppercase)
+    reason: str
+    confidence: float
+    needs_human: bool
+    timestamp: str
+    gate_type: str             # "continue" | "branch" | "finish" | "checkpoint_status"
+    triggered_by_seq: int = 0
+    next_instruction: str | None = None
+    selected_branch: str | None = None
+    next_node_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def make(cls, *, decision: str, reason: str, gate_type: str,
+             confidence: float = 0.5, needs_human: bool = False,
+             triggered_by_seq: int = 0, **kwargs) -> "SupervisorDecision":
+        return cls(
+            decision_id=f"dec_{uuid.uuid4().hex[:12]}",
+            decision=decision,
+            reason=reason,
+            confidence=confidence,
+            needs_human=needs_human,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            gate_type=gate_type,
+            triggered_by_seq=triggered_by_seq,
+            **kwargs,
+        )
+
+
+@dataclass
+class HandoffInstruction:
+    """First-class instruction sent to the agent."""
+    instruction_id: str
+    timestamp: str
+    content: str
+    node_id: str
+    current_attempt: int
+    triggered_by_decision_id: str
+    trigger_type: str          # "init" | "node_advance" | "retry" | "branch"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def make(cls, *, content: str, node_id: str, current_attempt: int,
+             triggered_by_decision_id: str, trigger_type: str) -> "HandoffInstruction":
+        return cls(
+            instruction_id=f"ins_{uuid.uuid4().hex[:12]}",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            content=content,
+            node_id=node_id,
+            current_attempt=current_attempt,
+            triggered_by_decision_id=triggered_by_decision_id,
+            trigger_type=trigger_type,
+        )
+
 
 @dataclass
 class SupervisorState:

@@ -25,7 +25,7 @@ def test_integration_gate_and_verify(tmp_path):
 
     loop.handle_event(state, event)
     decision = loop.gate(spec, state)
-    assert decision["decision"] == "VERIFY_STEP"
+    assert decision.decision == "VERIFY_STEP"
     loop.apply_decision(spec, state, decision)
     verification = loop.verify_current_node(spec, state)
     loop.apply_verification(spec, state, verification)
