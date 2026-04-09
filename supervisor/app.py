@@ -6,7 +6,9 @@ import json
 import logging
 import os
 import shutil
+import signal
 import sys
+import time as _time
 from pathlib import Path
 
 from supervisor.plan.loader import load_spec
@@ -23,7 +25,7 @@ SPECS_DIR = ".supervisor/specs"
 
 
 # ------------------------------------------------------------------
-# Subcommands
+# init / deinit
 # ------------------------------------------------------------------
 
 
@@ -43,7 +45,6 @@ def cmd_init(args):
     config = RuntimeConfig()
     Path(CONFIG_FILE).write_text(config.default_config_yaml(), encoding="utf-8")
 
-    # Add runtime to .gitignore if present
     gitignore = Path(".gitignore")
     if gitignore.exists():
         content = gitignore.read_text()
@@ -52,9 +53,6 @@ def cmd_init(args):
                 f.write(f"\n{RUNTIME_DIR}/\n")
 
     print(f"Initialized {SUPERVISOR_DIR}/")
-    print(f"  config:  {CONFIG_FILE}")
-    print(f"  runtime: {RUNTIME_DIR}/")
-    print(f"  specs:   {SPECS_DIR}/")
     return 0
 
 
@@ -66,37 +64,190 @@ def cmd_deinit(args):
         return 1
 
     if not args.force:
-        state_file = Path(RUNTIME_DIR) / "state.json"
-        if state_file.exists():
-            try:
-                state = json.loads(state_file.read_text())
-                if state.get("top_state") not in ("COMPLETED", "FAILED", "ABORTED"):
-                    print(f"Active run detected (state={state.get('top_state')}). Use --force to remove anyway.")
-                    return 1
-            except json.JSONDecodeError:
-                print("Warning: state.json is corrupt. Use --force to remove anyway.")
-                return 1
+        # Check for active daemon
+        from supervisor.daemon.client import DaemonClient
+        client = DaemonClient()
+        if client.is_running():
+            print("Daemon is running. Use 'thin-supervisor daemon stop' first, or --force.")
+            return 1
 
     shutil.rmtree(base)
     print(f"Removed {SUPERVISOR_DIR}/")
     return 0
 
 
-def cmd_run(args):
-    """Start the supervisor sidecar loop."""
-    spec = load_spec(args.spec_path)
+# ------------------------------------------------------------------
+# daemon start / stop
+# ------------------------------------------------------------------
+
+
+def cmd_daemon_start(args):
+    """Start the supervisor daemon (single process, multi-run)."""
+    from supervisor.daemon.server import DaemonServer, PID_PATH
+    from supervisor.daemon.client import DaemonClient
+
+    client = DaemonClient()
+    if client.is_running():
+        pid = client.daemon_pid()
+        print(f"Daemon already running (PID {pid}).")
+        return 1
+
     config = RuntimeConfig.load(args.config or CONFIG_FILE)
 
-    if args.pane:
-        config.pane_target = args.pane
+    # Fork to background
+    pid = os.fork()
+    if pid > 0:
+        print(f"Daemon started (PID {pid})")
+        return 0
 
-    store = StateStore(config.runtime_dir)
+    # Child — detach
+    os.setsid()
+    devnull = os.open(os.devnull, os.O_RDWR)
+    os.dup2(devnull, 0)
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
+    os.close(devnull)
+
+    log_path = Path(RUNTIME_DIR) / "daemon.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        filename=str(log_path), level=logging.INFO, force=True,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
+
+    server = DaemonServer(config)
+    server.start()
+    sys.exit(0)
+
+
+def cmd_daemon_stop(args):
+    """Stop the supervisor daemon."""
+    from supervisor.daemon.client import DaemonClient, PID_PATH
+
+    client = DaemonClient()
+    pid = client.daemon_pid()
+    if not pid:
+        print("No daemon PID file found.")
+        return 1
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        print(f"Sent SIGTERM to daemon (PID {pid})")
+        exited = False
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+                _time.sleep(0.1)
+            except ProcessLookupError:
+                exited = True
+                break
+        if exited:
+            Path(PID_PATH).unlink(missing_ok=True)
+            print("Daemon stopped.")
+        else:
+            print(f"Warning: PID {pid} did not exit within 5s.")
+            return 1
+    except ProcessLookupError:
+        print(f"Process {pid} not found (already stopped?).")
+        Path(PID_PATH).unlink(missing_ok=True)
+    except PermissionError:
+        print(f"Error: no permission to signal PID {pid}.")
+        return 1
+    return 0
+
+
+# ------------------------------------------------------------------
+# run register / foreground / stop
+# ------------------------------------------------------------------
+
+
+def cmd_run_register(args):
+    """Register a new run with the daemon."""
+    from supervisor.daemon.client import DaemonClient
+
+    client = DaemonClient()
+
+    # Auto-start daemon if not running
+    if not client.is_running():
+        print("Daemon not running. Starting...")
+        # Start daemon in background
+        config = RuntimeConfig.load(args.config or CONFIG_FILE)
+        pid = os.fork()
+        if pid == 0:
+            os.setsid()
+            devnull = os.open(os.devnull, os.O_RDWR)
+            os.dup2(devnull, 0)
+            os.dup2(devnull, 1)
+            os.dup2(devnull, 2)
+            os.close(devnull)
+            log_path = Path(RUNTIME_DIR) / "daemon.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            logging.basicConfig(
+                filename=str(log_path), level=logging.INFO, force=True,
+                format="%(asctime)s %(name)s %(levelname)s %(message)s",
+            )
+            from supervisor.daemon.server import DaemonServer
+            server = DaemonServer(config)
+            server.start()
+            sys.exit(0)
+        else:
+            # Wait for daemon to be ready
+            for _ in range(30):
+                _time.sleep(0.2)
+                if client.is_running():
+                    break
+            else:
+                print("Error: daemon did not start within 6s.")
+                return 1
+
+    spec_path = os.path.abspath(args.spec)
+    pane_target = args.pane
+
+    if not pane_target:
+        print("Error: --pane <target> is required.")
+        return 1
+
+    result = client.register(spec_path, pane_target)
+    if result.get("ok"):
+        print(f"Run registered: {result['run_id']}")
+        print(f"  spec: {spec_path}")
+        print(f"  pane: {pane_target}")
+    else:
+        print(f"Error: {result.get('error', 'unknown')}")
+        return 1
+    return 0
+
+
+def cmd_run_foreground(args):
+    """Run a single sidecar in foreground (no daemon needed)."""
+    spec = load_spec(args.spec)
+    config = RuntimeConfig.load(args.config or CONFIG_FILE)
+
+    pane_target = args.pane
+    if not pane_target:
+        print("Error: --pane <target> is required.")
+        return 1
+
+    # Per-run isolated directory
+    import uuid
+    run_id = f"run_{uuid.uuid4().hex[:12]}"
+    run_dir = str(Path(RUNTIME_DIR) / "runs" / run_id)
+    store = StateStore(run_dir)
     state = store.load_or_init(
         spec,
-        spec_path=args.spec_path,
-        pane_target=config.pane_target,
+        spec_path=os.path.abspath(args.spec),
+        pane_target=pane_target,
         workspace_root=os.getcwd(),
     )
+
+    from supervisor.terminal.adapter import TerminalAdapter
+    terminal = TerminalAdapter(pane_target)
+
+    diag = terminal.doctor()
+    if not diag["ok"]:
+        print(f"tmux issues: {diag['issues']}")
+        return 1
+
     loop = SupervisorLoop(
         store,
         judge_model=config.judge_model,
@@ -104,55 +255,7 @@ def cmd_run(args):
         judge_max_tokens=config.judge_max_tokens,
     )
 
-    # --event-file mode: process a single event (for testing / offline use)
-    if args.event_file:
-        return _run_event_file(args.event_file, spec, state, store, loop)
-
-    # --dry-run: just show initial state
-    if args.dry_run:
-        print(json.dumps(state.to_dict(), ensure_ascii=False, indent=2))
-        return 0
-
-    # Live sidecar mode: requires a pane target
-    if not config.pane_target:
-        print("Error: --pane <target> is required for live sidecar mode.")
-        print("  Example: thin-supervisor run plan.yaml --pane codex")
-        print("  Use --dry-run to see initial state without connecting to a pane.")
-        return 1
-
-    from supervisor.terminal.adapter import TerminalAdapter
-    terminal = TerminalAdapter(config.pane_target)
-
-    # Verify tmux connectivity
-    diag = terminal.doctor()
-    if not diag["ok"]:
-        print(f"tmux issues: {diag['issues']}")
-        return 1
-
-    print(f"Sidecar started: watching pane '{config.pane_target}' for spec '{spec.id}'")
-    print(f"  poll interval: {config.poll_interval_sec}s")
-    print(f"  state: {config.runtime_dir}/state.json")
-
-    # Check for existing daemon
-    pid_path = Path(PID_FILE)
-    if pid_path.exists():
-        try:
-            existing_pid = int(pid_path.read_text().strip())
-            os.kill(existing_pid, 0)  # check if alive
-            print(f"Error: supervisor daemon already running (PID {existing_pid}).")
-            print("  Use 'thin-supervisor stop' first.")
-            return 1
-        except (ProcessLookupError, PermissionError, ValueError):
-            pid_path.unlink(missing_ok=True)  # stale or inaccessible PID
-
-    if args.daemon:
-        _daemonize()
-        # Child continues here — redirect logging to file
-        log_path = Path(config.runtime_dir) / "supervisor.log"
-        logging.basicConfig(
-            filename=str(log_path), level=logging.INFO, force=True,
-            format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        )
+    print(f"Foreground sidecar: run={run_id} pane={pane_target} spec={spec.id}")
 
     try:
         final_state = loop.run_sidecar(
@@ -160,81 +263,94 @@ def cmd_run(args):
             poll_interval=config.poll_interval_sec,
             read_lines=config.read_lines,
         )
-        if not args.daemon:
-            print(f"\nRun finished: {final_state.top_state.value}")
-            print(json.dumps(final_state.to_dict(), ensure_ascii=False, indent=2))
+        print(f"\nRun finished: {final_state.top_state.value}")
     except KeyboardInterrupt:
         store.save(state)
-        if not args.daemon:
-            print(f"\nInterrupted. State saved. Resume with: thin-supervisor run {args.spec_path} --pane {config.pane_target}")
-    finally:
-        if args.daemon:
-            pid_path.unlink(missing_ok=True)
+        print("\nInterrupted. State saved.")
 
     return 0
+
+
+def cmd_run_stop(args):
+    """Stop a specific run."""
+    from supervisor.daemon.client import DaemonClient
+
+    client = DaemonClient()
+    if not client.is_running():
+        print("Daemon not running.")
+        return 1
+
+    result = client.stop_run(args.run_id)
+    if result.get("ok"):
+        print(f"Run {args.run_id} stopped.")
+    else:
+        print(f"Error: {result.get('error', 'unknown')}")
+        return 1
+    return 0
+
+
+# ------------------------------------------------------------------
+# status
+# ------------------------------------------------------------------
 
 
 def cmd_status(args):
-    """Print current run state."""
-    config = RuntimeConfig.load(args.config or CONFIG_FILE)
-    state_path = Path(config.runtime_dir) / "state.json"
-    if not state_path.exists():
-        print("No active run found.")
+    """Show all run states."""
+    from supervisor.daemon.client import DaemonClient
+
+    # Try daemon first
+    client = DaemonClient()
+    if client.is_running():
+        result = client.status()
+        if result.get("ok"):
+            runs = result.get("runs", [])
+            if not runs:
+                print("Daemon running, no active runs.")
+                return 0
+            print(f"{'RUN_ID':<20} {'PANE':<20} {'STATE':<18} {'NODE'}")
+            for r in runs:
+                print(f"{r['run_id']:<20} {r['pane_target']:<20} {r['top_state']:<18} {r.get('current_node', '')}")
+            return 0
+
+    # Fallback: scan run directories
+    runs_dir = Path(RUNTIME_DIR) / "runs"
+    if not runs_dir.exists():
+        # Legacy: check old-style state.json
+        state_path = Path(RUNTIME_DIR) / "state.json"
+        if state_path.exists():
+            try:
+                state = json.loads(state_path.read_text())
+                print(f"Run:   {state.get('run_id', '?')}")
+                print(f"State: {state.get('top_state', '?')}")
+                print(f"Node:  {state.get('current_node_id', '?')}")
+                return 0
+            except json.JSONDecodeError:
+                print("Error: state.json is corrupt.")
+                return 1
+        print("No runs found. Daemon not running.")
         return 1
 
-    try:
-        state = json.loads(state_path.read_text())
-    except json.JSONDecodeError:
-        print("Error: state.json is corrupt.")
+    found = False
+    for run_dir in sorted(runs_dir.iterdir()):
+        state_path = run_dir / "state.json"
+        if state_path.exists():
+            try:
+                state = json.loads(state_path.read_text())
+                if not found:
+                    print(f"{'RUN_ID':<20} {'PANE':<20} {'STATE':<18} {'NODE'}")
+                    found = True
+                print(f"{state.get('run_id', '?'):<20} {state.get('pane_target', '?'):<20} {state.get('top_state', '?'):<18} {state.get('current_node_id', '')}")
+            except json.JSONDecodeError:
+                continue
+
+    if not found:
+        print("No runs found.")
         return 1
-    print(f"Run:     {state.get('run_id', '?')}")
-    print(f"Spec:    {state.get('spec_id', '?')}")
-    print(f"State:   {state.get('top_state', '?')}")
-    print(f"Node:    {state.get('current_node_id', '?')}")
-    print(f"Attempt: {state.get('current_attempt', 0)}")
-    done = state.get("done_node_ids", [])
-    print(f"Done:    {', '.join(done) if done else '(none)'}")
-    esc = state.get("human_escalations", [])
-    if esc:
-        print(f"Escalations: {len(esc)}")
-        for e in esc[-3:]:
-            print(f"  - {e.get('reason', '?')}")
     return 0
 
 
 # ------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------
-
-
-def _run_event_file(event_file: str, spec, state, store, loop):
-    """Process a single event from a JSON file (testing / offline mode)."""
-    event = json.loads(Path(event_file).read_text())
-    if event.get("type") == "agent_output" and "text" in event.get("payload", {}):
-        adapter = TranscriptAdapter()
-        cp = adapter.parse_checkpoint(event["payload"]["text"])
-        event["payload"]["checkpoint"] = cp.to_dict() if cp else {}
-    store.append_event(event)
-    loop.handle_event(state, event)
-
-    from supervisor.domain.enums import TopState as TS
-    if state.top_state == TS.GATING:
-        decision = loop.gate(spec, state)
-        store.append_decision(decision)
-        loop.apply_decision(spec, state, decision)
-
-    if state.top_state == TS.VERIFYING:
-        verification = loop.verify_current_node(spec, state)
-        store.append_event({"type": "verification_finished", "payload": verification})
-        loop.apply_verification(spec, state, verification)
-
-    store.save(state)
-    print(json.dumps(state.to_dict(), ensure_ascii=False, indent=2))
-    return 0
-
-
-# ------------------------------------------------------------------
-# Bridge subcommand — tmux pane operations
+# bridge (unchanged)
 # ------------------------------------------------------------------
 
 
@@ -276,7 +392,6 @@ def cmd_bridge(args):
             print(f"{p.pane_id:<8} {p.session_window:<15} {p.size:<12} {p.process:<12} {p.label or '-':<12} {p.cwd}")
         return 0
 
-    # Commands that need a target
     if not args.target:
         print("error: target pane required (label or %id)", file=sys.stderr)
         return 1
@@ -301,13 +416,13 @@ def cmd_bridge(args):
             if not args.extra:
                 print("error: text argument required", file=sys.stderr)
                 return 1
-            adapter.read()  # satisfy guard
+            adapter.read()
             adapter.type_text(" ".join(args.extra))
         elif action == "keys":
             if not args.extra:
                 print("error: key argument(s) required", file=sys.stderr)
                 return 1
-            adapter.read()  # satisfy guard
+            adapter.read()
             adapter.send_keys(*args.extra)
         elif action == "name":
             if not args.extra:
@@ -325,72 +440,63 @@ def cmd_bridge(args):
 
 
 # ------------------------------------------------------------------
-# Daemon helpers
+# Legacy compat: thin-supervisor run <spec> --pane <p> [--daemon]
 # ------------------------------------------------------------------
 
-PID_FILE = ".supervisor/runtime/supervisor.pid"
+
+def cmd_run_legacy(args):
+    """Backward-compatible run command."""
+    if args.event_file:
+        spec = load_spec(args.spec_path)
+        config = RuntimeConfig.load(args.config or CONFIG_FILE)
+        store = StateStore(config.runtime_dir)
+        state = store.load_or_init(spec, spec_path=args.spec_path)
+        loop = SupervisorLoop(store)
+        return _run_event_file(args.event_file, spec, state, store, loop)
+
+    if args.dry_run:
+        spec = load_spec(args.spec_path)
+        config = RuntimeConfig.load(args.config or CONFIG_FILE)
+        store = StateStore(config.runtime_dir)
+        state = store.load_or_init(spec, spec_path=args.spec_path)
+        print(json.dumps(state.to_dict(), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.daemon:
+        # Map to: run register
+        class FakeArgs:
+            spec = args.spec_path
+            pane = args.pane
+            config = args.config
+        return cmd_run_register(FakeArgs())
+    else:
+        # Map to: run foreground
+        class FakeArgs:
+            spec = args.spec_path
+            pane = args.pane
+            config = args.config
+        return cmd_run_foreground(FakeArgs())
 
 
-def _daemonize():
-    """Fork to background, write PID file."""
-    pid = os.fork()
-    if pid > 0:
-        # Parent — print PID and exit
-        print(f"Supervisor daemon started (PID {pid})")
-        Path(PID_FILE).parent.mkdir(parents=True, exist_ok=True)
-        Path(PID_FILE).write_text(str(pid))
-        sys.exit(0)
-    # Child — detach
-    os.setsid()
-    # Redirect stdio to /dev/null
-    devnull = os.open(os.devnull, os.O_RDWR)
-    os.dup2(devnull, 0)
-    os.dup2(devnull, 1)
-    os.dup2(devnull, 2)
-    os.close(devnull)
-
-
-def cmd_stop(args):
-    """Stop the supervisor daemon."""
-    import signal
-    import time as _time
-
-    pid_path = Path(PID_FILE)
-    if not pid_path.exists():
-        print("No daemon PID file found.")
-        return 1
-
-    try:
-        pid = int(pid_path.read_text().strip())
-    except (ValueError, OSError):
-        print("Error: PID file is corrupt.")
-        pid_path.unlink(missing_ok=True)
-        return 1
-
-    try:
-        os.kill(pid, signal.SIGTERM)
-        print(f"Sent SIGTERM to PID {pid}")
-        # Wait for process to exit (up to 5s)
-        exited = False
-        for _ in range(50):
-            try:
-                os.kill(pid, 0)
-                _time.sleep(0.1)
-            except ProcessLookupError:
-                exited = True
-                break
-        if exited:
-            pid_path.unlink(missing_ok=True)
-            print("Daemon stopped.")
-        else:
-            print(f"Warning: PID {pid} did not exit within 5s. PID file retained.")
-            return 1
-    except ProcessLookupError:
-        print(f"Process {pid} not found (already stopped?).")
-        pid_path.unlink(missing_ok=True)
-    except PermissionError:
-        print(f"Error: no permission to signal PID {pid}.")
-        return 1
+def _run_event_file(event_file, spec, state, store, loop):
+    event = json.loads(Path(event_file).read_text())
+    if event.get("type") == "agent_output" and "text" in event.get("payload", {}):
+        adapter = TranscriptAdapter()
+        cp = adapter.parse_checkpoint(event["payload"]["text"])
+        event["payload"]["checkpoint"] = cp.to_dict() if cp else {}
+    store.append_event(event)
+    loop.handle_event(state, event)
+    from supervisor.domain.enums import TopState as TS
+    if state.top_state == TS.GATING:
+        decision = loop.gate(spec, state)
+        store.append_decision(decision.to_dict())
+        loop.apply_decision(spec, state, decision)
+    if state.top_state == TS.VERIFYING:
+        verification = loop.verify_current_node(spec, state)
+        store.append_event({"type": "verification_finished", "payload": verification})
+        loop.apply_verification(spec, state, verification)
+    store.save(state)
+    print(json.dumps(state.to_dict(), ensure_ascii=False, indent=2))
     return 0
 
 
@@ -414,28 +520,50 @@ def main():
     p_deinit = sub.add_parser("deinit", help="Remove .supervisor/ directory")
     p_deinit.add_argument("--force", action="store_true")
 
-    # run
-    p_run = sub.add_parser("run", help="Start supervisor sidecar loop")
-    p_run.add_argument("spec_path", help="Path to spec YAML file")
-    p_run.add_argument("--pane", default=None, help="tmux pane target (label or %%id)")
-    p_run.add_argument("--config", default=None, help="Path to config YAML")
-    p_run.add_argument("--event-file", default=None, help="Process a single JSON event (testing)")
-    p_run.add_argument("--dry-run", action="store_true", help="Show initial state without starting loop")
-    p_run.add_argument("--daemon", "-d", action="store_true", help="Run as background daemon")
+    # daemon
+    p_daemon = sub.add_parser("daemon", help="Manage the supervisor daemon")
+    daemon_sub = p_daemon.add_subparsers(dest="daemon_action")
+    p_daemon_start = daemon_sub.add_parser("start", help="Start daemon")
+    p_daemon_start.add_argument("--config", default=None)
+    daemon_sub.add_parser("stop", help="Stop daemon")
 
-    # stop
-    sub.add_parser("stop", help="Stop the supervisor daemon")
+    # run (with subcommands)
+    p_run = sub.add_parser("run", help="Manage supervisor runs")
+    run_sub = p_run.add_subparsers(dest="run_action")
+
+    p_register = run_sub.add_parser("register", help="Register a new run with the daemon")
+    p_register.add_argument("--spec", required=True, help="Path to spec YAML")
+    p_register.add_argument("--pane", required=True, help="tmux pane target")
+    p_register.add_argument("--config", default=None)
+
+    p_foreground = run_sub.add_parser("foreground", help="Run sidecar in foreground")
+    p_foreground.add_argument("--spec", required=True, help="Path to spec YAML")
+    p_foreground.add_argument("--pane", required=True, help="tmux pane target")
+    p_foreground.add_argument("--config", default=None)
+
+    p_run_stop = run_sub.add_parser("stop", help="Stop a specific run")
+    p_run_stop.add_argument("run_id", help="Run ID to stop")
+
+    # Legacy: run <spec_path> --pane <p> [--daemon]
+    p_run.add_argument("spec_path", nargs="?", default=None, help=argparse.SUPPRESS)
+    p_run.add_argument("--pane", default=None, help=argparse.SUPPRESS)
+    p_run.add_argument("--config", default=None, help=argparse.SUPPRESS)
+    p_run.add_argument("--event-file", default=None, help=argparse.SUPPRESS)
+    p_run.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
+    p_run.add_argument("--daemon", "-d", action="store_true", help=argparse.SUPPRESS)
 
     # status
-    p_status = sub.add_parser("status", help="Show current run state")
-    p_status.add_argument("--config", default=None, help="Path to config YAML")
+    p_status = sub.add_parser("status", help="Show all run states")
+    p_status.add_argument("--config", default=None)
+
+    # stop (legacy alias for daemon stop)
+    sub.add_parser("stop", help="Stop the supervisor daemon (alias for daemon stop)")
 
     # bridge
     p_bridge = sub.add_parser("bridge", help="Tmux pane operations")
-    p_bridge.add_argument("bridge_action", choices=["read", "type", "keys", "list", "id", "doctor", "name"],
-                          help="Bridge action")
-    p_bridge.add_argument("target", nargs="?", default=None, help="Pane target (label or %%id)")
-    p_bridge.add_argument("extra", nargs="*", help="Additional arguments")
+    p_bridge.add_argument("bridge_action", choices=["read", "type", "keys", "list", "id", "doctor", "name"])
+    p_bridge.add_argument("target", nargs="?", default=None)
+    p_bridge.add_argument("extra", nargs="*")
 
     args = parser.parse_args()
 
@@ -448,10 +576,29 @@ def main():
         sys.exit(cmd_init(args))
     elif args.command == "deinit":
         sys.exit(cmd_deinit(args))
+    elif args.command == "daemon":
+        if args.daemon_action == "start":
+            sys.exit(cmd_daemon_start(args))
+        elif args.daemon_action == "stop":
+            sys.exit(cmd_daemon_stop(args))
+        else:
+            print("Usage: thin-supervisor daemon {start|stop}")
+            sys.exit(1)
     elif args.command == "run":
-        sys.exit(cmd_run(args))
+        if args.run_action == "register":
+            sys.exit(cmd_run_register(args))
+        elif args.run_action == "foreground":
+            sys.exit(cmd_run_foreground(args))
+        elif args.run_action == "stop":
+            sys.exit(cmd_run_stop(args))
+        elif args.spec_path:
+            # Legacy mode
+            sys.exit(cmd_run_legacy(args))
+        else:
+            print("Usage: thin-supervisor run {register|foreground|stop}")
+            sys.exit(1)
     elif args.command == "stop":
-        sys.exit(cmd_stop(args))
+        sys.exit(cmd_daemon_stop(args))
     elif args.command == "status":
         sys.exit(cmd_status(args))
     elif args.command == "bridge":

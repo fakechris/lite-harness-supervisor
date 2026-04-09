@@ -98,8 +98,9 @@ Skip if user said "just run it".
 
 ```bash
 thin-supervisor init --force
-thin-supervisor run .supervisor/specs/<slug>.yaml \
-  --pane "$(thin-supervisor bridge id)" --daemon
+thin-supervisor run register \
+  --spec .supervisor/specs/<slug>.yaml \
+  --pane "$(thin-supervisor bridge id)"
 ```
 
 ### Checkpoint protocol

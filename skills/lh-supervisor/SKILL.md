@@ -221,8 +221,9 @@ Skip condition: User explicitly said "don't ask, just run" or "直接执行".
 
 ```bash
 thin-supervisor init --force
-thin-supervisor run .supervisor/specs/<slug>.yaml \
-  --pane "$(thin-supervisor bridge id)" --daemon
+thin-supervisor run register \
+  --spec .supervisor/specs/<slug>.yaml \
+  --pane "$(thin-supervisor bridge id)"
 ```
 
 ### Follow the checkpoint protocol
