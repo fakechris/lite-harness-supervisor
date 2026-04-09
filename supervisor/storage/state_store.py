@@ -1,10 +1,14 @@
 from __future__ import annotations
+import hashlib
 import json
+import os
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from supervisor.domain.enums import TopState
 from supervisor.domain.models import SupervisorState, WorkflowSpec
+
 
 class StateStore:
     def __init__(self, runtime_dir: str = "runtime"):
@@ -13,16 +17,41 @@ class StateStore:
         self.state_path = self.runtime_dir / "state.json"
         self.event_log_path = self.runtime_dir / "event_log.jsonl"
         self.decision_log_path = self.runtime_dir / "decision_log.jsonl"
+        self.session_log_path = self.runtime_dir / "session_log.jsonl"
+        self._session_seq = 0
 
-    def load_or_init(self, spec: WorkflowSpec) -> SupervisorState:
+    def load_or_init(
+        self, spec: WorkflowSpec, *,
+        spec_path: str = "",
+        pane_target: str = "",
+        workspace_root: str = "",
+    ) -> SupervisorState:
+        spec_hash = self._hash_spec(spec_path) if spec_path else ""
+
         if self.state_path.exists():
-            return SupervisorState.from_dict(json.loads(self.state_path.read_text()))
+            state = SupervisorState.from_dict(json.loads(self.state_path.read_text()))
+            # Resume validation: check consistency
+            if state.spec_id != spec.id or (spec_hash and state.spec_hash and state.spec_hash != spec_hash):
+                # Spec changed — archive old state and start fresh
+                archive = self.runtime_dir / f"state.{state.run_id}.json"
+                self.state_path.rename(archive)
+            elif pane_target and state.pane_target and state.pane_target != pane_target:
+                archive = self.runtime_dir / f"state.{state.run_id}.json"
+                self.state_path.rename(archive)
+            else:
+                self._session_seq = state.checkpoint_seq
+                return state
+
         state = SupervisorState(
             run_id=f"run_{uuid.uuid4().hex[:12]}",
             spec_id=spec.id,
             mode=spec.kind,
             top_state=TopState.READY,
             current_node_id=spec.first_node_id(),
+            spec_path=spec_path,
+            spec_hash=spec_hash,
+            pane_target=pane_target,
+            workspace_root=workspace_root or os.getcwd(),
         )
         state.retry_budget.per_node = spec.policy.max_retries_per_node
         state.retry_budget.global_limit = spec.policy.max_retries_global
@@ -39,3 +68,28 @@ class StateStore:
     def append_decision(self, decision: dict) -> None:
         with self.decision_log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(decision, ensure_ascii=False) + "\n")
+
+    def append_session_event(self, run_id: str, event_type: str, payload: dict) -> None:
+        """Append to the durable session log (append-only)."""
+        self._session_seq += 1
+        record = {
+            "run_id": run_id,
+            "seq": self._session_seq,
+            "event_type": event_type,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "payload": payload,
+        }
+        with self.session_log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def next_checkpoint_seq(self) -> int:
+        self._session_seq += 1
+        return self._session_seq
+
+    @staticmethod
+    def _hash_spec(path: str) -> str:
+        try:
+            content = Path(path).read_bytes()
+            return hashlib.sha256(content).hexdigest()[:16]
+        except (OSError, FileNotFoundError):
+            return ""

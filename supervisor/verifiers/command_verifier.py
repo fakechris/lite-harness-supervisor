@@ -1,20 +1,14 @@
 from __future__ import annotations
-import re
 import subprocess
-
-# Patterns that require shell interpretation (env vars, pipes, redirects, subshells)
-_SHELL_SYNTAX_RE = re.compile(r'[|;&<>$`(]|\w+=\S+\s')
 
 
 class CommandVerifier:
-    def run(self, check: dict) -> dict:
+    def run(self, check: dict, *, cwd: str | None = None) -> dict:
         cmd = check["run"]
         expect = check.get("expect", "pass")
-        # Commands come from spec YAML (user-authored or skill-generated).
-        # Use shell=True only when the command contains shell syntax that
-        # cannot be executed directly (env vars, pipes, redirects, etc.).
         result = subprocess.run(
             cmd, shell=True, text=True, capture_output=True, timeout=300,
+            cwd=cwd,
         )
         ok = self._match(result.returncode, result.stdout, result.stderr, expect)
         return {

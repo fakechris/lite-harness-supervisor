@@ -85,6 +85,18 @@ class TerminalAdapter:
         self._tmux("send-keys", "-t", target, "Enter")
         self._read_guard.discard(target)
 
+    def current_cwd(self) -> str:
+        """Return the current working directory of the target pane."""
+        target = self._resolve_target()
+        result = self._tmux(
+            "display-message", "-t", target, "-p", "#{pane_current_path}"
+        )
+        return result.stdout.strip()
+
+    def session_id(self) -> str:
+        """Return a stable identifier for this session (pane id)."""
+        return self._resolve_target()
+
     def list_panes(self) -> list[PaneInfo]:
         """Return metadata for every pane visible to the tmux server."""
         fmt = "#{pane_id}\t#{session_name}:#{window_index}\t#{pane_width}x#{pane_height}\t#{pane_current_command}\t#{@name}\t#{pane_current_path}"

@@ -1,0 +1,16 @@
+# thin-supervisor config
+# See: https://github.com/user/lite-harness-supervisor
+
+# tmux pane target (label or %%id)
+pane_target: ""
+poll_interval_sec: 2.0
+read_lines: 100
+
+# LLM judge (set to null for stub/offline mode)
+# Examples: anthropic/claude-haiku-4-5-20251001, openai/gpt-4o-mini
+judge_model: null
+judge_temperature: 0.1
+judge_max_tokens: 512
+
+# Runtime
+runtime_dir: ".supervisor/runtime"

@@ -2,7 +2,7 @@ from __future__ import annotations
 import pathlib
 import yaml
 
-from supervisor.domain.models import WorkflowSpec, StepSpec, VerifyCheck, FinishPolicy, RuntimePolicy
+from supervisor.domain.models import WorkflowSpec, StepSpec, VerifyCheck, BranchOption, FinishPolicy, RuntimePolicy
 
 class SpecValidationError(ValueError):
     pass
@@ -31,7 +31,13 @@ def _parse_nodes(items):
                 outputs=item.get("outputs", []),
                 verify=_parse_verify(item.get("verify", [])),
                 next=item.get("next"),
-                options=item.get("options", []),
+                options=[
+                    BranchOption(
+                        id=o["id"], next=o["next"],
+                        label=o.get("label"), when_hint=o.get("when_hint"),
+                    )
+                    for o in item.get("options", [])
+                ],
             )
         )
     return nodes
