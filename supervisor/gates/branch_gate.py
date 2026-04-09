@@ -31,6 +31,8 @@ class BranchGate:
         }
 
         result = self.judge_client.choose_branch(context)
+        if not isinstance(result, dict):
+            result = {"decision": "escalate_to_human", "reason": "judge returned non-dict"}
         selected_id = result.get("decision", "")
         confidence = result.get("confidence", 0)
 

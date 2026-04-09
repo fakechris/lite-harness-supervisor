@@ -25,6 +25,14 @@ DANGEROUS_ACTION_PATTERNS = [
     r"不可逆",
 ]
 
+BLOCKED_PATTERNS = [
+    r"\bblocked\b",
+    r"cannot proceed",
+    r"waiting for",
+    r"无法继续",
+    r"等待.*输入",
+]
+
 def classify_text(text: str) -> str | None:
     if not text:
         return None
@@ -37,6 +45,9 @@ def classify_text(text: str) -> str | None:
     for pattern in DANGEROUS_ACTION_PATTERNS:
         if re.search(pattern, text, flags=re.I):
             return "DANGEROUS_ACTION"
+    for pattern in BLOCKED_PATTERNS:
+        if re.search(pattern, text, flags=re.I):
+            return "BLOCKED"
     return None
 
 def classify_checkpoint(checkpoint: dict) -> str | None:

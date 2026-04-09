@@ -2,6 +2,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,18 +30,21 @@ class StateStore:
         spec_hash = self._hash_spec(spec_path) if spec_path else ""
 
         if self.state_path.exists():
-            state = SupervisorState.from_dict(json.loads(self.state_path.read_text()))
-            # Resume validation: check consistency
-            if state.spec_id != spec.id or (spec_hash and state.spec_hash and state.spec_hash != spec_hash):
-                # Spec changed — archive old state and start fresh
-                archive = self.runtime_dir / f"state.{state.run_id}.json"
-                self.state_path.rename(archive)
-            elif pane_target and state.pane_target and state.pane_target != pane_target:
-                archive = self.runtime_dir / f"state.{state.run_id}.json"
-                self.state_path.rename(archive)
+            try:
+                state = SupervisorState.from_dict(json.loads(self.state_path.read_text()))
+            except (json.JSONDecodeError, KeyError, ValueError):
+                # Corrupt state file — archive and start fresh
+                self._archive_state("corrupt")
+                state = None
             else:
-                self._session_seq = self._read_last_seq()
-                return state
+                # Resume validation: check consistency
+                if state.spec_id != spec.id or (spec_hash and state.spec_hash and state.spec_hash != spec_hash):
+                    self._archive_state(state.run_id)
+                elif pane_target and state.pane_target and state.pane_target != pane_target:
+                    self._archive_state(state.run_id)
+                else:
+                    self._session_seq = self._read_last_seq()
+                    return state
 
         state = SupervisorState(
             run_id=f"run_{uuid.uuid4().hex[:12]}",
@@ -59,7 +63,22 @@ class StateStore:
         return state
 
     def save(self, state: SupervisorState) -> None:
-        self.state_path.write_text(json.dumps(state.to_dict(), ensure_ascii=False, indent=2))
+        """Atomic write: write to temp file then rename."""
+        data = json.dumps(state.to_dict(), ensure_ascii=False, indent=2)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(self.runtime_dir), suffix=".tmp", prefix="state."
+        )
+        try:
+            os.write(fd, data.encode("utf-8"))
+            os.close(fd)
+            os.replace(tmp_path, str(self.state_path))
+        except Exception:
+            os.close(fd) if not os.get_inheritable(fd) else None
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def append_event(self, event: dict) -> None:
         with self.event_log_path.open("a", encoding="utf-8") as f:
@@ -86,8 +105,12 @@ class StateStore:
         self._session_seq += 1
         return self._session_seq
 
+    def _archive_state(self, label: str) -> None:
+        if self.state_path.exists():
+            archive = self.runtime_dir / f"state.{label}.json"
+            self.state_path.rename(archive)
+
     def _read_last_seq(self) -> int:
-        """Read the last sequence number from the session log."""
         if not self.session_log_path.exists():
             return 0
         last_seq = 0
@@ -97,7 +120,7 @@ class StateStore:
                     record = json.loads(line)
                     last_seq = max(last_seq, record.get("seq", 0))
                 except json.JSONDecodeError:
-                    continue  # skip corrupt lines, keep scanning
+                    continue
         except OSError:
             pass
         return last_seq
