@@ -4,12 +4,14 @@ version = "0.1.0"
 description = "Thin tmux sidecar supervisor for long-running AI coding agent workflows"
 requires-python = ">=3.10"
 license = {text = "MIT"}
+authors = [{name = "Chris Song"}]
 readme = "README.md"
-keywords = ["ai", "agents", "supervisor", "workflow", "tmux"]
+keywords = ["ai", "agents", "supervisor", "workflow", "tmux", "codex", "claude"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
+    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
     "PyYAML>=6.0",
@@ -18,6 +20,11 @@ dependencies = [
 [project.optional-dependencies]
 llm = ["litellm>=1.40"]
 dev = ["pytest>=7.0"]
+
+[project.urls]
+Repository = "https://github.com/fakechris/lite-harness-supervisor"
+Issues = "https://github.com/fakechris/lite-harness-supervisor/issues"
+Changelog = "https://github.com/fakechris/lite-harness-supervisor/blob/main/CHANGELOG.md"
 
 [project.scripts]
 thin-supervisor = "supervisor.app:main"
