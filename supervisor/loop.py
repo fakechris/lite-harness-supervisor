@@ -192,11 +192,18 @@ class SupervisorLoop:
     # Sidecar loop
     # ------------------------------------------------------------------
 
-    def run_sidecar(self, spec, state, terminal, *, poll_interval: float = 2.0, read_lines: int = 100):
+    def run_sidecar(self, spec, state, terminal, *, poll_interval: float = 2.0,
+                    read_lines: int = 100, stop_event=None):
         """Main sidecar event loop with full causality chain.
 
         Checkpoint → SupervisorDecision → HandoffInstruction
         Each object carries IDs linking back to its trigger.
+
+        Parameters
+        ----------
+        stop_event : threading.Event | None
+            External stop signal (used by daemon to stop individual runs).
+            If None, SIGTERM handler is installed (foreground mode).
         """
         adapter = TranscriptAdapter()
         pending_text = None
@@ -212,14 +219,21 @@ class SupervisorLoop:
             except Exception:
                 pass
 
-        # #20: SIGTERM handler — save state before exit
-        def _sigterm_handler(signum, frame):
-            nonlocal interrupted
-            interrupted = True
-            logger.info("SIGTERM received, saving state and exiting")
+        # Interrupt mechanism: external stop_event OR SIGTERM handler
+        if stop_event is not None:
+            interrupted_ref = stop_event.is_set
+        else:
+            def _sigterm_handler(signum, frame):
+                nonlocal interrupted
+                interrupted = True
+                logger.info("SIGTERM received, saving state and exiting")
 
-        prev_handler = signal.getsignal(signal.SIGTERM)
-        signal.signal(signal.SIGTERM, _sigterm_handler)
+            try:
+                prev_handler = signal.getsignal(signal.SIGTERM)
+                signal.signal(signal.SIGTERM, _sigterm_handler)
+            except ValueError:
+                prev_handler = None  # not main thread
+            interrupted_ref = lambda: interrupted
 
         try:
             self._run_sidecar_inner(
@@ -228,14 +242,18 @@ class SupervisorLoop:
                 last_injected_attempt=last_injected_attempt,
                 node_mismatch_count=node_mismatch_count,
                 max_node_mismatch=max_node_mismatch,
-                interrupted_ref=lambda: interrupted,
+                interrupted_ref=interrupted_ref,
             )
         except Exception:
             logger.exception("sidecar loop error")
             self.store.save(state)
             raise
         finally:
-            signal.signal(signal.SIGTERM, prev_handler)
+            if stop_event is None and prev_handler is not None:
+                try:
+                    signal.signal(signal.SIGTERM, prev_handler)
+                except ValueError:
+                    pass  # not main thread
 
         return state
 

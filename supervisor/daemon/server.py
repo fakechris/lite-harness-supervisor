@@ -152,12 +152,6 @@ class DaemonServer:
         if not spec_path or not pane_target:
             return {"ok": False, "error": "spec_path and pane_target required"}
 
-        # Check for duplicate pane
-        with self._lock:
-            for entry in self._runs.values():
-                if entry.pane_target == pane_target and entry.thread.is_alive():
-                    return {"ok": False, "error": f"pane {pane_target} already has active run {entry.run_id}"}
-
         try:
             spec = load_spec(spec_path)
         except Exception as e:
@@ -171,22 +165,25 @@ class DaemonServer:
             workspace_root=os.getcwd(),
         )
 
-        # Override run_id to match our generated one
         if state.run_id != run_id:
             state.run_id = run_id
             store.save(state)
 
         entry = RunEntry(run_id, spec_path, pane_target, thread=None, store=store)
 
-        thread = threading.Thread(
-            target=self._run_worker,
-            args=(entry, spec, state),
-            name=f"run-{run_id}",
-            daemon=True,
-        )
-        entry.thread = thread
-
+        # Hold lock across duplicate check AND registry insertion (no race)
         with self._lock:
+            for existing in self._runs.values():
+                if existing.pane_target == pane_target and existing.thread.is_alive():
+                    return {"ok": False, "error": f"pane {pane_target} already has active run {existing.run_id}"}
+
+            thread = threading.Thread(
+                target=self._run_worker,
+                args=(entry, spec, state),
+                name=f"run-{run_id}",
+                daemon=True,
+            )
+            entry.thread = thread
             self._runs[run_id] = entry
 
         thread.start()
@@ -207,6 +204,7 @@ class DaemonServer:
                 spec, state, terminal,
                 poll_interval=self.config.poll_interval_sec,
                 read_lines=self.config.read_lines,
+                stop_event=entry.stop_event,
             )
             logger.info("run %s finished: %s", entry.run_id, state.top_state.value)
         except Exception:
