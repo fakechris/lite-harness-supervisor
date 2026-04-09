@@ -68,12 +68,18 @@ class StateStore:
         fd, tmp_path = tempfile.mkstemp(
             dir=str(self.runtime_dir), suffix=".tmp", prefix="state."
         )
+        fd_closed = False
         try:
             os.write(fd, data.encode("utf-8"))
             os.close(fd)
+            fd_closed = True
             os.replace(tmp_path, str(self.state_path))
         except Exception:
-            os.close(fd) if not os.get_inheritable(fd) else None
+            if not fd_closed:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             try:
                 os.unlink(tmp_path)
             except OSError:
