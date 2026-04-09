@@ -61,7 +61,7 @@ class SessionRun:
         for line in self._store.session_log_path.read_text().strip().splitlines():
             try:
                 record = json.loads(line)
-                if record.get("seq", 0) > seq:
+                if record.get("run_id") == self.run_id and record.get("seq", 0) > seq:
                     events.append(record)
             except json.JSONDecodeError:
                 continue

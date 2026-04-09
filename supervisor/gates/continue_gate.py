@@ -58,6 +58,8 @@ class ContinueGate:
 
         # LLM judge fallback — returns dict, wrap it
         raw = self.judge_client.continue_or_escalate(context)
+        if not isinstance(raw, dict):
+            raw = {"decision": "continue", "reason": "judge returned non-dict, defaulting to continue"}
         return SupervisorDecision.make(
             decision=raw.get("decision", "continue").upper(),
             reason=raw.get("reason", ""),

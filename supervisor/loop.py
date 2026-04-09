@@ -128,7 +128,9 @@ class SupervisorLoop:
             return
         if kind == DecisionType.ESCALATE_TO_HUMAN.value:
             state.top_state = TopState.PAUSED_FOR_HUMAN
-            state.human_escalations.append(decision.to_dict())
+            state.human_escalations.append(
+                decision.to_dict() if hasattr(decision, "to_dict") else decision
+            )
             return
         if kind == DecisionType.ABORT.value:
             state.top_state = TopState.ABORTED
@@ -222,8 +224,13 @@ class SupervisorLoop:
             if checkpoint.checkpoint_seq > 0 and checkpoint.checkpoint_seq <= state.checkpoint_seq:
                 time.sleep(poll_interval)
                 continue
-            cp_dict = checkpoint.to_dict()
-            if cp_dict == state.last_agent_checkpoint:
+            # Content-based dedup (ignore auto-generated checkpoint_id/timestamp)
+            last_cp = state.last_agent_checkpoint
+            if (last_cp
+                    and checkpoint.status == last_cp.get("status")
+                    and checkpoint.current_node == last_cp.get("current_node")
+                    and checkpoint.summary == last_cp.get("summary")
+                    and checkpoint.checkpoint_seq == last_cp.get("checkpoint_seq", 0)):
                 time.sleep(poll_interval)
                 continue
 
@@ -242,6 +249,7 @@ class SupervisorLoop:
             logger.info("checkpoint: %s (id=%s)", checkpoint.summary, checkpoint.checkpoint_id)
 
             # 3. Event
+            cp_dict = checkpoint.to_dict()
             event = {"type": "agent_output", "payload": {"checkpoint": cp_dict}}
             self.store.append_event(event)
             self.store.append_session_event(state.run_id, "checkpoint", cp_dict)
