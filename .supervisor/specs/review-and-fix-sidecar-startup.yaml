@@ -1,0 +1,43 @@
+kind: linear_plan
+id: review-and-fix-sidecar-startup
+goal: review the sidecar loop, add a regression test for startup injection, and fix the startup bug with full verification
+finish_policy:
+  require_all_steps_done: true
+  require_verification_pass: true
+policy:
+  default_continue: true
+  max_retries_per_node: 3
+  max_retries_global: 12
+
+steps:
+  - id: add_regression_test
+    type: task
+    objective: Add a failing regression test that proves the sidecar injects the first node instruction before any checkpoint arrives.
+    verify:
+      - type: command
+        run: pytest -q tests/test_sidecar_loop.py -k initial_instruction
+        expect: fail
+
+  - id: implement_startup_fix
+    type: task
+    objective: Update the sidecar loop to inject the initial node instruction immediately after entering RUNNING.
+    verify:
+      - type: command
+        run: pytest -q tests/test_sidecar_loop.py -k initial_instruction
+        expect: pass
+
+  - id: verify_sidecar_suite
+    type: task
+    objective: Run the sidecar-focused test module to confirm the startup fix does not regress loop behavior.
+    verify:
+      - type: command
+        run: pytest -q tests/test_sidecar_loop.py
+        expect: pass
+
+  - id: full_regression
+    type: task
+    objective: Run the full test suite to verify the repository stays green after the fix.
+    verify:
+      - type: command
+        run: pytest -q
+        expect: pass

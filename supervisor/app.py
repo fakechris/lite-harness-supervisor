@@ -205,7 +205,8 @@ def _run_event_file(event_file: str, spec, state, store, loop):
     event = json.loads(Path(event_file).read_text())
     if event.get("type") == "agent_output" and "text" in event.get("payload", {}):
         adapter = TranscriptAdapter()
-        event["payload"]["checkpoint"] = adapter.parse_checkpoint(event["payload"]["text"])
+        cp = adapter.parse_checkpoint(event["payload"]["text"])
+        event["payload"]["checkpoint"] = cp.to_dict() if cp else {}
     store.append_event(event)
     loop.handle_event(state, event)
 

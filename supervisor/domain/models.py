@@ -10,6 +10,29 @@ class VerifyCheck:
     payload: dict[str, Any]
 
 @dataclass
+class BranchOption:
+    id: str
+    next: str
+    label: str | None = None
+    when_hint: str | None = None
+
+@dataclass
+class Checkpoint:
+    """Structured checkpoint parsed from agent output."""
+    status: str
+    current_node: str
+    summary: str
+    run_id: str = ""
+    checkpoint_seq: int = 0
+    evidence: list[str] = field(default_factory=list)
+    candidate_next_actions: list[str] = field(default_factory=list)
+    needs: list[str] = field(default_factory=list)
+    question_for_supervisor: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+@dataclass
 class StepSpec:
     id: str
     type: str
@@ -18,7 +41,7 @@ class StepSpec:
     outputs: list[str] = field(default_factory=list)
     verify: list[VerifyCheck] = field(default_factory=list)
     next: str | None = None
-    options: list[dict[str, Any]] = field(default_factory=list)
+    options: list[BranchOption] = field(default_factory=list)
 
 @dataclass
 class FinishPolicy:
@@ -92,6 +115,16 @@ class SupervisorState:
     verification: dict[str, Any] = field(default_factory=lambda: {"last_status": "pending"})
     last_event: dict[str, Any] = field(default_factory=dict)
     last_decision: dict[str, Any] = field(default_factory=dict)
+    # P0-B: event-driven injection tracking
+    last_injected_node_id: str | None = None
+    # P0-C: checkpoint sequence tracking
+    checkpoint_seq: int = 0
+    # P1-D: resume validation
+    spec_path: str = ""
+    spec_hash: str = ""
+    pane_target: str = ""
+    workspace_root: str = ""
+    schema_version: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -119,4 +152,11 @@ class SupervisorState:
             verification=data.get("verification", {"last_status": "pending"}),
             last_event=data.get("last_event", {}),
             last_decision=data.get("last_decision", {}),
+            last_injected_node_id=data.get("last_injected_node_id"),
+            checkpoint_seq=data.get("checkpoint_seq", 0),
+            spec_path=data.get("spec_path", ""),
+            spec_hash=data.get("spec_hash", ""),
+            pane_target=data.get("pane_target", ""),
+            workspace_root=data.get("workspace_root", ""),
+            schema_version=data.get("schema_version", 1),
         )

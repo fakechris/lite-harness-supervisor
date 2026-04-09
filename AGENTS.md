@@ -18,6 +18,8 @@ After completing meaningful work on a step, output a checkpoint block:
 
 ```text
 <checkpoint>
+run_id: <run_id from thin-supervisor status>
+checkpoint_seq: <incrementing integer, start from 1>
 status: working | blocked | step_done | workflow_done
 current_node: <step_id>
 summary: <one-line description>

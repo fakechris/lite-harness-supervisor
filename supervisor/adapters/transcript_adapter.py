@@ -4,28 +4,52 @@ from pathlib import Path
 
 import yaml
 
+from supervisor.domain.models import Checkpoint
+
 
 class TranscriptAdapter:
     CHECKPOINT_RE = re.compile(r"<checkpoint>(.*?)</checkpoint>", re.S)
 
-    def parse_checkpoint(self, text: str) -> dict:
+    def parse_checkpoint(self, text: str) -> Checkpoint | None:
+        """Parse the most recent checkpoint from terminal output.
+
+        Returns a Checkpoint dataclass or None if no checkpoint found.
+        """
         matches = self.CHECKPOINT_RE.findall(text)
         if not matches:
-            return {}
-        # Use the most recent checkpoint in the buffer
+            return None
         block = matches[-1]
+
+        # Try YAML first, fallback to line-by-line
+        raw: dict = {}
         try:
-            result = yaml.safe_load(block)
-            if isinstance(result, dict):
-                return result
+            parsed = yaml.safe_load(block)
+            if isinstance(parsed, dict):
+                raw = parsed
         except yaml.YAMLError:
             pass
-        # Fallback: manual line-by-line parsing for non-YAML checkpoint format
-        return self._parse_lines(block)
+        if not raw:
+            raw = self._parse_lines(block)
+
+        # Must have at least status and current_node
+        if "status" not in raw or "current_node" not in raw:
+            return None
+
+        return Checkpoint(
+            status=raw.get("status", ""),
+            current_node=raw.get("current_node", ""),
+            summary=raw.get("summary", ""),
+            run_id=str(raw.get("run_id", "")),
+            checkpoint_seq=self._safe_int(raw.get("checkpoint_seq", 0)),
+            evidence=raw.get("evidence", []),
+            candidate_next_actions=raw.get("candidate_next_actions", []),
+            needs=raw.get("needs", []),
+            question_for_supervisor=raw.get("question_for_supervisor", []),
+        )
 
     def _parse_lines(self, block: str) -> dict:
         lines = [x.strip() for x in block.splitlines() if x.strip()]
-        result = {"evidence": [], "candidate_next_actions": [], "needs": [], "question_for_supervisor": []}
+        result: dict = {"evidence": [], "candidate_next_actions": [], "needs": [], "question_for_supervisor": []}
         current_list = None
         for line in lines:
             if line.startswith("status:"):
@@ -34,6 +58,10 @@ class TranscriptAdapter:
                 result["current_node"] = line.split(":", 1)[1].strip()
             elif line.startswith("summary:"):
                 result["summary"] = line.split(":", 1)[1].strip()
+            elif line.startswith("run_id:"):
+                result["run_id"] = line.split(":", 1)[1].strip()
+            elif line.startswith("checkpoint_seq:"):
+                result["checkpoint_seq"] = line.split(":", 1)[1].strip()
             elif line.startswith("evidence:"):
                 current_list = "evidence"
             elif line.startswith("candidate_next_actions:"):
@@ -46,6 +74,13 @@ class TranscriptAdapter:
                 if current_list:
                     result[current_list].append(line[2:].strip())
         return result
+
+    @staticmethod
+    def _safe_int(val, default: int = 0) -> int:
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return default
 
     def read_text(self, path: str) -> str:
         return Path(path).read_text(encoding="utf-8")

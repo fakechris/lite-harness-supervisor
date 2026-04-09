@@ -2,7 +2,7 @@ from __future__ import annotations
 import pathlib
 import yaml
 
-from supervisor.domain.models import WorkflowSpec, StepSpec, VerifyCheck, FinishPolicy, RuntimePolicy
+from supervisor.domain.models import WorkflowSpec, StepSpec, VerifyCheck, BranchOption, FinishPolicy, RuntimePolicy
 
 class SpecValidationError(ValueError):
     pass
@@ -15,6 +15,20 @@ def _parse_verify(items):
         payload = {k: v for k, v in item.items() if k != "type"}
         out.append(VerifyCheck(type=item["type"], payload=payload))
     return out
+
+def _parse_options(items):
+    options = []
+    for o in items or []:
+        if not isinstance(o, dict):
+            raise SpecValidationError("branch option must be a mapping")
+        for key in ["id", "next"]:
+            if key not in o:
+                raise SpecValidationError(f"branch option missing `{key}`")
+        options.append(BranchOption(
+            id=o["id"], next=o["next"],
+            label=o.get("label"), when_hint=o.get("when_hint"),
+        ))
+    return options
 
 def _parse_nodes(items):
     nodes = []
@@ -31,7 +45,7 @@ def _parse_nodes(items):
                 outputs=item.get("outputs", []),
                 verify=_parse_verify(item.get("verify", [])),
                 next=item.get("next"),
-                options=item.get("options", []),
+                options=_parse_options(item.get("options", [])),
             )
         )
     return nodes
