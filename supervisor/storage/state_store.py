@@ -93,9 +93,12 @@ class StateStore:
         last_seq = 0
         try:
             for line in self.session_log_path.read_text().strip().splitlines():
-                record = json.loads(line)
-                last_seq = max(last_seq, record.get("seq", 0))
-        except (json.JSONDecodeError, OSError):
+                try:
+                    record = json.loads(line)
+                    last_seq = max(last_seq, record.get("seq", 0))
+                except json.JSONDecodeError:
+                    continue  # skip corrupt lines, keep scanning
+        except OSError:
             pass
         return last_seq
 

@@ -18,7 +18,17 @@ class FinishGate:
         fp = spec.finish_policy
 
         if fp.require_all_steps_done:
-            required = {n.id for n in spec.ordered_nodes() if n.type != "decision"}
+            # For conditional workflows, only require nodes that were
+            # actually visited (done + current). Skipped branches are
+            # not required — the branch_history records which path was taken.
+            if spec.kind == "conditional_workflow":
+                # Nodes on the taken path: done nodes + nodes reachable
+                # from branch decisions. Don't require skipped branches.
+                required = set(state.done_node_ids)
+                # Current node should also be done
+                required.add(state.current_node_id)
+            else:
+                required = {n.id for n in spec.ordered_nodes()}
             done = set(state.done_node_ids)
             missing = required - done
             if missing:
