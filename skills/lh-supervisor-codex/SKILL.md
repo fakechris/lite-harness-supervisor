@@ -65,6 +65,7 @@ Save the spec to `.supervisor/specs/<goal-slug>.yaml`.
 | `command` | `run`, `expect` (pass/fail/contains:text) | `run: pytest -q tests/`, `expect: pass` |
 | `artifact` | `path`, `exists` (true/false) | `path: src/auth.py`, `exists: true` |
 | `git` | `check` (dirty), `expect` (true/false) | `check: dirty`, `expect: true` |
+| `workflow` | `require_node_done` (true/false) | `require_node_done: true` |
 
 ### Rules
 
