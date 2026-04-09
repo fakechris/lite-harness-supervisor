@@ -2,42 +2,53 @@
 name: lh-supervisor
 description: >
   Drive long-running multi-step tasks to completion with deterministic
-  verification. Use when the user describes a complex plan, multi-step
-  implementation, long-running workflow, or says "run this plan",
-  "execute continuously", "don't stop until done".
-  Generates a spec from the user's goal, starts a tmux sidecar supervisor,
-  and follows the checkpoint protocol for automated step progression.
-version: 0.1.0
+  verification. Four-stage workflow: Clarify → Plan → Approve → Execute.
+  Use when the user describes a complex plan, multi-step implementation,
+  long-running workflow, or says "run this plan", "execute continuously",
+  "don't stop until done".
+version: 0.2.0
 user-invocable: true
 ---
 
-# Supervisor Skill (Codex)
+# Lite Harness Supervisor (Codex)
 
-You are now in **supervised long-task mode**. A sidecar supervisor watches
-your output, makes continue/verify/escalate decisions, and injects
-next-step instructions so you can focus on execution.
+Four-stage supervised execution: **Clarify → Plan → Approve → Execute**.
 
-## When to activate
+The supervisor is a tmux sidecar that watches your output, makes
+continue/verify/escalate decisions, and injects next-step instructions.
+You focus on execution. It handles the orchestration.
 
-- User describes a multi-step implementation plan (3+ steps)
-- User says "run this plan", "execute continuously", "don't stop"
-- User wants a long task driven to completion with verification
+---
 
-## Step 1: Understand the goal
+## Stage 1: Clarify
 
-Ask the user to describe their goal if not already clear. Identify:
-- What is the end state?
-- What are the intermediate milestones?
-- How can each milestone be verified?
+**Skip** if the user's request has concrete signals (file path, function
+name, issue number, test command, acceptance criteria). Go to Stage 2.
 
-## Step 2: Generate the spec
+Otherwise, ask ONE question per round to clarify:
+1. Intent — Why?
+2. Outcome — What does success look like?
+3. Scope — What's in/out?
+4. Non-goals — What NOT to do?
+5. Acceptance criteria — How to verify?
+6. Decision boundaries — What can you decide alone?
 
-Break the goal into 3-10 sequential steps. Write a spec YAML file:
+Explore the codebase first. Never ask for facts you can discover.
+
+Write clarification to `.supervisor/clarify/<slug>.md`.
+
+---
+
+## Stage 2: Plan + Self-Review
+
+### 2a. Generate spec
+
+Write to `.supervisor/specs/<slug>.yaml`:
 
 ```yaml
 kind: linear_plan
-id: <goal-slug>
-goal: <one-line goal description>
+id: <slug>
+goal: <one-line goal>
 finish_policy:
   require_all_steps_done: true
   require_verification_pass: true
@@ -49,41 +60,49 @@ policy:
 steps:
   - id: step_1
     type: task
-    objective: <concrete, actionable objective>
+    objective: <concrete, actionable>
     verify:
       - type: command
         run: <verification command>
         expect: pass
 ```
 
-Save the spec to `.supervisor/specs/<goal-slug>.yaml`.
+Verification types: `command` (run/expect), `artifact` (path/exists),
+`git` (check/expect), `workflow` (require_node_done).
 
-### Verification types
+Each step MUST have at least one verify entry. Objectives must be
+concrete. One deliverable per step.
 
-| Type | Fields | Example |
-|------|--------|---------|
-| `command` | `run`, `expect` (pass/fail/contains:text) | `run: pytest -q tests/`, `expect: pass` |
-| `artifact` | `path`, `exists` (true/false) | `path: src/auth.py`, `exists: true` |
-| `git` | `check` (dirty), `expect` (true/false) | `check: dirty`, `expect: true` |
-| `workflow` | `require_node_done` (true/false) | `require_node_done: true` |
+### 2b. Self-review
 
-### Rules
+**Architect pass**: completeness, verify validity, simpler alternative, failure scenarios.
 
-- Each step MUST have at least one `verify` entry
-- Objectives must be concrete and actionable
-- Verification commands must be runnable without user input
+**Critic pass**: simulate 2-3 steps mentally — does agent have enough context?
 
-## Step 3: Start the supervisor
+If problems found → fix spec, re-review (max 3 rounds).
+
+Write review to `.supervisor/plans/<slug>-review.md`.
+
+---
+
+## Stage 3: Approve
+
+Show user: spec summary + acceptance criteria + self-review verdict.
+User chooses: Approve / Adjust / Reject.
+
+Skip if user said "just run it".
+
+---
+
+## Stage 4: Execute
 
 ```bash
 thin-supervisor init --force
-thin-supervisor run .supervisor/specs/<goal-slug>.yaml \
+thin-supervisor run .supervisor/specs/<slug>.yaml \
   --pane "$(thin-supervisor bridge id)" --daemon
 ```
 
-## Step 4: Follow the checkpoint protocol
-
-After completing meaningful work, you MUST output a checkpoint block:
+### Checkpoint protocol
 
 ```text
 <checkpoint>
@@ -91,13 +110,13 @@ run_id: <run_id from thin-supervisor status>
 checkpoint_seq: <incrementing integer, start from 1>
 status: working | blocked | step_done | workflow_done
 current_node: <step_id from spec>
-summary: <one-line description of what you did>
+summary: <one-line description>
 evidence:
   - modified: <file path>
   - ran: <command>
   - result: <short result>
 candidate_next_actions:
-  - <what you'd do next>
+  - <next action>
 needs:
   - none
 question_for_supervisor:
@@ -105,22 +124,12 @@ question_for_supervisor:
 </checkpoint>
 ```
 
-### When to emit checkpoints
-
-- After completing a step → `status: step_done`
-- After significant progress → `status: working`
-- When blocked → `status: blocked`
-- When all steps done → `status: workflow_done`
-
-## Step 5: Continue working
-
-The supervisor will either:
-1. **Continue**: inject the next instruction
-2. **Verify**: run verification commands, then advance
-3. **Escalate**: do nothing — you pause for user input
+---
 
 ## Rules
 
-- Do NOT ask the user "should I continue?" — the supervisor decides
+- Do NOT ask "should I continue?" — the supervisor decides
 - Do NOT skip verification
 - DO emit checkpoints frequently
+- DO explore codebase before asking user questions
+- DO self-review your plan before approval

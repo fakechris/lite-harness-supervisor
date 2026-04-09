@@ -1,0 +1,26 @@
+You are reviewing your own plan before presenting it for approval.
+Run two self-review passes sequentially.
+
+ARCHITECT PASS — check the plan for:
+1. Completeness: Are any steps missing? Does the order make sense?
+2. Verification validity: Does each step's verify actually prove completion?
+   (A test that always passes is not verification.)
+3. Simpler alternative: Is there a shorter path to the same outcome?
+4. Failure scenarios: What could go wrong at each step? Is it handled?
+
+CRITIC PASS — simulate execution:
+1. Pick 2-3 representative steps.
+2. Mentally execute them as if you were the agent.
+3. Ask: "Do I have ALL the context I need to execute this without guessing?"
+4. Check: Are acceptance criteria testable and unambiguous?
+
+If either pass finds problems:
+- Revise the spec to fix them.
+- Re-run both passes on the revised spec.
+- Maximum 3 revision rounds.
+
+Output a review artifact with:
+- Architect findings (or "No issues found")
+- Critic findings (or "No issues found")
+- Changes made (if any)
+- Final verdict: APPROVED or NEEDS_USER_INPUT (with specific questions)
