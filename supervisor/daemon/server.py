@@ -148,6 +148,14 @@ class DaemonServer:
             response = self._do_stop(request.get("run_id", ""))
         elif action == "stop_all":
             response = self._do_stop_all()
+        elif action == "list_runs":
+            response = self._do_list_runs()
+        elif action == "observe":
+            response = self._do_observe(request.get("run_id", ""))
+        elif action == "note_add":
+            response = self._do_note_add(request)
+        elif action == "note_list":
+            response = self._do_note_list(request)
         elif action == "ping":
             response = {"ok": True, "pong": True}
         else:
@@ -246,6 +254,119 @@ class DaemonServer:
         for entry in entries:
             entry.stop_event.set()
         return {"ok": True, "stopped": len(entries)}
+
+    # ------------------------------------------------------------------
+    # P0: list + observe
+    # ------------------------------------------------------------------
+
+    def _do_list_runs(self) -> dict:
+        """List all active runs with detailed state."""
+        with self._lock:
+            runs = []
+            for e in self._runs.values():
+                state = e._read_state() or {}
+                runs.append({
+                    "run_id": e.run_id,
+                    "spec_id": state.get("spec_id", ""),
+                    "spec_path": e.spec_path,
+                    "pane_target": e.pane_target,
+                    "workspace": e.workspace_root,
+                    "alive": e.thread.is_alive() if e.thread else False,
+                    "top_state": state.get("top_state", "UNKNOWN"),
+                    "current_node": state.get("current_node_id", ""),
+                    "done_nodes": state.get("done_node_ids", []),
+                    "current_attempt": state.get("current_attempt", 0),
+                })
+        return {"ok": True, "runs": runs}
+
+    def _do_observe(self, run_id: str) -> dict:
+        """Read-only observation of a specific run's state + recent events."""
+        with self._lock:
+            entry = self._runs.get(run_id)
+        if not entry:
+            return {"ok": False, "error": f"run {run_id} not found"}
+
+        state = entry._read_state() or {}
+        recent: list[dict] = []
+        try:
+            if entry.store.session_log_path.exists():
+                lines = entry.store.session_log_path.read_text().strip().splitlines()[-5:]
+                for line in lines:
+                    try:
+                        recent.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            pass
+
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "state": state,
+            "recent_events": recent,
+        }
+
+    # ------------------------------------------------------------------
+    # P1: shared notes
+    # ------------------------------------------------------------------
+
+    def _shared_notes_path(self) -> Path:
+        p = Path(self.runs_dir).parent / "shared"
+        p.mkdir(parents=True, exist_ok=True)
+        return p / "notes.jsonl"
+
+    def _do_note_add(self, request: dict) -> dict:
+        """Add a shared note."""
+        content = request.get("content", "")
+        if not content:
+            return {"ok": False, "error": "content required"}
+
+        note = {
+            "note_id": f"note_{uuid.uuid4().hex[:12]}",
+            "timestamp": __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc
+            ).isoformat(),
+            "author_run_id": request.get("author_run_id", "human"),
+            "note_type": request.get("note_type", "context"),
+            "title": request.get("title", content[:80]),
+            "content": content,
+        }
+
+        path = self._shared_notes_path()
+        with self._lock:
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(note, ensure_ascii=False) + "\n")
+
+        logger.info("note added: %s by %s", note["note_id"], note["author_run_id"])
+        return {"ok": True, "note_id": note["note_id"]}
+
+    def _do_note_list(self, request: dict) -> dict:
+        """List shared notes, optionally filtered by type or run."""
+        path = self._shared_notes_path()
+        if not path.exists():
+            return {"ok": True, "notes": []}
+
+        filter_type = request.get("note_type")
+        filter_run = request.get("run_id")
+        limit = request.get("limit", 20)
+
+        notes: list[dict] = []
+        try:
+            for line in path.read_text().strip().splitlines():
+                try:
+                    note = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if filter_type and note.get("note_type") != filter_type:
+                    continue
+                if filter_run and note.get("author_run_id") != filter_run:
+                    continue
+                notes.append(note)
+        except OSError:
+            pass
+
+        # Return most recent first, up to limit
+        return {"ok": True, "notes": notes[-limit:][::-1]}
 
     def _reap_finished(self) -> None:
         """Remove completed/stopped runs from registry."""

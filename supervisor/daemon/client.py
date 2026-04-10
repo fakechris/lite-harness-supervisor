@@ -47,6 +47,35 @@ class DaemonClient:
         """Stop all runs."""
         return self._request({"action": "stop_all"})
 
+    def list_runs(self) -> dict:
+        """List all active runs with detailed state."""
+        return self._request({"action": "list_runs"})
+
+    def observe(self, run_id: str) -> dict:
+        """Read-only observation of a specific run."""
+        return self._request({"action": "observe", "run_id": run_id})
+
+    def note_add(self, content: str, *, note_type: str = "context",
+                 author_run_id: str = "human", title: str = "") -> dict:
+        """Add a shared note."""
+        return self._request({
+            "action": "note_add",
+            "content": content,
+            "note_type": note_type,
+            "author_run_id": author_run_id,
+            "title": title,
+        })
+
+    def note_list(self, *, note_type: str = "", run_id: str = "",
+                  limit: int = 20) -> dict:
+        """List shared notes."""
+        req: dict = {"action": "note_list", "limit": limit}
+        if note_type:
+            req["note_type"] = note_type
+        if run_id:
+            req["run_id"] = run_id
+        return self._request(req)
+
     def _request(self, data: dict) -> dict:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(5)
