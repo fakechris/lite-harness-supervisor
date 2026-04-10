@@ -91,12 +91,14 @@ class TestOpenRelaySurfaceDoctor:
 
 
 class TestSessionAdapterProtocol:
-    def test_terminal_adapter_satisfies_protocol(self):
-        from supervisor.terminal.adapter import TerminalAdapter
-        assert issubclass(TerminalAdapter, SessionAdapter) or hasattr(TerminalAdapter, "read")
+    def test_open_relay_has_all_protocol_methods(self):
+        methods = ["read", "inject", "current_cwd", "session_id", "doctor"]
+        for m in methods:
+            assert hasattr(OpenRelaySurface, m), f"OpenRelaySurface missing {m}"
 
-    def test_open_relay_surface_satisfies_protocol(self):
-        assert issubclass(OpenRelaySurface, SessionAdapter) or hasattr(OpenRelaySurface, "read")
+    def test_open_relay_instance_check(self):
+        surface = OpenRelaySurface("test-123")
+        assert isinstance(surface, SessionAdapter)
 
 
 class TestSurfaceFactory:

@@ -18,7 +18,9 @@ class OpenRelaySurface:
     """Adapter for open-relay sessions via the `oly` CLI."""
 
     def __init__(self, session_id: str):
-        self._session_id = session_id
+        if not session_id or not session_id.strip():
+            raise OpenRelaySurfaceError("session_id must not be empty")
+        self._session_id = session_id.strip()
 
     def read(self, lines: int = 100) -> str:
         """Read recent output from the oly session."""
@@ -42,7 +44,7 @@ class OpenRelaySurface:
             sessions = json.loads(result.stdout)
             if isinstance(sessions, list):
                 for s in sessions:
-                    if str(s.get("id", "")).startswith(self._session_id):
+                    if str(s.get("id", "")) == self._session_id:
                         return s.get("cwd", "")
         except (json.JSONDecodeError, OpenRelaySurfaceError):
             pass
@@ -71,7 +73,7 @@ class OpenRelaySurface:
             result = self._oly("ls", "--json")
             sessions = json.loads(result.stdout)
             found = any(
-                str(s.get("id", "")).startswith(self._session_id)
+                str(s.get("id", "")) == self._session_id
                 for s in (sessions if isinstance(sessions, list) else [])
             )
             if not found:
