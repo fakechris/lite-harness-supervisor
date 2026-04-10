@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from supervisor.daemon.server import DaemonServer, SOCK_PATH
+from supervisor.daemon.server import DaemonServer
 from supervisor.daemon.client import DaemonClient
 
 
@@ -20,11 +20,7 @@ def daemon_server(tmp_path, monkeypatch):
     pid_path = str(tmp_path / "test.pid")
     runs_dir = str(tmp_path / "runs")
 
-    monkeypatch.setattr("supervisor.daemon.server.SOCK_PATH", sock_path)
-    monkeypatch.setattr("supervisor.daemon.server.PID_PATH", pid_path)
-    monkeypatch.setattr("supervisor.daemon.server.RUNS_DIR", runs_dir)
-
-    server = DaemonServer()
+    server = DaemonServer(sock_path=sock_path, pid_path=pid_path, runs_dir=runs_dir)
     thread = threading.Thread(target=server.start, daemon=True)
     thread.start()
 

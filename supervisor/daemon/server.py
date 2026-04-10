@@ -22,19 +22,23 @@ from supervisor.config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 
-SOCK_PATH = ".supervisor/daemon.sock"
-PID_PATH = ".supervisor/daemon.pid"
-RUNS_DIR = ".supervisor/runtime/runs"
+# Default paths — overridden by config in production
+DEFAULT_SOCK_PATH = ".supervisor/daemon.sock"
+DEFAULT_PID_PATH = ".supervisor/daemon.pid"
+DEFAULT_RUNS_DIR = ".supervisor/runtime/runs"
+
+MAX_REQUEST_SIZE = 64 * 1024  # 64KB max request
 
 
 class RunEntry:
     """Registry entry for one active run."""
 
     def __init__(self, run_id: str, spec_path: str, pane_target: str,
-                 thread: threading.Thread, store: StateStore):
+                 workspace_root: str, thread: threading.Thread, store: StateStore):
         self.run_id = run_id
         self.spec_path = spec_path
         self.pane_target = pane_target
+        self.workspace_root = workspace_root
         self.thread = thread
         self.store = store
         self.stop_event = threading.Event()
@@ -45,7 +49,7 @@ class RunEntry:
             "run_id": self.run_id,
             "spec_path": self.spec_path,
             "pane_target": self.pane_target,
-            "alive": self.thread.is_alive(),
+            "alive": self.thread.is_alive() if self.thread else False,
             "top_state": state.get("top_state", "UNKNOWN") if state else "UNKNOWN",
             "current_node": state.get("current_node_id", "") if state else "",
         }
@@ -60,8 +64,12 @@ class RunEntry:
 class DaemonServer:
     """Single-process daemon managing multiple supervisor runs."""
 
-    def __init__(self, config: RuntimeConfig | None = None):
+    def __init__(self, config: RuntimeConfig | None = None, *,
+                 sock_path: str = "", pid_path: str = "", runs_dir: str = ""):
         self.config = config or RuntimeConfig()
+        self.sock_path = sock_path or DEFAULT_SOCK_PATH
+        self.pid_path = pid_path or DEFAULT_PID_PATH
+        self.runs_dir = runs_dir or DEFAULT_RUNS_DIR
         self._runs: dict[str, RunEntry] = {}
         self._lock = threading.Lock()
         self._shutdown = threading.Event()
@@ -69,28 +77,25 @@ class DaemonServer:
 
     def start(self) -> None:
         """Start the daemon: bind socket, write PID, accept connections."""
-        Path(RUNS_DIR).mkdir(parents=True, exist_ok=True)
+        Path(self.runs_dir).mkdir(parents=True, exist_ok=True)
 
-        # Clean stale socket
-        sock_path = Path(SOCK_PATH)
+        sock_path = Path(self.sock_path)
         sock_path.unlink(missing_ok=True)
 
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.bind(str(sock_path))
         self._sock.listen(5)
-        self._sock.settimeout(1.0)  # allow periodic shutdown check
+        self._sock.settimeout(1.0)
 
-        # Write PID
-        Path(PID_PATH).parent.mkdir(parents=True, exist_ok=True)
-        Path(PID_PATH).write_text(str(os.getpid()))
+        Path(self.pid_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.pid_path).write_text(str(os.getpid()))
 
-        # SIGTERM handler (only in main thread)
         try:
             signal.signal(signal.SIGTERM, self._handle_sigterm)
         except ValueError:
-            pass  # not main thread (e.g., in tests)
+            pass  # not main thread
 
-        logger.info("daemon started (PID %d, socket %s)", os.getpid(), SOCK_PATH)
+        logger.info("daemon started (PID %d, socket %s)", os.getpid(), self.sock_path)
 
         try:
             self._accept_loop()
@@ -107,7 +112,7 @@ class DaemonServer:
             except OSError:
                 break
             try:
-                conn.settimeout(10)  # prevent hung client from blocking daemon
+                conn.settimeout(10)
                 self._handle_connection(conn)
             except Exception:
                 logger.exception("error handling connection")
@@ -116,13 +121,17 @@ class DaemonServer:
 
     def _handle_connection(self, conn: socket.socket) -> None:
         data = b""
-        while True:
+        while len(data) < MAX_REQUEST_SIZE:
             chunk = conn.recv(4096)
             if not chunk:
                 break
             data += chunk
             if b"\n" in data:
                 break
+
+        if len(data) >= MAX_REQUEST_SIZE:
+            self._send(conn, {"ok": False, "error": "request too large"})
+            return
 
         try:
             request = json.loads(data.decode("utf-8").strip())
@@ -149,6 +158,7 @@ class DaemonServer:
     def _do_register(self, request: dict) -> dict:
         spec_path = request.get("spec_path", "")
         pane_target = request.get("pane_target", "")
+        workspace_root = request.get("workspace_root", os.getcwd())
 
         if not spec_path or not pane_target:
             return {"ok": False, "error": "spec_path and pane_target required"}
@@ -159,23 +169,23 @@ class DaemonServer:
             return {"ok": False, "error": f"spec load failed: {e}"}
 
         run_id = f"run_{uuid.uuid4().hex[:12]}"
-        run_dir = str(Path(RUNS_DIR) / run_id)
+        run_dir = str(Path(self.runs_dir) / run_id)
         store = StateStore(run_dir)
         state = store.load_or_init(
             spec, spec_path=spec_path, pane_target=pane_target,
-            workspace_root=os.getcwd(),
+            workspace_root=workspace_root,
         )
 
         if state.run_id != run_id:
             state.run_id = run_id
             store.save(state)
 
-        entry = RunEntry(run_id, spec_path, pane_target, thread=None, store=store)
+        entry = RunEntry(run_id, spec_path, pane_target, workspace_root,
+                         thread=None, store=store)
 
-        # Hold lock across duplicate check AND registry insertion (no race)
         with self._lock:
             for existing in self._runs.values():
-                if existing.pane_target == pane_target and existing.thread.is_alive():
+                if existing.pane_target == pane_target and existing.thread and existing.thread.is_alive():
                     return {"ok": False, "error": f"pane {pane_target} already has active run {existing.run_id}"}
 
             thread = threading.Thread(
@@ -188,7 +198,7 @@ class DaemonServer:
             self._runs[run_id] = entry
 
         thread.start()
-        logger.info("registered run %s: spec=%s pane=%s", run_id, spec_path, pane_target)
+        logger.info("registered run %s: spec=%s pane=%s cwd=%s", run_id, spec_path, pane_target, workspace_root)
         return {"ok": True, "run_id": run_id}
 
     def _run_worker(self, entry: RunEntry, spec, state) -> None:
@@ -222,29 +232,30 @@ class DaemonServer:
         if not entry:
             return {"ok": False, "error": f"run {run_id} not found"}
         entry.stop_event.set()
-        # Wait for worker thread to notice stop_event and exit
-        entry.thread.join(timeout=10)
-        if entry.thread.is_alive():
-            logger.warning("run %s did not stop within 10s", run_id)
-        # Remove from registry only after thread stops (prevents pane collision)
-        with self._lock:
-            self._runs.pop(run_id, None)
-        logger.info("stopped run %s", run_id)
+        # Non-blocking: don't wait in the IPC handler thread.
+        # Reaper will clean up after thread exits.
+        logger.info("stop signal sent to run %s", run_id)
         return {"ok": True}
 
     def _do_stop_all(self) -> dict:
         with self._lock:
-            run_ids = list(self._runs.keys())
-        for rid in run_ids:
-            self._do_stop(rid)
-        return {"ok": True, "stopped": len(run_ids)}
+            entries = list(self._runs.values())
+        for entry in entries:
+            entry.stop_event.set()
+        return {"ok": True, "stopped": len(entries)}
 
     def _reap_finished(self) -> None:
-        """Remove completed runs from registry."""
+        """Remove completed/stopped runs from registry."""
         with self._lock:
-            finished = [rid for rid, e in self._runs.items() if not e.thread.is_alive()]
+            finished = [rid for rid, e in self._runs.items()
+                        if not e.thread.is_alive() or e.stop_event.is_set()]
             for rid in finished:
+                e = self._runs[rid]
+                if e.thread.is_alive():
+                    e.thread.join(timeout=2)
                 del self._runs[rid]
+                if finished:
+                    logger.info("reaped %d finished run(s)", len(finished))
 
     def _handle_sigterm(self, signum, frame):
         logger.info("SIGTERM received, shutting down")
@@ -252,10 +263,15 @@ class DaemonServer:
 
     def _cleanup(self) -> None:
         self._do_stop_all()
+        # Wait for threads to finish (with timeout)
+        with self._lock:
+            threads = [e.thread for e in self._runs.values() if e.thread]
+        for t in threads:
+            t.join(timeout=5)
         if self._sock:
             self._sock.close()
-        Path(SOCK_PATH).unlink(missing_ok=True)
-        Path(PID_PATH).unlink(missing_ok=True)
+        Path(self.sock_path).unlink(missing_ok=True)
+        Path(self.pid_path).unlink(missing_ok=True)
         logger.info("daemon stopped")
 
     @staticmethod

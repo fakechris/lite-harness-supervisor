@@ -2,8 +2,6 @@ After completing meaningful work, you MUST output a checkpoint block
 in exactly this format:
 
 <checkpoint>
-run_id: <run_id from thin-supervisor status>
-checkpoint_seq: <incrementing integer, start from 1>
 status: working | blocked | step_done | workflow_done
 current_node: <step_id>
 summary: <one-line description>
@@ -19,7 +17,15 @@ question_for_supervisor:
   - none
 </checkpoint>
 
-This is a hard contract. The supervisor parses these to track progress.
-Emit "step_done" when you believe the current step is complete.
-Emit "blocked" when you need external input you cannot obtain yourself.
-Emit "working" for intermediate progress updates.
+Notes:
+- You do NOT need to include run_id or checkpoint_seq — the supervisor
+  fills these automatically.
+- Emit "step_done" when you believe the current step is complete.
+- Emit "blocked" when you need external input you cannot obtain yourself.
+  The supervisor will escalate to a human.
+- Emit "working" for intermediate progress (roughly every 2-3 significant
+  actions, not every line of code).
+- When you receive a retry instruction with failure details, fix the issue
+  and emit a new checkpoint for the same current_node.
+- When the supervisor injects a new node objective, switch to that node
+  and emit checkpoints for the new current_node.

@@ -23,13 +23,17 @@ class DaemonClient:
         except (ConnectionRefusedError, FileNotFoundError, OSError):
             return False
 
-    def register(self, spec_path: str, pane_target: str) -> dict:
+    def register(self, spec_path: str, pane_target: str, *,
+                 workspace_root: str = "") -> dict:
         """Register a new run with the daemon."""
-        return self._request({
+        req: dict = {
             "action": "register",
             "spec_path": spec_path,
             "pane_target": pane_target,
-        })
+        }
+        if workspace_root:
+            req["workspace_root"] = workspace_root
+        return self._request(req)
 
     def status(self) -> dict:
         """Get status of all runs."""

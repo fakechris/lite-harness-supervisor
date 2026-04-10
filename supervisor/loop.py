@@ -14,6 +14,7 @@ from supervisor.llm.judge_client import JudgeClient
 from supervisor.verifiers.suite import VerifierSuite
 from supervisor.adapters.transcript_adapter import TranscriptAdapter
 from supervisor.instructions.composer import InstructionComposer
+from supervisor.progress import write_progress
 
 logger = logging.getLogger(__name__)
 
@@ -413,8 +414,12 @@ class SupervisorLoop:
                     logger.info("injected: %s (id=%s, trigger=%s)", node.id, instruction.instruction_id, trigger)
                     continue  # skip double save
 
-            # 7. Persist
+            # 7. Persist + progress
             self.store.save(state)
+            try:
+                write_progress(state, spec, str(self.store.runtime_dir))
+            except Exception:
+                pass  # progress is best-effort
 
     def _get_cwd(self, terminal) -> str | None:
         if hasattr(terminal, "current_cwd"):
