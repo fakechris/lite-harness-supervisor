@@ -107,6 +107,7 @@ class DaemonServer:
             except OSError:
                 break
             try:
+                conn.settimeout(10)  # prevent hung client from blocking daemon
                 self._handle_connection(conn)
             except Exception:
                 logger.exception("error handling connection")
@@ -221,18 +222,11 @@ class DaemonServer:
         if not entry:
             return {"ok": False, "error": f"run {run_id} not found"}
         entry.stop_event.set()
-        # The run_sidecar loop checks interrupted_ref which we can't directly
-        # reach from here. But the thread is daemon=True, so it dies with the
-        # process. For graceful stop, we save state and remove from registry.
-        state = entry._read_state()
-        if state and state.get("top_state") not in ("COMPLETED", "FAILED", "ABORTED"):
-            # Mark as paused
-            try:
-                full_state = json.loads(entry.store.state_path.read_text())
-                full_state["top_state"] = "PAUSED_FOR_HUMAN"
-                entry.store.state_path.write_text(json.dumps(full_state, indent=2))
-            except Exception:
-                pass
+        # Wait for worker thread to notice stop_event and exit
+        entry.thread.join(timeout=10)
+        if entry.thread.is_alive():
+            logger.warning("run %s did not stop within 10s", run_id)
+        # Remove from registry only after thread stops (prevents pane collision)
         with self._lock:
             self._runs.pop(run_id, None)
         logger.info("stopped run %s", run_id)
