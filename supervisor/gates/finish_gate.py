@@ -71,6 +71,15 @@ class FinishGate:
                     except (subprocess.SubprocessError, FileNotFoundError):
                         pass
 
+        # Check required_evidence against checkpoint evidence
+        if contract.required_evidence:
+            cp = state.last_agent_checkpoint or {}
+            provided = cp.get("evidence", [])
+            provided_str = " ".join(str(e) for e in provided).lower()
+            for req in contract.required_evidence:
+                if req.lower() not in provided_str:
+                    failures.append(f"missing required evidence: {req}")
+
         # Check must_review_by
         if contract.must_review_by:
             failures.append(f"requires review by: {contract.must_review_by}")

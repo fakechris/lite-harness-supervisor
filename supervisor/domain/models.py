@@ -76,6 +76,14 @@ class AcceptanceContract:
     require_verification_pass: bool = True
     require_clean_or_committed_repo: bool = False
 
+    def __post_init__(self):
+        valid_risk = {"low", "standard", "high", "critical"}
+        valid_review = {"", "human", "stronger_reviewer"}
+        if self.risk_class not in valid_risk:
+            raise ValueError(f"invalid risk_class: {self.risk_class!r} (expected one of {valid_risk})")
+        if self.must_review_by not in valid_review:
+            raise ValueError(f"invalid must_review_by: {self.must_review_by!r} (expected one of {valid_review})")
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -97,6 +105,14 @@ class WorkerProfile:
     model_name: str = ""                  # claude-opus-4-6 | gpt-5.4 | ...
     role: str = "executor"                # executor | reviewer
     trust_level: str = "standard"         # low | standard | high
+
+    def __post_init__(self):
+        valid_trust = {"low", "standard", "high"}
+        valid_roles = {"executor", "reviewer"}
+        if self.trust_level not in valid_trust:
+            raise ValueError(f"invalid trust_level: {self.trust_level!r} (expected one of {valid_trust})")
+        if self.role not in valid_roles:
+            raise ValueError(f"invalid role: {self.role!r} (expected one of {valid_roles})")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

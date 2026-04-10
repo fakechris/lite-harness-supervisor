@@ -69,6 +69,8 @@ def load_spec(path: str) -> WorkflowSpec:
     acceptance = None
     if "acceptance" in data:
         acc = data["acceptance"]
+        if not isinstance(acc, dict):
+            raise SpecValidationError("acceptance must be a YAML mapping")
         acceptance = AcceptanceContract(
             goal=acc.get("goal", data.get("goal", "")),
             required_evidence=acc.get("required_evidence", []),

@@ -159,7 +159,11 @@ class SupervisorLoop:
                 decision.to_dict() if hasattr(decision, "to_dict") else decision
             )
             # Create RoutingDecision for audit trail
-            decision_id = decision.decision_id if hasattr(decision, "decision_id") else ""
+            decision_id = (
+                decision.decision_id if hasattr(decision, "decision_id")
+                else decision.get("decision_id", "") if isinstance(decision, dict)
+                else ""
+            )
             routing = RoutingDecision(
                 target_type="human",
                 scope="single_question",
@@ -421,9 +425,8 @@ class SupervisorLoop:
                     node = spec.get_node(state.current_node_id)
                     decision_id = decision.decision_id if decision else ""
                     trigger = "retry" if new_retry else ("branch" if decision and decision.decision.upper() == "BRANCH" else "node_advance")
-                    # Re-evaluate policy on failures
-                    if state.current_attempt > 0:
-                        policy = self.policy_engine.determine(self.worker_profile, contract, state)
+                    # Re-evaluate policy (node advance resets attempt, failures escalate)
+                    policy = self.policy_engine.determine(self.worker_profile, contract, state)
                     instruction = self.composer.build(
                         node, state,
                         triggered_by_decision_id=decision_id,
