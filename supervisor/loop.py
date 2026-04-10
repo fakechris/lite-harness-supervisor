@@ -5,7 +5,10 @@ import signal
 import time
 
 from supervisor.domain.enums import TopState, DecisionType
-from supervisor.domain.models import Checkpoint, SupervisorDecision, HandoffInstruction
+from supervisor.domain.models import (
+    Checkpoint, SupervisorDecision, HandoffInstruction,
+    WorkerProfile, SupervisionPolicy, RoutingDecision, AcceptanceContract,
+)
 from supervisor.domain.state_machine import FINAL_STATES
 from supervisor.gates.continue_gate import ContinueGate
 from supervisor.gates.branch_gate import BranchGate
@@ -14,6 +17,7 @@ from supervisor.llm.judge_client import JudgeClient
 from supervisor.verifiers.suite import VerifierSuite
 from supervisor.adapters.transcript_adapter import TranscriptAdapter
 from supervisor.instructions.composer import InstructionComposer
+from supervisor.gates.supervision_policy import SupervisionPolicyEngine
 from supervisor.progress import write_progress
 
 logger = logging.getLogger(__name__)
@@ -36,7 +40,8 @@ def build_context(spec, state) -> dict:
 
 class SupervisorLoop:
     def __init__(self, store, judge_model: str | None = None,
-                 judge_temperature: float = 0.1, judge_max_tokens: int = 512):
+                 judge_temperature: float = 0.1, judge_max_tokens: int = 512,
+                 worker_profile: WorkerProfile | None = None):
         self.store = store
         self.judge_client = JudgeClient(
             model=judge_model,
@@ -48,6 +53,8 @@ class SupervisorLoop:
         self.finish_gate = FinishGate()
         self.verifier_suite = VerifierSuite()
         self.composer = InstructionComposer()
+        self.policy_engine = SupervisionPolicyEngine()
+        self.worker_profile = worker_profile or WorkerProfile()
 
     def handle_event(self, state, event):
         state.last_event = event
@@ -150,6 +157,18 @@ class SupervisorLoop:
             state.top_state = TopState.PAUSED_FOR_HUMAN
             state.human_escalations.append(
                 decision.to_dict() if hasattr(decision, "to_dict") else decision
+            )
+            # Create RoutingDecision for audit trail
+            decision_id = decision.decision_id if hasattr(decision, "decision_id") else ""
+            routing = RoutingDecision(
+                target_type="human",
+                scope="single_question",
+                reason=decision.reason if hasattr(decision, "reason") else str(decision.get("reason", "")),
+                triggered_by_decision_id=decision_id,
+            )
+            self.store.append_session_event(
+                state.run_id if hasattr(state, "run_id") else "",
+                "routing", routing.to_dict(),
             )
             return
         if kind == DecisionType.ABORT.value:
@@ -265,6 +284,11 @@ class SupervisorLoop:
     ):
         pending_text = None
 
+        # Compute supervision policy based on worker + contract + state
+        contract = spec.acceptance or AcceptanceContract.from_finish_policy(spec.finish_policy, goal=spec.goal)
+        policy = self.policy_engine.determine(self.worker_profile, contract, state)
+        logger.info("supervision policy: %s (%s)", policy.mode, policy.reason)
+
         # READY → RUNNING: inject first instruction
         if state.top_state == TopState.READY:
             state.top_state = TopState.RUNNING
@@ -280,6 +304,7 @@ class SupervisorLoop:
                     node, state,
                     triggered_by_decision_id="",
                     trigger_type="init",
+                    policy=policy,
                 )
                 # #11: save state BEFORE inject to avoid replay on crash
                 state.last_injected_node_id = state.current_node_id
@@ -396,10 +421,14 @@ class SupervisorLoop:
                     node = spec.get_node(state.current_node_id)
                     decision_id = decision.decision_id if decision else ""
                     trigger = "retry" if new_retry else ("branch" if decision and decision.decision.upper() == "BRANCH" else "node_advance")
+                    # Re-evaluate policy on failures
+                    if state.current_attempt > 0:
+                        policy = self.policy_engine.determine(self.worker_profile, contract, state)
                     instruction = self.composer.build(
                         node, state,
                         triggered_by_decision_id=decision_id,
                         trigger_type=trigger,
+                        policy=policy,
                     )
                     # Save state BEFORE inject to prevent replay on crash
                     state.last_injected_node_id = state.current_node_id

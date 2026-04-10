@@ -1,31 +1,29 @@
-"""Finish gate — enforces finish_policy before allowing COMPLETED."""
+"""Finish gate — enforces AcceptanceContract before allowing COMPLETED."""
 from __future__ import annotations
 
 import subprocess
+
+from supervisor.domain.models import AcceptanceContract
 
 
 class FinishGate:
     """Evaluates whether a run can transition to COMPLETED.
 
-    Checks finish_policy requirements:
-    - require_all_steps_done
-    - require_verification_pass
-    - require_clean_or_committed_repo
+    Uses AcceptanceContract (if available) or falls back to FinishPolicy.
     """
 
     def evaluate(self, spec, state, *, cwd: str | None = None) -> dict:
-        failures: list[str] = []
-        fp = spec.finish_policy
+        contract = spec.acceptance
+        if contract is None:
+            # Backward compat: build from finish_policy
+            contract = AcceptanceContract.from_finish_policy(spec.finish_policy, goal=spec.goal)
 
-        if fp.require_all_steps_done:
-            # For conditional workflows, only require nodes that were
-            # actually visited (done + current). Skipped branches are
-            # not required — the branch_history records which path was taken.
+        failures: list[str] = []
+
+        # Check all steps done
+        if contract.require_all_steps_done:
             if spec.kind == "conditional_workflow":
-                # Nodes on the taken path: done nodes + nodes reachable
-                # from branch decisions. Don't require skipped branches.
                 required = set(state.done_node_ids)
-                # Current node should also be done
                 required.add(state.current_node_id)
             else:
                 required = {n.id for n in spec.ordered_nodes()}
@@ -34,12 +32,14 @@ class FinishGate:
             if missing:
                 failures.append(f"nodes not done: {', '.join(sorted(missing))}")
 
-        if fp.require_verification_pass:
+        # Check verification pass
+        if contract.require_verification_pass:
             v = state.verification or {}
             if not v.get("ok", False) and v.get("last_status") != "pending":
                 failures.append("last verification did not pass")
 
-        if fp.require_clean_or_committed_repo:
+        # Check clean repo
+        if contract.require_clean_or_committed_repo:
             try:
                 result = subprocess.run(
                     ["git", "status", "--porcelain"],
@@ -51,8 +51,33 @@ class FinishGate:
             except (subprocess.SubprocessError, FileNotFoundError):
                 failures.append("could not check git status")
 
+        # Check forbidden states
+        for forbidden in contract.forbidden_states:
+            if forbidden == "test_failing":
+                v = state.verification or {}
+                if not v.get("ok", True):
+                    failures.append(f"forbidden state: {forbidden}")
+            elif forbidden == "uncommitted_changes":
+                if contract.require_clean_or_committed_repo:
+                    pass  # already checked above
+                else:
+                    try:
+                        result = subprocess.run(
+                            ["git", "status", "--porcelain"],
+                            capture_output=True, text=True, timeout=10, cwd=cwd,
+                        )
+                        if result.stdout.strip():
+                            failures.append(f"forbidden state: {forbidden}")
+                    except (subprocess.SubprocessError, FileNotFoundError):
+                        pass
+
+        # Check must_review_by
+        if contract.must_review_by:
+            failures.append(f"requires review by: {contract.must_review_by}")
+
         return {
             "ok": len(failures) == 0,
-            "reason": "; ".join(failures) if failures else "all finish conditions met",
+            "reason": "; ".join(failures) if failures else "all acceptance criteria met",
             "failures": failures,
+            "risk_class": contract.risk_class,
         }

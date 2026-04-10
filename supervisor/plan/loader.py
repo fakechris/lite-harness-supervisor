@@ -2,7 +2,7 @@ from __future__ import annotations
 import pathlib
 import yaml
 
-from supervisor.domain.models import WorkflowSpec, StepSpec, VerifyCheck, BranchOption, FinishPolicy, RuntimePolicy
+from supervisor.domain.models import WorkflowSpec, StepSpec, VerifyCheck, BranchOption, FinishPolicy, RuntimePolicy, AcceptanceContract
 
 class SpecValidationError(ValueError):
     pass
@@ -65,6 +65,23 @@ def load_spec(path: str) -> WorkflowSpec:
     finish_policy = FinishPolicy(**data.get("finish_policy", {}))
     policy = RuntimePolicy(**data.get("policy", {}))
 
+    # Parse acceptance contract (optional, backward compat with finish_policy)
+    acceptance = None
+    if "acceptance" in data:
+        acc = data["acceptance"]
+        acceptance = AcceptanceContract(
+            goal=acc.get("goal", data.get("goal", "")),
+            required_evidence=acc.get("required_evidence", []),
+            forbidden_states=acc.get("forbidden_states", []),
+            risk_class=acc.get("risk_class", "standard"),
+            must_review_by=acc.get("must_review_by", ""),
+            require_all_steps_done=acc.get("require_all_steps_done", finish_policy.require_all_steps_done),
+            require_verification_pass=acc.get("require_verification_pass", finish_policy.require_verification_pass),
+            require_clean_or_committed_repo=acc.get("require_clean_or_committed_repo", finish_policy.require_clean_or_committed_repo),
+        )
+    else:
+        acceptance = AcceptanceContract.from_finish_policy(finish_policy, goal=data.get("goal", ""))
+
     steps = _parse_nodes(data.get("steps", []))
     nodes = _parse_nodes(data.get("nodes", []))
 
@@ -81,4 +98,5 @@ def load_spec(path: str) -> WorkflowSpec:
         nodes=nodes,
         finish_policy=finish_policy,
         policy=policy,
+        acceptance=acceptance,
     )
