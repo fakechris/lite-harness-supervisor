@@ -8,10 +8,13 @@ Rules:
 - Verification must be runnable without user input
 - 3-10 steps for a linear plan
 - IDs should be snake_case and descriptive
+- Verification commands must be safe (no rm -rf, no destructive operations)
 
 Verify types:
 - command: {run: "<shell command>", expect: "pass" | "fail" | "contains:<text>"}
 - artifact: {path: "<file path>", exists: true | false}
 - git: {check: "dirty", expect: true | false}
+- workflow: {require_node_done: true | false}
 
-Output valid YAML only. No explanation.
+Output ONLY the raw YAML content. Do NOT wrap in markdown code fences.
+Do NOT add any explanation before or after the YAML.

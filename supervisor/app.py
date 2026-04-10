@@ -81,24 +81,13 @@ def cmd_deinit(args):
 # ------------------------------------------------------------------
 
 
-def cmd_daemon_start(args):
-    """Start the supervisor daemon (single process, multi-run)."""
-    from supervisor.daemon.server import DaemonServer, PID_PATH
-    from supervisor.daemon.client import DaemonClient
+def _fork_daemon(config: RuntimeConfig) -> int:
+    """Fork a daemon process. Returns child PID to parent, 0 to child (never returns)."""
+    from supervisor.daemon.server import DaemonServer
 
-    client = DaemonClient()
-    if client.is_running():
-        pid = client.daemon_pid()
-        print(f"Daemon already running (PID {pid}).")
-        return 1
-
-    config = RuntimeConfig.load(args.config or CONFIG_FILE)
-
-    # Fork to background
     pid = os.fork()
     if pid > 0:
-        print(f"Daemon started (PID {pid})")
-        return 0
+        return pid  # parent
 
     # Child — detach
     os.setsid()
@@ -118,6 +107,22 @@ def cmd_daemon_start(args):
     server = DaemonServer(config)
     server.start()
     sys.exit(0)
+
+
+def cmd_daemon_start(args):
+    """Start the supervisor daemon (single process, multi-run)."""
+    from supervisor.daemon.client import DaemonClient
+
+    client = DaemonClient()
+    if client.is_running():
+        pid = client.daemon_pid()
+        print(f"Daemon already running (PID {pid}).")
+        return 1
+
+    config = RuntimeConfig.load(args.config or CONFIG_FILE)
+    pid = _fork_daemon(config)
+    print(f"Daemon started (PID {pid})")
+    return 0
 
 
 def cmd_daemon_stop(args):
@@ -161,53 +166,38 @@ def cmd_daemon_stop(args):
 # ------------------------------------------------------------------
 
 
-def cmd_run_register(args):
-    """Register a new run with the daemon."""
+def _ensure_daemon(config_path: str | None = None) -> "DaemonClient":
+    """Ensure daemon is running, auto-start if needed. Returns client."""
     from supervisor.daemon.client import DaemonClient
 
     client = DaemonClient()
+    if client.is_running():
+        return client
 
-    # Auto-start daemon if not running
-    if not client.is_running():
-        print("Daemon not running. Starting...")
-        # Start daemon in background
-        config = RuntimeConfig.load(args.config or CONFIG_FILE)
-        pid = os.fork()
-        if pid == 0:
-            os.setsid()
-            devnull = os.open(os.devnull, os.O_RDWR)
-            os.dup2(devnull, 0)
-            os.dup2(devnull, 1)
-            os.dup2(devnull, 2)
-            os.close(devnull)
-            log_path = Path(RUNTIME_DIR) / "daemon.log"
-            log_path.parent.mkdir(parents=True, exist_ok=True)
-            logging.basicConfig(
-                filename=str(log_path), level=logging.INFO, force=True,
-                format="%(asctime)s %(name)s %(levelname)s %(message)s",
-            )
-            from supervisor.daemon.server import DaemonServer
-            server = DaemonServer(config)
-            server.start()
-            sys.exit(0)
-        else:
-            # Wait for daemon to be ready
-            for _ in range(30):
-                _time.sleep(0.2)
-                if client.is_running():
-                    break
-            else:
-                print("Error: daemon did not start within 6s.")
-                return 1
+    print("Daemon not running. Starting...")
+    config = RuntimeConfig.load(config_path or CONFIG_FILE)
+    _fork_daemon(config)
 
-    spec_path = os.path.abspath(args.spec)
+    for _ in range(30):
+        _time.sleep(0.2)
+        if client.is_running():
+            return client
+    print("Error: daemon did not start within 6s.")
+    sys.exit(1)
+
+
+def cmd_run_register(args):
+    """Register a new run with the daemon."""
     pane_target = args.pane
-
     if not pane_target:
         print("Error: --pane <target> is required.")
         return 1
 
-    result = client.register(spec_path, pane_target)
+    client = _ensure_daemon(args.config)
+    spec_path = os.path.abspath(args.spec)
+    workspace_root = os.getcwd()
+
+    result = client.register(spec_path, pane_target, workspace_root=workspace_root)
     if result.get("ok"):
         print(f"Run registered: {result['run_id']}")
         print(f"  spec: {spec_path}")
@@ -462,20 +452,11 @@ def cmd_run_legacy(args):
         print(json.dumps(state.to_dict(), ensure_ascii=False, indent=2))
         return 0
 
+    mapped = argparse.Namespace(spec=args.spec_path, pane=args.pane, config=args.config)
     if args.daemon:
-        # Map to: run register
-        class FakeArgs:
-            spec = args.spec_path
-            pane = args.pane
-            config = args.config
-        return cmd_run_register(FakeArgs())
+        return cmd_run_register(mapped)
     else:
-        # Map to: run foreground
-        class FakeArgs:
-            spec = args.spec_path
-            pane = args.pane
-            config = args.config
-        return cmd_run_foreground(FakeArgs())
+        return cmd_run_foreground(mapped)
 
 
 def _run_event_file(event_file, spec, state, store, loop):
