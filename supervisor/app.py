@@ -222,20 +222,22 @@ def cmd_run_foreground(args):
     import uuid
     run_id = f"run_{uuid.uuid4().hex[:12]}"
     run_dir = str(Path(RUNTIME_DIR) / "runs" / run_id)
+    surface_type = getattr(config, "surface_type", "tmux")
     store = StateStore(run_dir)
     state = store.load_or_init(
         spec,
         spec_path=os.path.abspath(args.spec),
         pane_target=pane_target,
+        surface_type=surface_type,
         workspace_root=os.getcwd(),
     )
 
-    from supervisor.terminal.adapter import TerminalAdapter
-    terminal = TerminalAdapter(pane_target)
+    from supervisor.adapters.surface_factory import create_surface
+    terminal = create_surface(surface_type, pane_target)
 
     diag = terminal.doctor()
     if not diag["ok"]:
-        print(f"tmux issues: {diag['issues']}")
+        print(f"Surface issues: {diag['issues']}")
         return 1
 
     loop = SupervisorLoop(

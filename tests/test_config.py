@@ -50,6 +50,7 @@ def test_load_priority(tmp_path, monkeypatch):
 def test_default_config_yaml():
     cfg = RuntimeConfig()
     yaml_str = cfg.default_config_yaml()
-    assert "pane_target" in yaml_str
+    assert "surface_type" in yaml_str
+    assert "surface_target" in yaml_str
     assert "judge_model" in yaml_str
     assert "null" in yaml_str
