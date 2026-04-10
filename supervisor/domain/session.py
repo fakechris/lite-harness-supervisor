@@ -8,16 +8,25 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from supervisor.domain.models import SupervisorState, Checkpoint, SupervisorDecision, HandoffInstruction
+from supervisor.domain.models import (
+    SupervisorState, Checkpoint, SupervisorDecision, HandoffInstruction,
+    AcceptanceContract, WorkerProfile, SupervisionPolicy,
+)
 from supervisor.domain.state_machine import FINAL_STATES
 
 
 class SessionRun:
-    """Wraps SupervisorState with history access and identity queries."""
+    """Wraps SupervisorState with history access, identity, and policy queries."""
 
-    def __init__(self, state: SupervisorState, store):
+    def __init__(self, state: SupervisorState, store, *,
+                 acceptance: AcceptanceContract | None = None,
+                 worker: WorkerProfile | None = None,
+                 policy: SupervisionPolicy | None = None):
         self.state = state
         self._store = store
+        self._acceptance = acceptance
+        self._worker = worker or WorkerProfile()
+        self._policy = policy
 
     @property
     def run_id(self) -> str:
@@ -40,6 +49,27 @@ class SessionRun:
     def is_completed(self) -> bool:
         from supervisor.domain.enums import TopState
         return self.state.top_state == TopState.COMPLETED
+
+    @property
+    def acceptance_contract(self) -> AcceptanceContract | None:
+        return self._acceptance
+
+    @property
+    def worker_profile(self) -> WorkerProfile:
+        return self._worker
+
+    @property
+    def supervision_policy(self) -> SupervisionPolicy | None:
+        return self._policy
+
+    @property
+    def routing_history(self) -> list[dict]:
+        """Read routing decisions from session log."""
+        return [
+            e.get("payload", {})
+            for e in self.events_since(0)
+            if e.get("event_type") == "routing"
+        ]
 
     def save(self) -> None:
         self._store.save(self.state)

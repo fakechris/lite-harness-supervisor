@@ -16,6 +16,11 @@ class RuntimeConfig:
     poll_interval_sec: float = 2.0
     read_lines: int = 100
 
+    # -- Worker Profile --
+    worker_provider: str = "unknown"    # anthropic | openai | minimax | ...
+    worker_model: str = ""              # claude-opus-4-6 | gpt-5.4 | ...
+    worker_trust_level: str = "standard"  # low | standard | high
+
     # -- LLM Judge --
     judge_model: str | None = None  # None = stub mode
     judge_temperature: float = 0.1

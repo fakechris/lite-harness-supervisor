@@ -241,11 +241,18 @@ def cmd_run_foreground(args):
         print(f"Surface issues: {diag['issues']}")
         return 1
 
+    from supervisor.domain.models import WorkerProfile
+    worker = WorkerProfile(
+        provider=config.worker_provider,
+        model_name=config.worker_model,
+        trust_level=config.worker_trust_level,
+    )
     loop = SupervisorLoop(
         store,
         judge_model=config.judge_model,
         judge_temperature=config.judge_temperature,
         judge_max_tokens=config.judge_max_tokens,
+        worker_profile=worker,
     )
 
     print(f"Foreground sidecar: run={run_id} pane={pane_target} spec={spec.id}")

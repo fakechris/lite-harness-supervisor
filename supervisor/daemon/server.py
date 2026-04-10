@@ -235,11 +235,18 @@ class DaemonServer:
         try:
             surface_type = getattr(self.config, "surface_type", "tmux")
             terminal = create_surface(surface_type, entry.pane_target)
+            from supervisor.domain.models import WorkerProfile
+            worker = WorkerProfile(
+                provider=getattr(self.config, "worker_provider", "unknown"),
+                model_name=getattr(self.config, "worker_model", ""),
+                trust_level=getattr(self.config, "worker_trust_level", "standard"),
+            )
             loop = SupervisorLoop(
                 entry.store,
                 judge_model=self.config.judge_model,
                 judge_temperature=self.config.judge_temperature,
                 judge_max_tokens=self.config.judge_max_tokens,
+                worker_profile=worker,
             )
             loop.run_sidecar(
                 spec, state, terminal,

@@ -61,6 +61,93 @@ class FinishPolicy:
     require_clean_or_committed_repo: bool = False
 
 @dataclass
+class AcceptanceContract:
+    """Defines 'what counts as truly done' — distinct from FinishPolicy.
+
+    FinishPolicy is the legacy subset. AcceptanceContract extends it with
+    risk classification, evidence requirements, and reviewer gating.
+    """
+    goal: str = ""
+    required_evidence: list[str] = field(default_factory=list)
+    forbidden_states: list[str] = field(default_factory=list)
+    risk_class: str = "standard"          # low | standard | high | critical
+    must_review_by: str = ""              # "" | "human" | "stronger_reviewer"
+    require_all_steps_done: bool = True
+    require_verification_pass: bool = True
+    require_clean_or_committed_repo: bool = False
+
+    def __post_init__(self):
+        valid_risk = {"low", "standard", "high", "critical"}
+        valid_review = {"", "human", "stronger_reviewer"}
+        if self.risk_class not in valid_risk:
+            raise ValueError(f"invalid risk_class: {self.risk_class!r} (expected one of {valid_risk})")
+        if self.must_review_by not in valid_review:
+            raise ValueError(f"invalid must_review_by: {self.must_review_by!r} (expected one of {valid_review})")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_finish_policy(cls, fp: FinishPolicy, goal: str = "") -> "AcceptanceContract":
+        """Backward compat: build from legacy FinishPolicy."""
+        return cls(
+            goal=goal,
+            require_all_steps_done=fp.require_all_steps_done,
+            require_verification_pass=fp.require_verification_pass,
+            require_clean_or_committed_repo=fp.require_clean_or_committed_repo,
+        )
+
+@dataclass
+class WorkerProfile:
+    """Explicit description of the worker's capabilities and role."""
+    worker_id: str = "default"
+    provider: str = "unknown"             # anthropic | openai | minimax | ...
+    model_name: str = ""                  # claude-opus-4-6 | gpt-5.4 | ...
+    role: str = "executor"                # executor | reviewer
+    trust_level: str = "standard"         # low | standard | high
+
+    def __post_init__(self):
+        valid_trust = {"low", "standard", "high"}
+        valid_roles = {"executor", "reviewer"}
+        if self.trust_level not in valid_trust:
+            raise ValueError(f"invalid trust_level: {self.trust_level!r} (expected one of {valid_trust})")
+        if self.role not in valid_roles:
+            raise ValueError(f"invalid role: {self.role!r} (expected one of {valid_roles})")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+@dataclass
+class SupervisionPolicy:
+    """Controls how strongly the supervisor intervenes."""
+    mode: str = "strict_verifier"         # strict_verifier | collaborative_reviewer | directive_lead
+    reason: str = "default"
+    risk_class: str = "standard"
+    failure_threshold: int = 3
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+@dataclass
+class RoutingDecision:
+    """Escalation/routing target when supervisor can't resolve alone."""
+    routing_id: str = ""
+    target_type: str = "human"            # human | reviewer | executor
+    scope: str = ""                       # bounded_review | full_takeover | single_question
+    reason: str = ""
+    triggered_by_decision_id: str = ""
+    timestamp: str = ""
+
+    def __post_init__(self):
+        if not self.routing_id:
+            self.routing_id = f"rt_{uuid.uuid4().hex[:12]}"
+        if not self.timestamp:
+            self.timestamp = datetime.now(timezone.utc).isoformat()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+@dataclass
 class RuntimePolicy:
     default_continue: bool = True
     max_retries_per_node: int = 3
@@ -75,6 +162,7 @@ class WorkflowSpec:
     nodes: list[StepSpec] = field(default_factory=list)
     finish_policy: FinishPolicy = field(default_factory=FinishPolicy)
     policy: RuntimePolicy = field(default_factory=RuntimePolicy)
+    acceptance: AcceptanceContract | None = None
 
     def ordered_nodes(self) -> list[StepSpec]:
         return self.steps if self.kind == "linear_plan" else self.nodes
