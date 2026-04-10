@@ -8,6 +8,9 @@ from __future__ import annotations
 from supervisor.domain.models import WorkerProfile, AcceptanceContract, SupervisionPolicy
 
 
+DEFAULT_FAILURE_THRESHOLD = 3
+
+
 class SupervisionPolicyEngine:
     """Rule-based policy selection.
 
@@ -27,6 +30,8 @@ class SupervisionPolicyEngine:
         worker: WorkerProfile,
         contract: AcceptanceContract,
         state,
+        *,
+        failure_threshold: int = DEFAULT_FAILURE_THRESHOLD,
     ) -> SupervisionPolicy:
         risk = contract.risk_class
         trust = worker.trust_level
@@ -34,38 +39,43 @@ class SupervisionPolicyEngine:
 
         # High risk or critical → at least collaborative
         if risk in ("high", "critical"):
-            if trust == "low" or failures >= 2:
+            if trust == "low" or failures >= max(failure_threshold - 1, 1):
                 return SupervisionPolicy(
                     mode="directive_lead",
                     reason=f"high risk ({risk}) + {'low trust' if trust == 'low' else f'{failures} failures'}",
                     risk_class=risk,
+                    failure_threshold=failure_threshold,
                 )
             return SupervisionPolicy(
                 mode="collaborative_reviewer",
                 reason=f"high risk ({risk})",
                 risk_class=risk,
+                failure_threshold=failure_threshold,
             )
 
         # Low trust worker → collaborative by default
         if trust == "low":
-            if failures >= 3:
+            if failures >= failure_threshold:
                 return SupervisionPolicy(
                     mode="directive_lead",
                     reason=f"low trust worker + {failures} failures",
                     risk_class=risk,
+                    failure_threshold=failure_threshold,
                 )
             return SupervisionPolicy(
                 mode="collaborative_reviewer",
                 reason="low trust worker",
                 risk_class=risk,
+                failure_threshold=failure_threshold,
             )
 
         # Consecutive failures → escalate mode
-        if failures >= 3:
+        if failures >= failure_threshold:
             return SupervisionPolicy(
                 mode="directive_lead",
                 reason=f"{failures} consecutive failures",
                 risk_class=risk,
+                failure_threshold=failure_threshold,
             )
 
         # Default: trust the worker
@@ -73,4 +83,5 @@ class SupervisionPolicyEngine:
             mode="strict_verifier",
             reason="default — strong worker, standard risk",
             risk_class=risk,
+            failure_threshold=failure_threshold,
         )

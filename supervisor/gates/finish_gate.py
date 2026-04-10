@@ -75,9 +75,16 @@ class FinishGate:
         if contract.required_evidence:
             cp = state.last_agent_checkpoint or {}
             provided = cp.get("evidence", [])
-            provided_str = " ".join(str(e) for e in provided).lower()
+            # Flatten evidence items to searchable strings
+            evidence_strings: list[str] = []
+            for e in provided:
+                if isinstance(e, dict):
+                    evidence_strings.extend(str(v) for v in e.values())
+                else:
+                    evidence_strings.append(str(e))
+            evidence_text = " ".join(evidence_strings).lower()
             for req in contract.required_evidence:
-                if req.lower() not in provided_str:
+                if req.lower() not in evidence_text:
                     failures.append(f"missing required evidence: {req}")
 
         # Check must_review_by
