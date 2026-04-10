@@ -19,6 +19,13 @@ from supervisor.storage.state_store import StateStore
 from supervisor.loop import SupervisorLoop
 from supervisor.adapters.surface_factory import create_surface
 from supervisor.config import RuntimeConfig
+from supervisor.global_registry import (
+    acquire_pane_lock,
+    register_daemon,
+    release_pane_lock,
+    unregister_daemon,
+    update_daemon,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +96,7 @@ class DaemonServer:
 
         Path(self.pid_path).parent.mkdir(parents=True, exist_ok=True)
         Path(self.pid_path).write_text(str(os.getpid()))
+        register_daemon(self._daemon_metadata())
 
         try:
             signal.signal(signal.SIGTERM, self._handle_sigterm)
@@ -192,11 +200,21 @@ class DaemonServer:
 
         entry = RunEntry(run_id, spec_path, pane_target, workspace_root,
                          thread=None, store=store)
+        pane_owner = self._pane_owner_metadata(run_id, spec_path, pane_target, workspace_root)
 
         with self._lock:
             for existing in self._runs.values():
                 if existing.pane_target == pane_target and existing.thread and existing.thread.is_alive():
                     return {"ok": False, "error": f"pane {pane_target} already has active run {existing.run_id}"}
+            acquired, existing_owner = acquire_pane_lock(pane_target, pane_owner)
+            if not acquired:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"pane {pane_target} already owned by "
+                        f"{existing_owner.get('run_id', '?')} in {existing_owner.get('cwd', '?')}"
+                    ),
+                }
 
             thread = threading.Thread(
                 target=self._run_worker,
@@ -206,6 +224,7 @@ class DaemonServer:
             )
             entry.thread = thread
             self._runs[run_id] = entry
+            self._update_daemon_record_locked()
 
         thread.start()
         logger.info("registered run %s: spec=%s pane=%s cwd=%s", run_id, spec_path, pane_target, workspace_root)
@@ -377,9 +396,11 @@ class DaemonServer:
                 e = self._runs[rid]
                 if e.thread.is_alive():
                     e.thread.join(timeout=2)
+                release_pane_lock(e.pane_target, e.run_id)
                 del self._runs[rid]
-                if finished:
-                    logger.info("reaped %d finished run(s)", len(finished))
+            if finished:
+                self._update_daemon_record_locked()
+                logger.info("reaped %d finished run(s)", len(finished))
 
     def _handle_sigterm(self, signum, frame):
         logger.info("SIGTERM received, shutting down")
@@ -389,15 +410,49 @@ class DaemonServer:
         self._do_stop_all()
         # Wait for threads to finish (with timeout)
         with self._lock:
-            threads = [e.thread for e in self._runs.values() if e.thread]
+            entries = list(self._runs.values())
+            threads = [e.thread for e in entries if e.thread]
         for t in threads:
             t.join(timeout=5)
+        for entry in entries:
+            release_pane_lock(entry.pane_target, entry.run_id)
         if self._sock:
             self._sock.close()
         Path(self.sock_path).unlink(missing_ok=True)
         Path(self.pid_path).unlink(missing_ok=True)
+        unregister_daemon(self.sock_path)
         logger.info("daemon stopped")
 
     @staticmethod
     def _send(conn: socket.socket, data: dict) -> None:
         conn.sendall((json.dumps(data) + "\n").encode("utf-8"))
+
+    def _daemon_metadata(self) -> dict:
+        return {
+            "pid": os.getpid(),
+            "cwd": os.getcwd(),
+            "socket": self.sock_path,
+            "started_at": __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc
+            ).isoformat(),
+            "active_runs": len(self._runs),
+        }
+
+    def _pane_owner_metadata(self, run_id: str, spec_path: str,
+                             pane_target: str, workspace_root: str) -> dict:
+        return {
+            "pid": os.getpid(),
+            "cwd": workspace_root or os.getcwd(),
+            "socket": self.sock_path,
+            "run_id": run_id,
+            "pane_target": pane_target,
+            "spec_path": spec_path,
+        }
+
+    def _update_daemon_record_locked(self) -> None:
+        update_daemon(
+            self.sock_path,
+            pid=os.getpid(),
+            cwd=os.getcwd(),
+            active_runs=len(self._runs),
+        )

@@ -12,6 +12,15 @@ thin-supervisor status
 
 If status shows an active run, follow the protocol below.
 
+When starting a new supervised run in this repository, prefer:
+
+```bash
+scripts/lh-supervisor-attach.sh <slug>
+```
+
+That script binds the current pane to the generated spec. Do not begin
+implementation before it succeeds.
+
 ## Checkpoint protocol
 
 After completing meaningful work on a step, output a checkpoint block:

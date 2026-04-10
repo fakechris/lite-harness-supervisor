@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 
 
@@ -27,6 +28,10 @@ class TerminalAdapterError(RuntimeError):
 
 
 class ReadGuardError(TerminalAdapterError):
+    pass
+
+
+class InjectionConfirmationError(TerminalAdapterError):
     pass
 
 
@@ -84,6 +89,7 @@ class TerminalAdapter:
         self._tmux("send-keys", "-t", target, "-l", "--", text)
         self._tmux("send-keys", "-t", target, "Enter")
         self._read_guard.discard(target)
+        self._confirm_injection(target, text)
 
     def current_cwd(self) -> str:
         """Return the current working directory of the target pane."""
@@ -181,6 +187,33 @@ class TerminalAdapter:
                 f"must read pane '{target}' before interacting. "
                 f"Call adapter.read() first."
             )
+
+    def _confirm_injection(self, target: str, text: str) -> None:
+        needle = " ".join(text.split())
+        if not needle:
+            return
+
+        for _ in range(5):
+            snapshot = self._capture_tail(target, lines=30)
+            if not self._tail_looks_stuck(snapshot, needle):
+                return
+            time.sleep(0.2)
+
+        raise InjectionConfirmationError(
+            f"submit not confirmed for pane '{target}'; injected text still visible near the tail"
+        )
+
+    def _capture_tail(self, target: str, *, lines: int) -> str:
+        result = self._tmux(
+            "capture-pane", "-t", target, "-p", "-J", "-S", f"-{lines}"
+        )
+        return result.stdout
+
+    @staticmethod
+    def _tail_looks_stuck(snapshot: str, needle: str) -> bool:
+        tail = [line.strip() for line in snapshot.splitlines() if line.strip()][-3:]
+        normalized_tail = [" ".join(line.split()) for line in tail]
+        return any(needle in line for line in normalized_tail)
 
     def _detect_socket(self) -> str | None:
         """Auto-detect the tmux socket (4-level priority like smux)."""

@@ -96,8 +96,8 @@ steps:
         expect: pass
 EOF
 
-# Start your agent in a tmux pane, then start the supervisor
-thin-supervisor run .supervisor/specs/my-plan.yaml --pane agent --daemon
+# Start your agent in a tmux pane, then attach the supervisor immediately
+scripts/lh-supervisor-attach.sh my-plan
 ```
 
 ## What happens next
@@ -155,8 +155,11 @@ All verifiers run in the agent's working directory (pane cwd), not the superviso
 
 ```bash
 thin-supervisor init [--force]          # Create .supervisor/ directory
-thin-supervisor run <spec> --pane <target> [--daemon]  # Start sidecar
+thin-supervisor run register --spec <spec> --pane <target>   # Start daemon-managed run
+thin-supervisor run foreground --spec <spec> --pane <target> # Start foreground sidecar
 thin-supervisor stop                    # Stop daemon
+thin-supervisor ps                      # Show all registered daemons
+thin-supervisor pane-owner <pane>      # Show which run owns a pane
 thin-supervisor status                  # Show current run state
 thin-supervisor deinit [--force]        # Remove .supervisor/
 thin-supervisor bridge <action> [args]  # Tmux pane operations
