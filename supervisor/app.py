@@ -286,6 +286,109 @@ def cmd_run_stop(args):
 # ------------------------------------------------------------------
 
 
+def cmd_list(args):
+    """List all active runs with detailed state."""
+    from supervisor.daemon.client import DaemonClient
+
+    client = DaemonClient()
+    if not client.is_running():
+        print("Daemon not running.")
+        return 1
+
+    result = client.list_runs()
+    if not result.get("ok"):
+        print(f"Error: {result.get('error', 'unknown')}")
+        return 1
+
+    runs = result.get("runs", [])
+    if not runs:
+        print("No active runs.")
+        return 0
+
+    print(f"{'RUN_ID':<20} {'PANE':<18} {'STATE':<15} {'NODE':<20} {'DONE'}")
+    for r in runs:
+        done = ", ".join(r.get("done_nodes", [])) or "(none)"
+        print(f"{r['run_id']:<20} {r['pane_target']:<18} {r['top_state']:<15} {r.get('current_node', ''):<20} {done}")
+    return 0
+
+
+def cmd_observe(args):
+    """Read-only observation of a specific run."""
+    from supervisor.daemon.client import DaemonClient
+
+    client = DaemonClient()
+    if not client.is_running():
+        print("Daemon not running.")
+        return 1
+
+    result = client.observe(args.run_id)
+    if not result.get("ok"):
+        print(f"Error: {result.get('error', 'unknown')}")
+        return 1
+
+    state = result.get("state", {})
+    print(f"Run:     {result['run_id']}")
+    print(f"Spec:    {state.get('spec_id', '?')}")
+    print(f"State:   {state.get('top_state', '?')}")
+    print(f"Node:    {state.get('current_node_id', '?')}")
+    print(f"Attempt: {state.get('current_attempt', 0)}")
+    done = state.get("done_node_ids", [])
+    print(f"Done:    {', '.join(done) if done else '(none)'}")
+
+    events = result.get("recent_events", [])
+    if events:
+        print(f"\nRecent events ({len(events)}):")
+        for e in events:
+            print(f"  [{e.get('event_type', '?')}] {e.get('timestamp', '')[:19]}")
+    return 0
+
+
+def cmd_note(args):
+    """Shared notes for cross-run collaboration."""
+    from supervisor.daemon.client import DaemonClient
+
+    client = DaemonClient()
+    if not client.is_running():
+        print("Daemon not running. Start with: thin-supervisor daemon start")
+        return 1
+
+    if args.note_action == "add":
+        content = " ".join(args.content) if args.content else ""
+        if not content:
+            print("Error: note content required.")
+            return 1
+        result = client.note_add(
+            content,
+            note_type=args.type or "context",
+            author_run_id=args.run or "human",
+        )
+        if result.get("ok"):
+            print(f"Note added: {result['note_id']}")
+        else:
+            print(f"Error: {result.get('error', 'unknown')}")
+            return 1
+
+    elif args.note_action == "list":
+        result = client.note_list(
+            note_type=args.type or "",
+            run_id=args.run or "",
+        )
+        if not result.get("ok"):
+            print(f"Error: {result.get('error', 'unknown')}")
+            return 1
+        notes = result.get("notes", [])
+        if not notes:
+            print("No notes.")
+            return 0
+        for n in notes:
+            print(f"[{n['note_id']}] ({n['note_type']}) {n['timestamp'][:19]}")
+            print(f"  by: {n['author_run_id']}")
+            print(f"  {n['content'][:120]}")
+            print()
+
+    return 0
+
+
 def cmd_status(args):
     """Show all run states."""
     from supervisor.daemon.client import DaemonClient
@@ -535,7 +638,25 @@ def main():
     p_run.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
     p_run.add_argument("--daemon", "-d", action="store_true", help=argparse.SUPPRESS)
 
-    # status
+    # list
+    sub.add_parser("list", help="List all active runs (detailed)")
+
+    # observe
+    p_observe = sub.add_parser("observe", help="Read-only observation of a run")
+    p_observe.add_argument("run_id", help="Run ID to observe")
+
+    # note
+    p_note = sub.add_parser("note", help="Shared notes for cross-run collaboration")
+    note_sub = p_note.add_subparsers(dest="note_action")
+    p_note_add = note_sub.add_parser("add", help="Add a note")
+    p_note_add.add_argument("content", nargs="*", help="Note content")
+    p_note_add.add_argument("--type", default="context", help="Note type: context|finding|handoff|warning|question")
+    p_note_add.add_argument("--run", default="", help="Author run ID")
+    p_note_list = note_sub.add_parser("list", help="List notes")
+    p_note_list.add_argument("--type", default="", help="Filter by type")
+    p_note_list.add_argument("--run", default="", help="Filter by author run ID")
+
+    # status (legacy, still works)
     p_status = sub.add_parser("status", help="Show all run states")
     p_status.add_argument("--config", default=None)
 
@@ -582,6 +703,16 @@ def main():
             sys.exit(1)
     elif args.command == "stop":
         sys.exit(cmd_daemon_stop(args))
+    elif args.command == "list":
+        sys.exit(cmd_list(args))
+    elif args.command == "observe":
+        sys.exit(cmd_observe(args))
+    elif args.command == "note":
+        if args.note_action in ("add", "list"):
+            sys.exit(cmd_note(args))
+        else:
+            print("Usage: thin-supervisor note {add|list}")
+            sys.exit(1)
     elif args.command == "status":
         sys.exit(cmd_status(args))
     elif args.command == "bridge":
