@@ -9,8 +9,10 @@ import yaml
 
 @dataclass
 class RuntimeConfig:
-    # -- Terminal --
-    pane_target: str = ""
+    # -- Execution Surface --
+    surface_type: str = "tmux"    # "tmux" | "open_relay"
+    surface_target: str = ""     # pane label/%id (tmux) or session id (open_relay)
+    pane_target: str = ""        # legacy alias for surface_target (tmux compat)
     poll_interval_sec: float = 2.0
     read_lines: int = 100
 
@@ -99,14 +101,20 @@ class RuntimeConfig:
     # Helpers
     # ------------------------------------------------------------------
 
+    @property
+    def effective_target(self) -> str:
+        """Resolve the effective surface target (surface_target > pane_target)."""
+        return self.surface_target or self.pane_target
+
     def default_config_yaml(self) -> str:
         """Render a commented YAML template suitable for ``init``."""
         return (
             "# thin-supervisor config\n"
-            "# See: https://github.com/user/lite-harness-supervisor\n"
             "\n"
-            "# tmux pane target (label or %%id)\n"
-            f"pane_target: \"{self.pane_target}\"\n"
+            "# Execution surface: tmux | open_relay\n"
+            f"surface_type: \"{self.surface_type}\"\n"
+            "# Surface target: pane label/%id (tmux) or session id (open_relay)\n"
+            f"surface_target: \"\"\n"
             f"poll_interval_sec: {self.poll_interval_sec}\n"
             f"read_lines: {self.read_lines}\n"
             "\n"

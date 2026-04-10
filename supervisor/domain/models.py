@@ -197,6 +197,7 @@ class SupervisorState:
     spec_path: str = ""
     spec_hash: str = ""
     pane_target: str = ""
+    surface_type: str = "tmux"
     workspace_root: str = ""
     schema_version: int = 1
 
@@ -231,6 +232,7 @@ class SupervisorState:
             spec_path=data.get("spec_path", ""),
             spec_hash=data.get("spec_hash", ""),
             pane_target=data.get("pane_target", ""),
+            surface_type=data.get("surface_type", "tmux"),
             workspace_root=data.get("workspace_root", ""),
             schema_version=data.get("schema_version", 1),
         )

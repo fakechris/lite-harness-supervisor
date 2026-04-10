@@ -17,7 +17,7 @@ from pathlib import Path
 from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
 from supervisor.loop import SupervisorLoop
-from supervisor.terminal.adapter import TerminalAdapter
+from supervisor.adapters.surface_factory import create_surface
 from supervisor.config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
@@ -204,7 +204,8 @@ class DaemonServer:
     def _run_worker(self, entry: RunEntry, spec, state) -> None:
         """Worker thread: runs run_sidecar for one run."""
         try:
-            terminal = TerminalAdapter(entry.pane_target)
+            surface_type = getattr(self.config, "surface_type", "tmux")
+            terminal = create_surface(surface_type, entry.pane_target)
             loop = SupervisorLoop(
                 entry.store,
                 judge_model=self.config.judge_model,
