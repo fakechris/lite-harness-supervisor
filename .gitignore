@@ -11,3 +11,6 @@ dist/
 runtime/state.json
 runtime/event_log.jsonl
 runtime/decision_log.jsonl
+
+# Local third-party product research
+docs/research/
