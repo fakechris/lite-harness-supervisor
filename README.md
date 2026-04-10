@@ -48,6 +48,8 @@ CheckpointEvent(seq=3) → SupervisorDecision(triggered_by_seq=3) → HandoffIns
 
 ## Quick Start
 
+> **Full guide**: See [docs/getting-started.md](docs/getting-started.md) for step-by-step instructions covering tmux/open-relay + Codex/Claude/OpenCode/Droid.
+
 ```bash
 # Install
 pip install thin-supervisor
