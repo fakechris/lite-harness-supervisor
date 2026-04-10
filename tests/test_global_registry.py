@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 from supervisor.daemon.server import DaemonServer
 from supervisor.global_registry import (
@@ -13,6 +14,7 @@ from supervisor.global_registry import (
     release_pane_lock,
     unregister_daemon,
     update_daemon,
+    _write_json,
 )
 
 
@@ -84,6 +86,26 @@ def test_release_pane_lock_is_owner_scoped(tmp_path, monkeypatch):
     assert find_pane_owner("%7") is None
 
 
+def test_write_json_uses_atomic_replace(tmp_path, monkeypatch):
+    target = tmp_path / "state.json"
+    calls: list[tuple[str, str]] = []
+    original_replace = os.replace
+
+    def record_replace(src, dst):
+        calls.append((src, str(dst)))
+        original_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", record_replace)
+
+    _write_json(target, {"ok": True})
+
+    assert target.exists()
+    assert calls
+    assert calls[0][1] == str(target)
+    tmp_written = Path(calls[0][0])
+    assert tmp_written.exists() is False
+
+
 def test_daemon_server_rejects_cross_daemon_pane_conflict(tmp_path, monkeypatch):
     monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_DIR", str(tmp_path / "global"))
 
@@ -133,4 +155,5 @@ def test_daemon_server_rejects_cross_daemon_pane_conflict(tmp_path, monkeypatch)
     server_a._do_stop_all()
     time.sleep(0.05)
     server_a._reap_finished()
-
+    server_b._do_stop_all()
+    server_b._reap_finished()

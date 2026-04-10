@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -53,7 +54,17 @@ def _read_json(path: Path) -> dict | None:
 
 def _write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    content = json.dumps(payload, ensure_ascii=False, indent=2)
+    fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
 
 
 def _pid_alive(pid: int | None) -> bool:

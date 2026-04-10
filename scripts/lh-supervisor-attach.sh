@@ -23,5 +23,8 @@ if [[ ! -f .supervisor/config.yaml ]]; then
   thin-supervisor init
 fi
 
-pane_id="$(thin-supervisor bridge id)"
+pane_id="$(thin-supervisor bridge id)" || {
+  echo "error: must run inside a tmux pane" >&2
+  exit 1
+}
 thin-supervisor run register --spec "$spec_path" --pane "$pane_id"

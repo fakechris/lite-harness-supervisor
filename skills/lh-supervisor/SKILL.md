@@ -231,6 +231,9 @@ until this command succeeds.
 
 ### Start execution only after attach succeeds
 
+If attach already succeeded in Stage 3, do not run it again.
+Only use this command when execution starts from a spec that is not yet attached:
+
 ```bash
 scripts/lh-supervisor-attach.sh <slug>
 ```

@@ -30,7 +30,7 @@ Expected: FAIL because no global registry or pane lock exists and legacy run sti
 ### Task 2: Implement the global registry and pane lock
 
 **Files:**
-- Create: `supervisor/global_state.py`
+- Create: `supervisor/global_registry.py`
 - Modify: `supervisor/daemon/server.py`
 - Modify: `supervisor/daemon/client.py`
 
