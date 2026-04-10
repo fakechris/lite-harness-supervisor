@@ -285,10 +285,8 @@ class SupervisorLoop:
                 state.last_injected_node_id = state.current_node_id
                 last_injected_attempt = 0
                 self.store.save(state)
-                terminal.inject(instruction.content)
-                self.store.append_session_event(
-                    state.run_id, "injection", instruction.to_dict()
-                )
+                if not self._inject_or_pause(state, terminal, instruction):
+                    return
                 pending_text = None
 
         while not self.is_final(state) and state.top_state != TopState.PAUSED_FOR_HUMAN:
@@ -407,10 +405,8 @@ class SupervisorLoop:
                     state.last_injected_node_id = state.current_node_id
                     last_injected_attempt = state.current_attempt
                     self.store.save(state)
-                    terminal.inject(instruction.content)
-                    self.store.append_session_event(
-                        state.run_id, "injection", instruction.to_dict()
-                    )
+                    if not self._inject_or_pause(state, terminal, instruction):
+                        return
                     logger.info("injected: %s (id=%s, trigger=%s)", node.id, instruction.instruction_id, trigger)
                     continue  # skip double save
 
@@ -428,3 +424,27 @@ class SupervisorLoop:
             except Exception:
                 pass
         return None
+
+    def _inject_or_pause(self, state, terminal, instruction) -> bool:
+        try:
+            terminal.inject(instruction.content)
+        except Exception as exc:
+            state.top_state = TopState.PAUSED_FOR_HUMAN
+            payload = {
+                "instruction_id": instruction.instruction_id,
+                "node_id": state.current_node_id,
+                "error": str(exc),
+            }
+            self.store.append_session_event(state.run_id, "injection_failed", payload)
+            state.human_escalations.append({
+                "reason": str(exc),
+                "node_id": state.current_node_id,
+                "instruction_id": instruction.instruction_id,
+            })
+            self.store.save(state)
+            return False
+
+        self.store.append_session_event(
+            state.run_id, "injection", instruction.to_dict()
+        )
+        return True

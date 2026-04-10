@@ -77,7 +77,7 @@ The Skill will:
 2. Generate a spec YAML with verification steps
 3. Self-review the plan (architect + critic passes)
 4. Ask you to approve
-5. Register the run with the daemon: `thin-supervisor run register --spec ... --pane ...`
+5. Attach immediately with `scripts/lh-supervisor-attach.sh <slug>`
 6. Start emitting checkpoints as it works
 
 ### 6. Monitor
@@ -87,6 +87,12 @@ In another terminal:
 ```bash
 # See all active runs
 thin-supervisor status
+
+# See every registered daemon across worktrees
+thin-supervisor ps
+
+# See who owns a specific pane
+thin-supervisor pane-owner %0
 
 # Watch the daemon log
 tail -f .supervisor/runtime/daemon.log

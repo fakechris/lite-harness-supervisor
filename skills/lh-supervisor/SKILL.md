@@ -189,7 +189,7 @@ APPROVED / NEEDS_USER_INPUT: <specific questions>
 
 ---
 
-## Stage 3: Approve
+## Stage 3: Approve + Attach
 
 Present to the user:
 
@@ -213,17 +213,29 @@ Acceptance: <key criteria>
 
 Skip condition: User explicitly said "don't ask, just run" or "直接执行".
 
+### Attach immediately after approval
+
+As soon as the user approves, or if approval is skipped, attach the
+supervisor BEFORE any implementation work:
+
+```bash
+scripts/lh-supervisor-attach.sh <slug>
+```
+
+Do not start coding, git cleanup, worktree edits, or long test runs
+until this command succeeds.
+
 ---
 
 ## Stage 4: Execute
 
-### Start the supervisor
+### Start execution only after attach succeeds
+
+If attach already succeeded in Stage 3, do not run it again.
+Only use this command when execution starts from a spec that is not yet attached:
 
 ```bash
-thin-supervisor init --force
-thin-supervisor run register \
-  --spec .supervisor/specs/<slug>.yaml \
-  --pane "$(thin-supervisor bridge id)"
+scripts/lh-supervisor-attach.sh <slug>
 ```
 
 ### Follow the checkpoint protocol
@@ -272,6 +284,7 @@ After a checkpoint, the supervisor will:
 
 - Do NOT ask "should I continue?" — the supervisor decides
 - Do NOT skip verification — every step must pass its verify checks
+- Do NOT begin implementation before the attach script succeeds
 - Do NOT modify the spec file — the supervisor owns it
 - DO emit checkpoints frequently — they are the supervisor's eyes
 - DO explore the codebase before asking the user questions

@@ -85,22 +85,32 @@ Write review to `.supervisor/plans/<slug>-review.md`.
 
 ---
 
-## Stage 3: Approve
+## Stage 3: Approve + Attach
 
 Show user: spec summary + acceptance criteria + self-review verdict.
 User chooses: Approve / Adjust / Reject.
 
 Skip if user said "just run it".
 
+As soon as the user approves, or if approval is skipped, attach the
+supervisor BEFORE any implementation work:
+
+```bash
+scripts/lh-supervisor-attach.sh <slug>
+```
+
+Do not start coding, git cleanup, worktree edits, or long test runs
+until this command succeeds.
+
 ---
 
 ## Stage 4: Execute
 
+If attach already succeeded in Stage 3, do not run it again.
+Only use this command when execution starts from a spec that is not yet attached:
+
 ```bash
-thin-supervisor init --force
-thin-supervisor run register \
-  --spec .supervisor/specs/<slug>.yaml \
-  --pane "$(thin-supervisor bridge id)"
+scripts/lh-supervisor-attach.sh <slug>
 ```
 
 ### Checkpoint protocol
@@ -131,6 +141,7 @@ question_for_supervisor:
 
 - Do NOT ask "should I continue?" — the supervisor decides
 - Do NOT skip verification
+- Do NOT begin implementation before the attach script succeeds
 - DO emit checkpoints frequently
 - DO explore codebase before asking user questions
 - DO self-review your plan before approval

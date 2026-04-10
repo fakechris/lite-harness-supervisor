@@ -16,6 +16,7 @@ from supervisor.storage.state_store import StateStore
 from supervisor.loop import SupervisorLoop
 from supervisor.config import RuntimeConfig
 from supervisor.adapters.transcript_adapter import TranscriptAdapter
+from supervisor.global_registry import find_pane_owner, list_daemons
 
 
 SUPERVISOR_DIR = ".supervisor"
@@ -286,6 +287,49 @@ def cmd_run_stop(args):
 # ------------------------------------------------------------------
 
 
+def _find_local_run_summaries() -> list[dict]:
+    """Read persisted local run state outside the daemon's active registry."""
+    runtime_dir = Path(RUNTIME_DIR)
+    summaries: list[dict] = []
+
+    legacy_state = runtime_dir / "state.json"
+    if legacy_state.exists():
+        try:
+            summaries.append(json.loads(legacy_state.read_text()))
+        except json.JSONDecodeError:
+            pass
+
+    runs_dir = runtime_dir / "runs"
+    if runs_dir.exists():
+        for run_dir in sorted(runs_dir.iterdir()):
+            state_path = run_dir / "state.json"
+            if not state_path.exists():
+                continue
+            try:
+                summaries.append(json.loads(state_path.read_text()))
+            except json.JSONDecodeError:
+                continue
+
+    return summaries
+
+
+def _print_local_state_hint() -> None:
+    summaries = _find_local_run_summaries()
+    if not summaries:
+        return
+
+    print("Local state found:")
+    for state in summaries:
+        print(
+            "  "
+            f"{state.get('run_id', '?')} "
+            f"{state.get('top_state', '?')} "
+            f"node={state.get('current_node_id', '') or '?'} "
+            f"pane={state.get('pane_target', '?')}"
+        )
+    print("  These are persisted local state files, not daemon-managed active runs.")
+
+
 def cmd_list(args):
     """List all active runs with detailed state."""
     from supervisor.daemon.client import DaemonClient
@@ -303,12 +347,57 @@ def cmd_list(args):
     runs = result.get("runs", [])
     if not runs:
         print("No active runs.")
+        _print_local_state_hint()
         return 0
 
     print(f"{'RUN_ID':<20} {'PANE':<18} {'STATE':<15} {'NODE':<20} {'DONE'}")
     for r in runs:
         done = ", ".join(r.get("done_nodes", [])) or "(none)"
         print(f"{r['run_id']:<20} {r['pane_target']:<18} {r['top_state']:<15} {r.get('current_node', ''):<20} {done}")
+    return 0
+
+
+def _list_global_daemons() -> list[dict]:
+    return list_daemons()
+
+
+def _find_global_pane_owner(pane_target: str) -> dict | None:
+    return find_pane_owner(pane_target)
+
+
+def cmd_ps(args):
+    """List all globally registered daemon processes."""
+    daemons = _list_global_daemons()
+    if not daemons:
+        print("No registered daemons.")
+        return 0
+
+    print(f"{'PID':<8} {'RUNS':<6} {'STARTED':<28} {'SOCKET':<32} {'CWD'}")
+    for daemon in daemons:
+        print(
+            f"{daemon.get('pid', '?'):<8} "
+            f"{daemon.get('active_runs', 0):<6} "
+            f"{daemon.get('started_at', ''):<28} "
+            f"{daemon.get('socket', ''):<32} "
+            f"{daemon.get('cwd', '')}"
+        )
+    return 0
+
+
+def cmd_pane_owner(args):
+    """Show global owner metadata for a pane lock."""
+    owner = _find_global_pane_owner(args.pane)
+    if not owner:
+        print(f"No owner found for pane {args.pane}.")
+        return 1
+
+    print(f"Pane:     {owner.get('pane_target', args.pane)}")
+    print(f"Run:      {owner.get('run_id', '?')}")
+    print(f"PID:      {owner.get('pid', '?')}")
+    print(f"CWD:      {owner.get('cwd', '?')}")
+    print(f"Socket:   {owner.get('socket', '?')}")
+    print(f"Spec:     {owner.get('spec_path', '?')}")
+    print(f"Attached: {owner.get('acquired_at', '?')}")
     return 0
 
 
@@ -401,6 +490,7 @@ def cmd_status(args):
             runs = result.get("runs", [])
             if not runs:
                 print("Daemon running, no active runs.")
+                _print_local_state_hint()
                 return 0
             print(f"{'RUN_ID':<20} {'PANE':<20} {'STATE':<18} {'NODE'}")
             for r in runs:
@@ -535,33 +625,17 @@ def cmd_bridge(args):
 
 
 # ------------------------------------------------------------------
-# Legacy compat: thin-supervisor run <spec> --pane <p> [--daemon]
+# Migration shim for removed legacy syntax: thin-supervisor run <spec> --pane <p> [--daemon]
 # ------------------------------------------------------------------
 
 
 def cmd_run_legacy(args):
-    """Backward-compatible run command."""
-    if args.event_file:
-        spec = load_spec(args.spec_path)
-        config = RuntimeConfig.load(args.config or CONFIG_FILE)
-        store = StateStore(config.runtime_dir)
-        state = store.load_or_init(spec, spec_path=args.spec_path)
-        loop = SupervisorLoop(store)
-        return _run_event_file(args.event_file, spec, state, store, loop)
-
-    if args.dry_run:
-        spec = load_spec(args.spec_path)
-        config = RuntimeConfig.load(args.config or CONFIG_FILE)
-        store = StateStore(config.runtime_dir)
-        state = store.load_or_init(spec, spec_path=args.spec_path)
-        print(json.dumps(state.to_dict(), ensure_ascii=False, indent=2))
-        return 0
-
-    mapped = argparse.Namespace(spec=args.spec_path, pane=args.pane, config=args.config)
-    if args.daemon:
-        return cmd_run_register(mapped)
-    else:
-        return cmd_run_foreground(mapped)
+    """Legacy entrypoint kept only to print a migration error."""
+    print("Legacy run syntax has been removed.")
+    print("Use one of:")
+    print("  thin-supervisor run register --spec <spec> --pane <pane>")
+    print("  thin-supervisor run foreground --spec <spec> --pane <pane>")
+    return 1
 
 
 def _run_event_file(event_file, spec, state, store, loop):
@@ -630,7 +704,7 @@ def main():
     p_run_stop = run_sub.add_parser("stop", help="Stop a specific run")
     p_run_stop.add_argument("run_id", help="Run ID to stop")
 
-    # Legacy: run <spec_path> --pane <p> [--daemon]
+    # Removed legacy syntax is still parsed so we can print a migration error.
     p_run.add_argument("spec_path", nargs="?", default=None, help=argparse.SUPPRESS)
     p_run.add_argument("--pane", default=None, help=argparse.SUPPRESS)
     p_run.add_argument("--config", default=None, help=argparse.SUPPRESS)
@@ -640,6 +714,13 @@ def main():
 
     # list
     sub.add_parser("list", help="List all active runs (detailed)")
+
+    # ps
+    sub.add_parser("ps", help="List all registered daemons across worktrees")
+
+    # pane-owner
+    p_pane_owner = sub.add_parser("pane-owner", help="Show which run owns a pane")
+    p_pane_owner.add_argument("pane", help="tmux pane target")
 
     # observe
     p_observe = sub.add_parser("observe", help="Read-only observation of a run")
@@ -705,6 +786,10 @@ def main():
         sys.exit(cmd_daemon_stop(args))
     elif args.command == "list":
         sys.exit(cmd_list(args))
+    elif args.command == "ps":
+        sys.exit(cmd_ps(args))
+    elif args.command == "pane-owner":
+        sys.exit(cmd_pane_owner(args))
     elif args.command == "observe":
         sys.exit(cmd_observe(args))
     elif args.command == "note":
