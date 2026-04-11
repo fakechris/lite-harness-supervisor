@@ -88,14 +88,23 @@ class JsonlObserver:
 
         return "\n".join(text_parts[-lines:])
 
-    def inject(self, text: str) -> None:
-        """Cannot inject via JSONL — use hook-based injection instead.
+    @property
+    def is_observation_only(self) -> bool:
+        """JSONL mode is observation-only — no reliable inject path without hooks."""
+        return True
 
-        In JSONL observation mode, injection happens via:
-        1. Stop hook returning instruction as reason
-        2. File-based handoff (.supervisor/runtime/next_instruction.txt)
+    def inject(self, text: str) -> None:
+        """Write instruction to file — but no hook is wired to deliver it.
+
+        JSONL observation mode requires Stop hook integration for closed-loop
+        injection. Until then, instruction is written to a file that the
+        agent's Skill can optionally check, but delivery is NOT guaranteed.
         """
-        # Write instruction to session-scoped file for hook to pick up
+        import logging
+        logging.getLogger(__name__).warning(
+            "JSONL mode is observation-only; instruction written to file "
+            "but no hook is wired to deliver it to the agent"
+        )
         sid = self.session_id() or "default"
         runtime_dir = Path(".supervisor/runtime/instructions")
         runtime_dir.mkdir(parents=True, exist_ok=True)

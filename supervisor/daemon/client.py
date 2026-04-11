@@ -24,7 +24,7 @@ class DaemonClient:
             return False
 
     def register(self, spec_path: str, pane_target: str, *,
-                 workspace_root: str = "") -> dict:
+                 workspace_root: str = "", surface_type: str = "") -> dict:
         """Register a new run with the daemon."""
         req: dict = {
             "action": "register",
@@ -33,6 +33,8 @@ class DaemonClient:
         }
         if workspace_root:
             req["workspace_root"] = workspace_root
+        if surface_type:
+            req["surface_type"] = surface_type
         return self._request(req)
 
     def status(self) -> dict:

@@ -187,7 +187,7 @@ class DaemonServer:
         run_id = f"run_{uuid.uuid4().hex[:12]}"
         run_dir = str(Path(self.runs_dir) / run_id)
         store = StateStore(run_dir)
-        surface_type = getattr(self.config, "surface_type", "tmux")
+        surface_type = request.get("surface_type") or getattr(self.config, "surface_type", "tmux")
         state = store.load_or_init(
             spec, spec_path=spec_path, pane_target=pane_target,
             surface_type=surface_type,
