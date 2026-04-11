@@ -15,7 +15,7 @@ If status shows an active run, follow the protocol below.
 When starting a new supervised run in this repository, prefer:
 
 ```bash
-scripts/lh-supervisor-attach.sh <slug>
+scripts/thin-supervisor-attach.sh <slug>
 ```
 
 That script binds the current pane to the generated spec. Do not begin
@@ -54,9 +54,23 @@ question_for_supervisor:
 | `step_done` | Current step is complete, ready for verification |
 | `workflow_done` | All steps complete |
 
+## Acceptance & Verification
+
+The supervisor uses an AcceptanceContract to define what "truly done" means.
+This goes beyond "agent says done" — the supervisor checks:
+
+- Required evidence present in your checkpoints
+- Forbidden states not active (e.g., test_failing)
+- All verification commands pass
+- Finish policy satisfied
+
+Your checkpoint `evidence` field is matched against the contract. Be specific
+about what you modified, what you ran, and what the result was.
+
 ## Rules
 
 1. Do NOT ask "should I continue?" — the supervisor decides
 2. Do NOT skip steps or verification
 3. Emit checkpoints after every significant action
 4. The supervisor will inject next-step instructions when ready
+5. Be specific in checkpoint evidence — the acceptance contract checks it

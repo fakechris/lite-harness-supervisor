@@ -28,7 +28,7 @@ The most common setup. Codex runs in a visible tmux pane, supervisor watches fro
 
 ```bash
 # From the thin-supervisor repo
-cp -r skills/lh-supervisor-codex ~/.codex/skills/lh-supervisor
+cp -r skills/thin-supervisor-codex ~/.codex/skills/thin-supervisor
 ```
 
 This teaches Codex the checkpoint protocol and the 4-stage workflow (Clarify → Plan → Approve → Execute).
@@ -66,18 +66,18 @@ codex
 
 Inside Codex, say something like:
 
-> Implement a login feature with tests. Use /lh-supervisor to run this as a supervised long task.
+> Implement a login feature with tests. Use /thin-supervisor to run this as a supervised long task.
 
 Or invoke the skill directly:
 
-> /lh-supervisor
+> /thin-supervisor
 
 The Skill will:
 1. Clarify your requirements (if vague)
 2. Generate a spec YAML with verification steps
 3. Self-review the plan (architect + critic passes)
 4. Ask you to approve
-5. Attach immediately with `scripts/lh-supervisor-attach.sh <slug>`
+5. Attach immediately with `scripts/thin-supervisor-attach.sh <slug>`
 6. Start emitting checkpoints as it works
 
 ### 6. Monitor
@@ -138,7 +138,7 @@ Almost identical to Codex. The only difference is where the Skill is installed.
 ### 1. Install the Claude Code Skill
 
 ```bash
-cp -r skills/lh-supervisor ~/.claude/skills/
+cp -r skills/thin-supervisor ~/.claude/skills/
 ```
 
 ### 2. Same steps as Part A
@@ -149,7 +149,7 @@ Replace `codex` with `claude` in step 5:
 claude
 ```
 
-Then invoke `/lh-supervisor` or describe your task. Everything else works the same.
+Then invoke `/thin-supervisor` or describe your task. Everything else works the same.
 
 ---
 
@@ -248,7 +248,7 @@ If your agent supports skills (like Codex's `~/.codex/skills/` or Claude's `~/.c
 
 ```bash
 # Adapt the Codex skill for your agent
-cp -r skills/lh-supervisor-codex ~/.your-agent/skills/lh-supervisor
+cp -r skills/thin-supervisor-codex ~/.your-agent/skills/thin-supervisor
 ```
 
 The Skill teaches the agent the checkpoint protocol and the 4-stage workflow.
@@ -358,11 +358,11 @@ thin-supervisor daemon start
 
 # Terminal 2: tmux session for project A
 tmux new -s project-a
-codex  # ... invoke /lh-supervisor
+codex  # ... invoke /thin-supervisor
 
 # Terminal 3: tmux session for project B
 tmux new -s project-b
-claude  # ... invoke /lh-supervisor
+claude  # ... invoke /thin-supervisor
 
 # Check all runs
 thin-supervisor status

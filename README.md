@@ -2,7 +2,9 @@
 
 **Long-running AI coding tasks fail silently.** The agent asks "should I continue?", you're not watching, and the task stalls. Or worse — the agent says "done" but didn't actually pass the tests.
 
-thin-supervisor fixes this. It sits alongside your existing coding agent (Claude Code, Codex, or any CLI agent) in a tmux pane, watches what the agent does, and makes structured decisions: continue, verify, retry, branch, escalate, or finish. You stay in your familiar agent UI. The supervisor handles the rest.
+thin-supervisor fixes this. It's an acceptance-centered run supervisor that sits alongside your existing coding agent (Claude Code, Codex, or any CLI agent), watches what the agent does, and makes structured decisions: continue, verify, retry, branch, escalate, or finish. "Done" means the verifier passed and the acceptance contract is satisfied — not that the agent said so. You stay in your familiar agent UI. The supervisor handles the rest.
+
+> **Architecture deep-dive**: See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the six-layer architecture, first-class objects, and design principles.
 
 ```text
 ┌────────────────────────────┐  ┌──────────────────────────┐
@@ -29,16 +31,25 @@ thin-supervisor fixes this. It sits alongside your existing coding agent (Claude
 
 ## Core Concepts
 
-thin-supervisor is built around 6 first-class objects:
+### Runtime Objects (stable)
 
 | Object | Question it answers | What it is |
 |--------|-------------------|------------|
 | **WorkflowSpec** | What should be done? | YAML task definition with steps, verification criteria, and finish policy |
-| **SessionRun** | Who is this run? | Identity + durable event history — survives crashes, enables recovery |
-| **ExecutionSurface** | How do we talk to the agent? | Protocol for read/inject/cwd — tmux is the first implementation |
 | **CheckpointEvent** | What did the agent just report? | Structured status with seq tracking, evidence, and needs |
 | **SupervisorDecision** | What does the control plane think? | Typed gate decision with confidence, reasoning, and causality link |
 | **HandoffInstruction** | What should the agent do next? | Composed instruction with full traceability to the triggering decision |
+| **ExecutionSurface** | How do we talk to the agent? | Protocol for read/inject/cwd — tmux and open-relay implementations |
+| **SessionRun** | Who is this run? | Identity + durable event history — survives crashes, enables recovery |
+
+### Emerging Architecture (implemented, maturing)
+
+| Object | Purpose |
+|--------|---------|
+| **AcceptanceContract** | Defines "what counts as truly done" — required evidence, forbidden states, risk class, reviewer gating |
+| **WorkerProfile** | Explicit worker capabilities — provider, model, trust level. Drives supervision intensity. |
+| **SupervisionPolicy** | Three modes: `strict_verifier` (default) / `collaborative_reviewer` / `directive_lead`. Prevents thin supervisor from micromanaging strong worker. |
+| **RoutingDecision** | Escalation routing — human, stronger reviewer, or alternate executor |
 
 These form a **causality chain**: every instruction traces back to the decision that caused it, which traces back to the checkpoint that triggered it.
 
@@ -97,7 +108,7 @@ steps:
 EOF
 
 # Start your agent in a tmux pane, then attach the supervisor immediately
-scripts/lh-supervisor-attach.sh my-plan
+scripts/thin-supervisor-attach.sh my-plan
 ```
 
 ## What happens next
@@ -209,23 +220,23 @@ Inspired by [Anthropic's Scaling Managed Agents](https://www.anthropic.com/engin
 
 Install for Claude Code:
 ```bash
-cp -r skills/lh-supervisor ~/.claude/skills/
+cp -r skills/thin-supervisor ~/.claude/skills/
 ```
 
 Install for Codex:
 ```bash
-cp -r skills/lh-supervisor-codex ~/.codex/skills/lh-supervisor
+cp -r skills/thin-supervisor-codex ~/.codex/skills/thin-supervisor
 ```
 
-Invoke with `/lh-supervisor` to auto-generate a spec and start supervised execution.
+Invoke with `/thin-supervisor` to auto-generate a spec and start supervised execution.
 
 ## Development
 
 ```bash
-git clone https://github.com/fakechris/lite-harness-supervisor
-cd lite-harness-supervisor
+git clone https://github.com/fakechris/thin-supervisor
+cd thin-supervisor
 pip install -e ".[dev]"
-pytest -q  # 74 tests
+pytest -q
 ```
 
 ## License
