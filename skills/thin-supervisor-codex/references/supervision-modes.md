@@ -6,7 +6,7 @@ selects it. But understanding the modes helps you work with the supervisor.
 
 ## strict_verifier (default)
 
-**When**: Strong worker (Opus, GPT-5.4), standard risk, no repeated failures.
+**When**: Strong or standard trust worker, standard/low risk, fewer than 3 failures.
 
 **What the supervisor does**: Only checks evidence and runs verifiers.
 Does NOT give detailed guidance. Trusts you to figure out how.
@@ -16,7 +16,7 @@ verify and advance.
 
 ## collaborative_reviewer
 
-**When**: Worker trust is uncertain, risk is high, or 1-2 failures occurred.
+**When**: Low trust worker, OR high/critical risk task, OR some failures (but below threshold).
 
 **What the supervisor does**: Asks you to describe your approach and risks
 before executing.
@@ -26,7 +26,7 @@ briefly explain what you plan to do and what could go wrong. Then do it.
 
 ## directive_lead
 
-**When**: Weak worker, critical risk, or 3+ consecutive failures.
+**When**: Low trust + high/critical risk, OR 3+ consecutive failures (configurable threshold), OR high risk + 2+ failures.
 
 **What the supervisor does**: Gives one specific action at a time. Does not
 let you freelance.

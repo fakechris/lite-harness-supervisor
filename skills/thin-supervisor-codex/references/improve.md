@@ -7,7 +7,7 @@ what happened and propose improvements.
 
 Read `.supervisor/runtime/runs/<run_id>/session_log.jsonl` and look for:
 
-1. **Retries**: Which steps had `current_attempt > 0`? Why did verification fail?
+1. **Retries**: Look for multiple `checkpoint` events with the same `current_node` — that indicates retries. Check `verification` events with `ok: false` to see why.
 2. **Escalations**: Were there `routing` events? Could they have been avoided?
 3. **Mismatches**: Were there `checkpoint_mismatch` events? Why was the agent out of sync?
 4. **Time distribution**: Which steps took the most iterations?

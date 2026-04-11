@@ -303,7 +303,7 @@ def cmd_run_resume(args):
     if result.get("ok"):
         print(f"Run resumed: {result['run_id']} (from {result.get('resumed_from', '?')})")
     else:
-        print(f"No resumable run found: {result.get('error', 'unknown')}")
+        print(f"Error: {result.get('error', 'unknown')}")
         return 1
     return 0
 

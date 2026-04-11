@@ -296,6 +296,12 @@ class DaemonServer:
         if not runs_dir.exists():
             return {"ok": False, "error": "no runs directory"}
 
+        # Load spec to get spec_id for matching
+        try:
+            target_spec = load_spec(spec_path)
+        except Exception as e:
+            return {"ok": False, "error": f"spec load failed: {e}"}
+
         for run_dir in sorted(runs_dir.iterdir(), key=lambda d: d.stat().st_mtime, reverse=True):
             state_path = run_dir / "state.json"
             if not state_path.exists():
@@ -304,36 +310,44 @@ class DaemonServer:
                 state_data = json.loads(state_path.read_text())
             except (json.JSONDecodeError, OSError):
                 continue
-            # Match by spec and pane
-            if (state_data.get("spec_id", "") and state_data.get("pane_target", "") == pane_target
+            # Match by spec_id + pane_target (not just pane)
+            if (state_data.get("spec_id") == target_spec.id
+                    and state_data.get("pane_target", "") == pane_target
                     and state_data.get("top_state") in ("PAUSED_FOR_HUMAN", "RUNNING", "READY", "GATING", "VERIFYING")):
                 run_id = state_data["run_id"]
-                # Check not already running
                 with self._lock:
                     if run_id in self._runs:
                         return {"ok": False, "error": f"run {run_id} is already active"}
-                # Resume it
-                try:
-                    spec = load_spec(state_data.get("spec_path", spec_path))
-                except Exception as e:
-                    return {"ok": False, "error": f"spec load failed: {e}"}
+                    # Check pane not owned by another run
+                    for existing in self._runs.values():
+                        if existing.pane_target == pane_target and existing.thread and existing.thread.is_alive():
+                            return {"ok": False, "error": f"pane {pane_target} owned by run {existing.run_id}"}
+
                 store = StateStore(str(run_dir))
                 surface_type = request.get("surface_type") or state_data.get("surface_type", "tmux")
                 state = store.load_or_init(
-                    spec, spec_path=spec_path, pane_target=pane_target,
+                    target_spec, spec_path=spec_path, pane_target=pane_target,
                     surface_type=surface_type,
                     workspace_root=state_data.get("workspace_root", os.getcwd()),
                 )
                 entry = RunEntry(run_id, spec_path, pane_target,
                                  state_data.get("workspace_root", ""),
                                  surface_type=surface_type, thread=None, store=store)
+
+                # Acquire pane lock before starting
+                try:
+                    acquire_pane_lock(pane_target, run_id)
+                except Exception:
+                    pass  # best-effort lock
+
                 with self._lock:
                     thread = threading.Thread(
-                        target=self._run_worker, args=(entry, spec, state),
+                        target=self._run_worker, args=(entry, target_spec, state),
                         name=f"run-{run_id}", daemon=True,
                     )
                     entry.thread = thread
                     self._runs[run_id] = entry
+                    self._update_daemon_record_locked()
                 thread.start()
                 logger.info("resumed run %s from %s", run_id, state_data.get("top_state"))
                 return {"ok": True, "run_id": run_id, "resumed_from": state_data.get("top_state")}

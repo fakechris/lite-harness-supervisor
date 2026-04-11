@@ -49,8 +49,9 @@ class JsonlObserver:
         try:
             file_size = self._path.stat().st_size
             if file_size < self._offset:
-                # File was truncated/rotated — reset
+                # File was truncated/rotated — reset offset AND buffer
                 self._offset = 0
+                self._text_buffer = ""
             with self._path.open("rb") as f:
                 f.seek(self._offset)
                 raw = f.read()
