@@ -289,6 +289,25 @@ def cmd_run_foreground(args):
     return 0
 
 
+def cmd_run_resume(args):
+    """Resume a paused or crashed run."""
+    config = RuntimeConfig.load(getattr(args, "config", None) or CONFIG_FILE)
+    target, surface = _resolve_target_and_surface(args, config)
+    if not target:
+        return 1
+
+    client = _ensure_daemon(getattr(args, "config", None))
+    spec_path = os.path.abspath(args.spec)
+
+    result = client.resume(spec_path, target, surface_type=surface)
+    if result.get("ok"):
+        print(f"Run resumed: {result['run_id']} (from {result.get('resumed_from', '?')})")
+    else:
+        print(f"Error: {result.get('error', 'unknown')}")
+        return 1
+    return 0
+
+
 def cmd_run_stop(args):
     """Stop a specific run."""
     from supervisor.daemon.client import DaemonClient
@@ -825,6 +844,13 @@ def main():
     p_run_stop = run_sub.add_parser("stop", help="Stop a specific run")
     p_run_stop.add_argument("run_id", help="Run ID to stop")
 
+    p_resume = run_sub.add_parser("resume", help="Resume a paused/crashed run")
+    p_resume.add_argument("--spec", required=True, help="Path to spec YAML")
+    p_resume.add_argument("--pane", default=None, help="Surface target")
+    p_resume.add_argument("--target", default=None, help="Alias for --pane")
+    p_resume.add_argument("--surface", default=None, help="Surface type override")
+    p_resume.add_argument("--config", default=None)
+
     # Removed legacy syntax is still parsed so we can print a migration error.
     p_run.add_argument("spec_path", nargs="?", default=None, help=argparse.SUPPRESS)
     p_run.add_argument("--pane", default=None, help=argparse.SUPPRESS)
@@ -909,6 +935,8 @@ def main():
             sys.exit(cmd_run_foreground(args))
         elif args.run_action == "stop":
             sys.exit(cmd_run_stop(args))
+        elif args.run_action == "resume":
+            sys.exit(cmd_run_resume(args))
         elif args.spec_path:
             # Legacy mode
             sys.exit(cmd_run_legacy(args))

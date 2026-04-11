@@ -305,19 +305,20 @@ class SupervisorLoop:
             if cp and cp.run_id and cp.run_id != state.run_id:
                 cp = None  # stale checkpoint from previous run
             if not cp:
-                node = spec.get_node(state.current_node_id)
-                instruction = self.composer.build(
-                    node, state,
-                    triggered_by_decision_id="",
-                    trigger_type="init",
-                    policy=policy,
-                )
-                # #11: save state BEFORE inject to avoid replay on crash
-                state.last_injected_node_id = state.current_node_id
-                state.last_injected_attempt = 0
-                self.store.save(state)
-                if not self._inject_or_pause(state, terminal, instruction):
-                    return
+                # Skip init inject for observation-only surfaces (agent already running)
+                if not getattr(terminal, "is_observation_only", False):
+                    node = spec.get_node(state.current_node_id)
+                    instruction = self.composer.build(
+                        node, state,
+                        triggered_by_decision_id="",
+                        trigger_type="init",
+                        policy=policy,
+                    )
+                    state.last_injected_node_id = state.current_node_id
+                    state.last_injected_attempt = 0
+                    self.store.save(state)
+                    if not self._inject_or_pause(state, terminal, instruction):
+                        return
                 pending_text = None
 
         while not self.is_final(state) and state.top_state != TopState.PAUSED_FOR_HUMAN:
@@ -362,8 +363,16 @@ class SupervisorLoop:
                 time.sleep(poll_interval)
                 continue
 
-            # #5: node mismatch — escalate after N consecutive
+            # #5: node mismatch — but for observation-only surfaces, be lenient:
+            # if the checkpoint reports a node we've already done, just skip it
+            # (agent doesn't know we advanced because inject is a no-op)
             if checkpoint.current_node != state.current_node_id:
+                if (getattr(terminal, "is_observation_only", False)
+                        and checkpoint.current_node in state.done_node_ids):
+                    logger.info("observation-only: skipping done node checkpoint cp=%s",
+                                checkpoint.current_node)
+                    time.sleep(poll_interval)
+                    continue
                 node_mismatch_count += 1
                 logger.warning("checkpoint node mismatch (%d/%d): cp=%s state=%s",
                                node_mismatch_count, max_node_mismatch,
