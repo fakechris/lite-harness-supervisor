@@ -193,11 +193,11 @@ class TerminalAdapter:
         if not needle:
             return
 
-        for _ in range(5):
+        for _ in range(10):
             snapshot = self._capture_tail(target, lines=30)
             if not self._tail_looks_stuck(snapshot, needle):
                 return
-            time.sleep(0.2)
+            time.sleep(0.5)
 
         raise InjectionConfirmationError(
             f"submit not confirmed for pane '{target}'; injected text still visible near the tail"

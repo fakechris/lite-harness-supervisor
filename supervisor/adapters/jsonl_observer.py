@@ -95,10 +95,11 @@ class JsonlObserver:
         1. Stop hook returning instruction as reason
         2. File-based handoff (.supervisor/runtime/next_instruction.txt)
         """
-        # Write instruction to file for hook to pick up
-        runtime_dir = Path(".supervisor/runtime")
+        # Write instruction to session-scoped file for hook to pick up
+        sid = self.session_id() or "default"
+        runtime_dir = Path(".supervisor/runtime/instructions")
         runtime_dir.mkdir(parents=True, exist_ok=True)
-        instruction_file = runtime_dir / "next_instruction.txt"
+        instruction_file = runtime_dir / f"{sid}.txt"
         instruction_file.write_text(text, encoding="utf-8")
 
     def current_cwd(self) -> str:

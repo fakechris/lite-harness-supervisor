@@ -38,17 +38,26 @@ class FinishGate:
             if not v.get("ok", False) and v.get("last_status") != "pending":
                 failures.append("last verification did not pass")
 
-        # Check clean repo
-        if contract.require_clean_or_committed_repo:
+        # Check git cleanliness (once, reused for both clean_repo and forbidden state)
+        git_dirty: bool | None = None
+        needs_git = (
+            contract.require_clean_or_committed_repo
+            or "uncommitted_changes" in contract.forbidden_states
+        )
+        if needs_git:
             try:
                 result = subprocess.run(
                     ["git", "status", "--porcelain"],
-                    capture_output=True, text=True, timeout=10,
-                    cwd=cwd,
+                    capture_output=True, text=True, timeout=10, cwd=cwd,
                 )
-                if result.stdout.strip():
-                    failures.append("repo has uncommitted changes")
+                git_dirty = bool(result.stdout.strip())
             except (subprocess.SubprocessError, FileNotFoundError):
+                git_dirty = None  # unknown
+
+        if contract.require_clean_or_committed_repo:
+            if git_dirty is True:
+                failures.append("repo has uncommitted changes")
+            elif git_dirty is None:
                 failures.append("could not check git status")
 
         # Check forbidden states
@@ -58,18 +67,8 @@ class FinishGate:
                 if not v.get("ok", True):
                     failures.append(f"forbidden state: {forbidden}")
             elif forbidden == "uncommitted_changes":
-                if contract.require_clean_or_committed_repo:
-                    pass  # already checked above
-                else:
-                    try:
-                        result = subprocess.run(
-                            ["git", "status", "--porcelain"],
-                            capture_output=True, text=True, timeout=10, cwd=cwd,
-                        )
-                        if result.stdout.strip():
-                            failures.append(f"forbidden state: {forbidden}")
-                    except (subprocess.SubprocessError, FileNotFoundError):
-                        pass
+                if git_dirty is True:
+                    failures.append(f"forbidden state: {forbidden}")
 
         # Check required_evidence against checkpoint evidence
         if contract.required_evidence:

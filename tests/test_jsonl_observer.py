@@ -104,9 +104,9 @@ class TestJsonlObserverInject:
         monkeypatch.chdir(tmp_path)
         jsonl = tmp_path / "test.jsonl"
         jsonl.write_text("")
-        obs = JsonlObserver(str(jsonl))
+        obs = JsonlObserver(str(jsonl), session_id_override="test-sess")
         obs.inject("do the next step")
-        inst = (tmp_path / ".supervisor" / "runtime" / "next_instruction.txt").read_text()
+        inst = (tmp_path / ".supervisor" / "runtime" / "instructions" / "test-sess.txt").read_text()
         assert inst == "do the next step"
 
 

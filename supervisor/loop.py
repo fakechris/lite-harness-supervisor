@@ -71,7 +71,8 @@ class SupervisorLoop:
         elif event["type"] in {"agent_stop", "timeout"}:
             state.top_state = TopState.GATING
 
-    def gate(self, spec, state, *, triggered_by_seq: int = 0) -> SupervisorDecision:
+    def gate(self, spec, state, *, triggered_by_seq: int = 0,
+             triggered_by_checkpoint_id: str = "") -> SupervisorDecision:
         node = spec.get_node(state.current_node_id)
         if node.type == "decision":
             return self.branch_gate.decide(spec, state, node, triggered_by_seq=triggered_by_seq)
@@ -87,6 +88,7 @@ class SupervisorLoop:
                 confidence=1.0,
                 needs_human=True,
                 triggered_by_seq=triggered_by_seq,
+                triggered_by_checkpoint_id=triggered_by_checkpoint_id,
             )
         if cp_status == "step_done":
             return SupervisorDecision.make(
@@ -95,6 +97,7 @@ class SupervisorLoop:
                 gate_type="checkpoint_status",
                 confidence=1.0,
                 triggered_by_seq=triggered_by_seq,
+                triggered_by_checkpoint_id=triggered_by_checkpoint_id,
             )
         if cp_status == "workflow_done":
             return SupervisorDecision.make(
@@ -103,6 +106,7 @@ class SupervisorLoop:
                 gate_type="checkpoint_status",
                 confidence=1.0,
                 triggered_by_seq=triggered_by_seq,
+                triggered_by_checkpoint_id=triggered_by_checkpoint_id,
             )
         return self.continue_gate.decide(build_context(spec, state), triggered_by_seq=triggered_by_seq)
 
@@ -231,7 +235,6 @@ class SupervisorLoop:
         """
         adapter = TranscriptAdapter()
         pending_text = None
-        last_injected_attempt = -1
         node_mismatch_count = 0
         max_node_mismatch = 5
         interrupted = False
@@ -263,7 +266,6 @@ class SupervisorLoop:
             self._run_sidecar_inner(
                 spec, state, terminal, adapter, surface_id,
                 poll_interval=poll_interval, read_lines=read_lines,
-                last_injected_attempt=last_injected_attempt,
                 node_mismatch_count=node_mismatch_count,
                 max_node_mismatch=max_node_mismatch,
                 interrupted_ref=interrupted_ref,
@@ -283,7 +285,7 @@ class SupervisorLoop:
 
     def _run_sidecar_inner(
         self, spec, state, terminal, adapter, surface_id, *,
-        poll_interval, read_lines, last_injected_attempt,
+        poll_interval, read_lines,
         node_mismatch_count, max_node_mismatch, interrupted_ref,
     ):
         pending_text = None
@@ -312,7 +314,7 @@ class SupervisorLoop:
                 )
                 # #11: save state BEFORE inject to avoid replay on crash
                 state.last_injected_node_id = state.current_node_id
-                last_injected_attempt = 0
+                state.last_injected_attempt = 0
                 self.store.save(state)
                 if not self._inject_or_pause(state, terminal, instruction):
                     return
@@ -398,7 +400,11 @@ class SupervisorLoop:
             # 4. Gate → SupervisorDecision
             decision: SupervisorDecision | None = None
             if state.top_state == TopState.GATING:
-                decision = self.gate(spec, state, triggered_by_seq=checkpoint.checkpoint_seq)
+                decision = self.gate(
+                    spec, state,
+                    triggered_by_seq=checkpoint.checkpoint_seq,
+                    triggered_by_checkpoint_id=checkpoint.checkpoint_id,
+                )
                 self.store.append_decision(decision.to_dict())
                 self.store.append_session_event(state.run_id, "gate_decision", decision.to_dict())
                 self.apply_decision(spec, state, decision)
@@ -420,7 +426,7 @@ class SupervisorLoop:
             # 6. Inject — #11: save BEFORE inject
             if state.top_state == TopState.RUNNING:
                 node_changed = state.current_node_id != state.last_injected_node_id
-                new_retry = state.current_attempt > 0 and state.current_attempt != last_injected_attempt
+                new_retry = state.current_attempt > 0 and state.current_attempt != state.last_injected_attempt
                 if node_changed or new_retry:
                     node = spec.get_node(state.current_node_id)
                     decision_id = decision.decision_id if decision else ""
@@ -435,7 +441,7 @@ class SupervisorLoop:
                     )
                     # Save state BEFORE inject to prevent replay on crash
                     state.last_injected_node_id = state.current_node_id
-                    last_injected_attempt = state.current_attempt
+                    state.last_injected_attempt = state.current_attempt
                     self.store.save(state)
                     if not self._inject_or_pause(state, terminal, instruction):
                         return
