@@ -485,6 +485,88 @@ def cmd_note(args):
     return 0
 
 
+# ------------------------------------------------------------------
+# skill install
+# ------------------------------------------------------------------
+
+
+def cmd_skill_install(args):
+    """Auto-detect agent and install appropriate skill."""
+    import shutil
+
+    skill_src = Path(__file__).resolve().parent.parent / "skills"
+    installed = []
+
+    # Codex
+    codex_home = Path.home() / ".codex"
+    if codex_home.exists():
+        dest = codex_home / "skills" / "thin-supervisor"
+        src = skill_src / "thin-supervisor-codex"
+        if src.exists():
+            shutil.copytree(str(src), str(dest), dirs_exist_ok=True)
+            installed.append(f"Codex: {dest}")
+
+    # Claude Code
+    claude_home = Path.home() / ".claude"
+    if claude_home.exists():
+        dest = claude_home / "skills" / "thin-supervisor"
+        src = skill_src / "thin-supervisor"
+        if src.exists():
+            shutil.copytree(str(src), str(dest), dirs_exist_ok=True)
+            installed.append(f"Claude Code: {dest}")
+
+    if installed:
+        print("Skills installed:")
+        for i in installed:
+            print(f"  ✅ {i}")
+        print("\nInvoke with /thin-supervisor in your agent.")
+    else:
+        print("No agent detected (~/.codex or ~/.claude not found).")
+        print("Install manually: cp -r skills/thin-supervisor-codex ~/.codex/skills/thin-supervisor")
+    return 0
+
+
+# ------------------------------------------------------------------
+# session detect / jsonl / sessions
+# ------------------------------------------------------------------
+
+
+def cmd_session(args):
+    """Session detection commands."""
+    from supervisor.session_detect import detect_agent, detect_session_id, find_latest_jsonl, list_sessions
+
+    if args.session_action == "detect":
+        agent = detect_agent()
+        sid = detect_session_id(agent)
+        if sid:
+            print(sid)
+        else:
+            print(f"error: could not detect session ID (agent={agent})", file=sys.stderr)
+            return 1
+
+    elif args.session_action == "jsonl":
+        agent = detect_agent()
+        path = find_latest_jsonl(agent)
+        if path:
+            print(str(path))
+        else:
+            print(f"error: no JSONL transcript found (agent={agent})", file=sys.stderr)
+            return 1
+
+    elif args.session_action == "list":
+        sessions = list_sessions()
+        if not sessions:
+            print("No sessions found.")
+            return 0
+        print(f"{'AGENT':<8} {'CWD':<40} {'MODIFIED'}")
+        for s in sessions:
+            cwd = s.get("cwd", "") or "(unknown)"
+            mod = s.get("modified", "")[:19]
+            print(f"{s['agent']:<8} {cwd:<40} {mod}")
+
+    return 0
+
+
 def cmd_status(args):
     """Show all run states."""
     from supervisor.daemon.client import DaemonClient
@@ -744,6 +826,18 @@ def main():
     p_note_list.add_argument("--type", default="", help="Filter by type")
     p_note_list.add_argument("--run", default="", help="Filter by author run ID")
 
+    # skill
+    p_skill = sub.add_parser("skill", help="Skill management")
+    skill_sub = p_skill.add_subparsers(dest="skill_action")
+    skill_sub.add_parser("install", help="Auto-detect agent and install skill")
+
+    # session
+    p_session = sub.add_parser("session", help="Session detection")
+    session_sub = p_session.add_subparsers(dest="session_action")
+    session_sub.add_parser("detect", help="Detect current session ID")
+    session_sub.add_parser("jsonl", help="Find current session JSONL path")
+    session_sub.add_parser("list", help="List all discoverable sessions")
+
     # status (legacy, still works)
     p_status = sub.add_parser("status", help="Show all run states")
     p_status.add_argument("--config", default=None)
@@ -804,6 +898,18 @@ def main():
             sys.exit(cmd_note(args))
         else:
             print("Usage: thin-supervisor note {add|list}")
+            sys.exit(1)
+    elif args.command == "skill":
+        if args.skill_action == "install":
+            sys.exit(cmd_skill_install(args))
+        else:
+            print("Usage: thin-supervisor skill {install}")
+            sys.exit(1)
+    elif args.command == "session":
+        if args.session_action in ("detect", "jsonl", "list"):
+            sys.exit(cmd_session(args))
+        else:
+            print("Usage: thin-supervisor session {detect|jsonl|list}")
             sys.exit(1)
     elif args.command == "status":
         sys.exit(cmd_status(args))
