@@ -46,21 +46,25 @@ class JsonlObserver:
             return ""
 
         try:
-            with self._path.open("r", encoding="utf-8") as f:
+            file_size = self._path.stat().st_size
+            if file_size < self._offset:
+                # File was truncated/rotated — reset
+                self._offset = 0
+            with self._path.open("rb") as f:
                 f.seek(self._offset)
-                new_content = f.read()
+                raw = f.read()
         except OSError:
             return ""
 
-        if not new_content.strip():
+        if not raw.strip():
             return ""
 
         # Only advance offset to the last complete line (avoid partial JSON)
-        last_newline = new_content.rfind("\n")
+        last_newline = raw.rfind(b"\n")
         if last_newline == -1:
             return ""  # no complete line yet
         self._offset += last_newline + 1
-        new_content = new_content[:last_newline + 1]
+        new_content = raw[:last_newline + 1].decode("utf-8", errors="replace")
 
         # Extract text content from JSONL events
         text_parts: list[str] = []

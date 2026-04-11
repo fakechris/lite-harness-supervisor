@@ -494,7 +494,16 @@ def cmd_skill_install(args):
     """Auto-detect agent and install appropriate skill."""
     import shutil
 
+    # Try editable install path first, then pip install path
     skill_src = Path(__file__).resolve().parent.parent / "skills"
+    if not skill_src.exists():
+        # pip install: skills may be in the package data or repo checkout
+        # Fall back to downloading from GitHub
+        print("Skills not found locally. Install from repo:")
+        print("  git clone https://github.com/fakechris/thin-supervisor")
+        print("  cp -r thin-supervisor/skills/thin-supervisor-codex ~/.codex/skills/thin-supervisor")
+        print("  cp -r thin-supervisor/skills/thin-supervisor ~/.claude/skills/thin-supervisor")
+        return 1
     installed = []
 
     # Codex
@@ -523,6 +532,7 @@ def cmd_skill_install(args):
     else:
         print("No agent detected (~/.codex or ~/.claude not found).")
         print("Install manually: cp -r skills/thin-supervisor-codex ~/.codex/skills/thin-supervisor")
+        return 1
     return 0
 
 
