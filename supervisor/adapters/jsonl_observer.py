@@ -49,12 +49,18 @@ class JsonlObserver:
             with self._path.open("r", encoding="utf-8") as f:
                 f.seek(self._offset)
                 new_content = f.read()
-                self._offset = f.tell()
         except OSError:
             return ""
 
         if not new_content.strip():
             return ""
+
+        # Only advance offset to the last complete line (avoid partial JSON)
+        last_newline = new_content.rfind("\n")
+        if last_newline == -1:
+            return ""  # no complete line yet
+        self._offset += last_newline + 1
+        new_content = new_content[:last_newline + 1]
 
         # Extract text content from JSONL events
         text_parts: list[str] = []
@@ -104,11 +110,12 @@ class JsonlObserver:
         if self._session_id_override:
             return self._session_id_override
         name = self._path.stem
-        # Codex: rollout-2025-10-27T01-57-16-{uuid}
+        # Codex: rollout-YYYY-MM-DDTHH-MM-SS-{uuid-with-dashes}
         if name.startswith("rollout-"):
-            parts = name.split("-", 7)
-            if len(parts) > 7:
-                return parts[7]
+            import re
+            m = re.match(r"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.*)", name)
+            if m:
+                return m.group(1)
         # Claude: ses_{id}
         if name.startswith("ses_"):
             return name[4:]

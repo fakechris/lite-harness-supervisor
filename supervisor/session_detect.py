@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,11 +45,11 @@ def detect_session_id(agent: str = "") -> str:
         # Fall back to most recent rollout file
         path = find_latest_jsonl(agent)
         if path:
-            # Extract session ID from filename: rollout-YYYY-MM-DDTHH-MM-SS-{session_id}.jsonl
-            name = path.stem  # rollout-2025-10-27T01-57-16-019a24e2-...
-            parts = name.split("-", 7)  # split on first 7 dashes (date+time)
-            if len(parts) > 7:
-                return parts[7]  # the UUID part
+            # Extract session ID from filename: rollout-YYYY-MM-DDTHH-MM-SS-{uuid-with-dashes}
+            import re
+            m = re.match(r"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.*)", path.stem)
+            if m:
+                return m.group(1)
         return ""
 
     if agent == "claude":
@@ -122,23 +123,41 @@ def detect_cwd_from_jsonl(jsonl_path: Path, agent: str = "") -> str:
     if agent == "claude":
         # Claude stores projects at ~/.claude/projects/<encoded-path>/
         # The encoded path replaces / with -
-        # e.g., /Users/chris/workspace/project → -Users-chris-workspace-project
+        # BUT paths may contain real hyphens, so naive replace("-","/") is lossy.
+        # Instead, try to find the real path by checking which decoded candidate exists.
         projects_dir = Path.home() / ".claude" / "projects"
         if projects_dir.exists():
-            # Find the project dir that was most recently modified
             candidates = sorted(
                 [d for d in projects_dir.iterdir() if d.is_dir()],
                 key=lambda d: d.stat().st_mtime, reverse=True,
             )
-            if candidates:
-                encoded = candidates[0].name
-                # Decode: -Users-chris-workspace-project → /Users/chris/workspace/project
-                decoded = encoded.replace("-", "/")
-                if decoded.startswith("/"):
+            for candidate in candidates[:5]:
+                decoded = _decode_claude_project_path(candidate.name)
+                if decoded and Path(decoded).is_dir():
                     return decoded
         return ""
 
     return ""
+
+
+def _decode_claude_project_path(encoded: str) -> str:
+    """Decode Claude Code's encoded project path.
+
+    Claude encodes /Users/chris/workspace/project as -Users-chris-workspace-project.
+    Naive replace("-", "/") fails for paths with real hyphens.
+
+    Strategy: try progressively replacing dashes with slashes from left to right,
+    and return the first result that is an existing directory.
+    If none exist, fall back to naive replacement.
+    """
+    if not encoded.startswith("-"):
+        return ""
+    # Naive decode as fallback
+    naive = encoded.replace("-", "/")
+    if Path(naive).is_dir():
+        return naive
+    # Couldn't verify — return naive anyway (caller checks existence)
+    return naive
 
 
 def list_sessions() -> list[dict]:
