@@ -1,4 +1,4 @@
-"""E2E scenario tests covering all 7 surface × agent combinations.
+"""E2E scenario tests covering all 7 surface x agent combinations.
 
 Each scenario traces the full data flow:
   Attach → Observe → Parse → Verify(cwd) → Inject
@@ -111,26 +111,38 @@ class TestScenarioTmuxCodex:
         assert len(terminal.injected) >= 2
 
     def test_retry_on_verification_failure(self, tmp_path):
+        """First checkpoint fails verification (file missing), retry succeeds."""
         spec = load_spec("specs/examples/linear_plan.example.yaml")
         store = StateStore(str(tmp_path / "runtime"))
         state = store.load_or_init(spec, workspace_root=str(tmp_path))
         loop = SupervisorLoop(store)
 
-        terminal = MockSurface([
-            # First attempt: step_done but verify will fail (file doesn't exist)
+        # File does NOT exist initially — first verification will fail
+        # Surface that creates the file after first read (simulating agent fixing it)
+        class RetryMockSurface(MockSurface):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self._created_file = False
+            def read(self, lines=100):
+                text = super().read(lines)
+                if not self._created_file and self._index >= 2:
+                    # After second checkpoint, create the artifact
+                    (tmp_path / "tests").mkdir(exist_ok=True)
+                    (tmp_path / "tests" / "test_example.py").write_text("pass")
+                    self._created_file = True
+                return text
+
+        terminal = RetryMockSurface([
             _make_checkpoint("step_done", "write_test", "first try"),
-            # After retry inject, succeed
-            _make_checkpoint("step_done", "write_test", "second try with file"),
+            _make_checkpoint("step_done", "write_test", "second try fixed"),
             _make_checkpoint("step_done", "implement_feature", "impl done"),
             _make_checkpoint("step_done", "final_verify", "all done"),
         ], cwd=str(tmp_path))
 
-        # Create the file so artifact verifier passes on second try
-        (tmp_path / "tests").mkdir()
-        (tmp_path / "tests" / "test_example.py").write_text("pass")
-
         final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50, stop_event=_make_stop_event())
         assert final.top_state == TopState.COMPLETED
+        # Verify retry actually happened
+        assert state.retry_budget.used_global >= 1
 
     def test_escalation_on_blocked(self, tmp_path):
         spec = load_spec("specs/examples/linear_plan.example.yaml")
@@ -257,7 +269,13 @@ class TestScenarioSupervisionPolicy:
             _make_checkpoint("step_done", "final_verify", "done"),
         ], cwd=str(tmp_path))
 
+        # Create artifact for verifier
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_example.py").write_text("pass")
+
         loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50, stop_event=_make_stop_event())
+        # Must have injected at least once
+        assert len(terminal.injected) >= 1, "no injections happened — test is vacuous"
         # strict_verifier mode: injections should NOT contain [DIRECTIVE]
         for inj in terminal.injected:
             assert "[DIRECTIVE]" not in inj
@@ -269,6 +287,9 @@ class TestScenarioSupervisionPolicy:
         worker = WorkerProfile(trust_level="low", model_name="minimax")
         loop = SupervisorLoop(store, worker_profile=worker)
 
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_example.py").write_text("pass")
+
         terminal = MockSurface([
             _make_checkpoint("step_done", "write_test", "done"),
             _make_checkpoint("step_done", "implement_feature", "done"),
@@ -276,7 +297,7 @@ class TestScenarioSupervisionPolicy:
         ], cwd=str(tmp_path))
 
         loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50, stop_event=_make_stop_event())
+        assert len(terminal.injected) >= 1, "no injections happened — test is vacuous"
         # collaborative_reviewer mode: should mention approach
-        if terminal.injected:
-            assert any("approach" in inj.lower() or "risk" in inj.lower()
+        assert any("approach" in inj.lower() or "risk" in inj.lower()
                        for inj in terminal.injected)

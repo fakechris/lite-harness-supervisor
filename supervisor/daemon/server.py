@@ -41,11 +41,12 @@ class RunEntry:
     """Registry entry for one active run."""
 
     def __init__(self, run_id: str, spec_path: str, pane_target: str,
-                 workspace_root: str, thread: threading.Thread, store: StateStore):
+                 workspace_root: str, surface_type: str, thread: threading.Thread, store: StateStore):
         self.run_id = run_id
         self.spec_path = spec_path
         self.pane_target = pane_target
         self.workspace_root = workspace_root
+        self.surface_type = surface_type
         self.thread = thread
         self.store = store
         self.stop_event = threading.Event()
@@ -199,7 +200,7 @@ class DaemonServer:
             store.save(state)
 
         entry = RunEntry(run_id, spec_path, pane_target, workspace_root,
-                         thread=None, store=store)
+                         surface_type=surface_type, thread=None, store=store)
         pane_owner = self._pane_owner_metadata(run_id, spec_path, pane_target, workspace_root)
 
         with self._lock:
@@ -233,8 +234,7 @@ class DaemonServer:
     def _run_worker(self, entry: RunEntry, spec, state) -> None:
         """Worker thread: runs run_sidecar for one run."""
         try:
-            surface_type = getattr(self.config, "surface_type", "tmux")
-            terminal = create_surface(surface_type, entry.pane_target)
+            terminal = create_surface(entry.surface_type, entry.pane_target)
             from supervisor.domain.models import WorkerProfile
             worker = WorkerProfile(
                 provider=getattr(self.config, "worker_provider", "unknown"),

@@ -472,7 +472,10 @@ class SupervisorLoop:
         # Observation-only surfaces (e.g., JSONL) — write instruction but don't
         # expect it to be delivered. Log it and continue observing.
         if getattr(terminal, "is_observation_only", False):
-            terminal.inject(instruction.content)  # writes file, logs warning
+            try:
+                terminal.inject(instruction.content)  # writes file, logs warning
+            except Exception as exc:
+                logger.warning("observation-only inject failed: %s", exc)
             self.store.append_session_event(
                 state.run_id, "injection_observation_only", instruction.to_dict()
             )
