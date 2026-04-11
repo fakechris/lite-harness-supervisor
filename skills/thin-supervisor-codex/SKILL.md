@@ -1,5 +1,5 @@
 ---
-name: lh-supervisor
+name: thin-supervisor
 description: >
   Drive long-running multi-step tasks to completion with deterministic
   verification. Four-stage workflow: Clarify → Plan → Approve → Execute.
@@ -96,7 +96,7 @@ As soon as the user approves, or if approval is skipped, attach the
 supervisor BEFORE any implementation work:
 
 ```bash
-scripts/lh-supervisor-attach.sh <slug>
+scripts/thin-supervisor-attach.sh <slug>
 ```
 
 Do not start coding, git cleanup, worktree edits, or long test runs
@@ -110,7 +110,7 @@ If attach already succeeded in Stage 3, do not run it again.
 Only use this command when execution starts from a spec that is not yet attached:
 
 ```bash
-scripts/lh-supervisor-attach.sh <slug>
+scripts/thin-supervisor-attach.sh <slug>
 ```
 
 ### Checkpoint protocol

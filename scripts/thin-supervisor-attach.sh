@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: scripts/lh-supervisor-attach.sh <slug-or-spec-path>" >&2
+  echo "usage: scripts/thin-supervisor-attach.sh <slug-or-spec-path>" >&2
   exit 1
 fi
 

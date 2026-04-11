@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.2.0 (2026-04-10)
+
+### Architecture
+
+- Six-layer architecture with 10 first-class objects
+- `docs/ARCHITECTURE.md` — canonical architecture document with implementation status matrix
+
+### Object Model
+
+- **AcceptanceContract**: defines "what counts as truly done" — required evidence, forbidden states, risk class, reviewer gating
+- **WorkerProfile**: explicit worker capabilities (provider, model, trust level)
+- **SupervisionPolicy**: 3 supervision modes (strict_verifier / collaborative_reviewer / directive_lead)
+- **RoutingDecision**: escalation audit trail with causality links
+- **SupervisionPolicyEngine**: rule-based mode selection from worker + contract + state
+
+### Surface Abstraction
+
+- SessionAdapter Protocol with `doctor()` method
+- OpenRelaySurface adapter for oly sessions
+- `surface_factory.create_surface()` runtime dispatch
+- Config: `surface_type` ("tmux" | "open_relay")
+
+### Daemon & Multi-Run
+
+- Single daemon manages concurrent runs across tmux sessions
+- Unix socket IPC: register, stop, list_runs, observe, note_add, note_list
+- Per-run isolated state directories
+
+### Collaboration Plane
+
+- `thin-supervisor list` — cross-run visibility
+- `thin-supervisor observe <run_id>` — read-only observation
+- `thin-supervisor note add/list` — shared coordination memory
+
+### Stability
+
+- Injection confirmation (detect stuck input)
+- Global pane ownership registry
+- Graceful injection failure → PAUSED_FOR_HUMAN
+- SIGTERM handler saves state before exit
+
+### Naming
+
+- Unified to `thin-supervisor` across repo, skills, scripts, PyPI
+
+---
+
 ## 0.1.0 (2026-04-09)
 
 Initial release.

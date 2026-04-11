@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "scripts" / "lh-supervisor-attach.sh"
+SCRIPT = ROOT / "scripts" / "thin-supervisor-attach.sh"
 
 
 def test_attach_script_reports_clear_error_when_not_in_tmux(tmp_path):

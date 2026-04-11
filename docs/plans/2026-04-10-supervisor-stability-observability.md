@@ -100,8 +100,8 @@ Expected: PASS
 ### Task 5: Add an explicit attach script and tighten skill timing
 
 **Files:**
-- Create: `scripts/lh-supervisor-attach.sh`
-- Modify: `skills/lh-supervisor-codex/SKILL.md`
+- Create: `scripts/thin-supervisor-attach.sh`
+- Modify: `skills/thin-supervisor-codex/SKILL.md`
 - Modify: `AGENTS.md`
 
 **Step 1: Create the helper script**
@@ -117,7 +117,7 @@ Expected: PASS
 
 **Step 3: Run shell-level validation**
 
-Run: `bash -n scripts/lh-supervisor-attach.sh`
+Run: `bash -n scripts/thin-supervisor-attach.sh`
 Expected: PASS
 
 ### Task 6: Add injection diagnostics for stacked input failures

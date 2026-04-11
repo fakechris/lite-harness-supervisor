@@ -22,9 +22,9 @@ llm = ["litellm>=1.40"]
 dev = ["pytest>=7.0"]
 
 [project.urls]
-Repository = "https://github.com/fakechris/lite-harness-supervisor"
-Issues = "https://github.com/fakechris/lite-harness-supervisor/issues"
-Changelog = "https://github.com/fakechris/lite-harness-supervisor/blob/main/CHANGELOG.md"
+Repository = "https://github.com/fakechris/thin-supervisor"
+Issues = "https://github.com/fakechris/thin-supervisor/issues"
+Changelog = "https://github.com/fakechris/thin-supervisor/blob/main/CHANGELOG.md"
 
 [project.scripts]
 thin-supervisor = "supervisor.app:main"
