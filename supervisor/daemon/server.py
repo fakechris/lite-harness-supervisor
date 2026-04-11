@@ -395,19 +395,38 @@ class DaemonServer:
         return {"ok": True, "notes": notes[-limit:][::-1]}
 
     def _reap_finished(self) -> None:
-        """Remove completed/stopped runs from registry."""
+        """Remove completed/stopped runs from registry.
+
+        Two-phase: collect candidates under lock, then join outside lock
+        to avoid blocking IPC while waiting for threads.
+        """
+        # Phase 1: identify candidates (under lock, fast)
         with self._lock:
-            finished = [rid for rid, e in self._runs.items()
-                        if not e.thread.is_alive() or e.stop_event.is_set()]
-            for rid in finished:
-                e = self._runs[rid]
+            candidates = [
+                (rid, e) for rid, e in self._runs.items()
+                if not e.thread.is_alive() or e.stop_event.is_set()
+            ]
+
+        if not candidates:
+            return
+
+        # Phase 2: join threads outside lock (may block briefly)
+        reaped = []
+        for rid, e in candidates:
+            if e.thread.is_alive():
+                e.thread.join(timeout=2)
                 if e.thread.is_alive():
-                    e.thread.join(timeout=2)
-                release_pane_lock(e.pane_target, e.run_id)
-                del self._runs[rid]
-            if finished:
+                    continue  # still alive — skip, don't create zombie
+            release_pane_lock(e.pane_target, e.run_id)
+            reaped.append(rid)
+
+        # Phase 3: remove from registry (under lock)
+        if reaped:
+            with self._lock:
+                for rid in reaped:
+                    self._runs.pop(rid, None)
                 self._update_daemon_record_locked()
-                logger.info("reaped %d finished run(s)", len(finished))
+            logger.info("reaped %d finished run(s)", len(reaped))
 
     def _handle_sigterm(self, signum, frame):
         logger.info("SIGTERM received, shutting down")

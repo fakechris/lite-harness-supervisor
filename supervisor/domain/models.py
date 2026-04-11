@@ -208,6 +208,7 @@ class SupervisorDecision:
     timestamp: str
     gate_type: str             # "continue" | "branch" | "finish" | "checkpoint_status"
     triggered_by_seq: int = 0
+    triggered_by_checkpoint_id: str = ""
     next_instruction: str | None = None
     selected_branch: str | None = None
     next_node_id: str | None = None
@@ -279,6 +280,7 @@ class SupervisorState:
     last_decision: dict[str, Any] = field(default_factory=dict)
     # P0-B: event-driven injection tracking
     last_injected_node_id: str | None = None
+    last_injected_attempt: int = -1
     # P0-C: checkpoint sequence tracking
     checkpoint_seq: int = 0
     # P1-D: resume validation
@@ -316,6 +318,7 @@ class SupervisorState:
             last_event=data.get("last_event", {}),
             last_decision=data.get("last_decision", {}),
             last_injected_node_id=data.get("last_injected_node_id"),
+            last_injected_attempt=data.get("last_injected_attempt", -1),
             checkpoint_seq=data.get("checkpoint_seq", 0),
             spec_path=data.get("spec_path", ""),
             spec_hash=data.get("spec_hash", ""),
