@@ -335,10 +335,11 @@ class DaemonServer:
                                  surface_type=surface_type, thread=None, store=store)
 
                 # Acquire pane lock before starting
-                try:
-                    acquire_pane_lock(pane_target, run_id)
-                except Exception:
-                    pass  # best-effort lock
+                pane_owner = self._pane_owner_metadata(run_id, spec_path, pane_target,
+                                                       state_data.get("workspace_root", ""))
+                acquired, existing_owner = acquire_pane_lock(pane_target, pane_owner)
+                if not acquired:
+                    return {"ok": False, "error": f"pane {pane_target} locked by {existing_owner}"}
 
                 with self._lock:
                     thread = threading.Thread(
