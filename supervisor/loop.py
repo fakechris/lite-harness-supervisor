@@ -412,7 +412,7 @@ class SupervisorLoop:
 
             # 5. Verify
             if state.top_state == TopState.VERIFYING:
-                cwd = self._get_cwd(terminal)
+                cwd = self._get_cwd(terminal, state)
                 try:
                     verification = self.verify_current_node(spec, state, cwd=cwd)
                 except Exception as e:
@@ -455,15 +455,32 @@ class SupervisorLoop:
             except Exception:
                 pass  # progress is best-effort
 
-    def _get_cwd(self, terminal) -> str | None:
+    def _get_cwd(self, terminal, state=None) -> str | None:
         if hasattr(terminal, "current_cwd"):
             try:
-                return terminal.current_cwd()
+                cwd = terminal.current_cwd()
+                if cwd:
+                    return cwd
             except Exception:
                 pass
+        # Fallback to persisted workspace_root
+        if state and state.workspace_root:
+            return state.workspace_root
         return None
 
     def _inject_or_pause(self, state, terminal, instruction) -> bool:
+        # Observation-only surfaces (e.g., JSONL) — write instruction but don't
+        # expect it to be delivered. Log it and continue observing.
+        if getattr(terminal, "is_observation_only", False):
+            try:
+                terminal.inject(instruction.content)  # writes file, logs warning
+            except Exception as exc:
+                logger.warning("observation-only inject failed: %s", exc)
+            self.store.append_session_event(
+                state.run_id, "injection_observation_only", instruction.to_dict()
+            )
+            return True  # don't pause — keep observing
+
         try:
             terminal.inject(instruction.content)
         except Exception as exc:

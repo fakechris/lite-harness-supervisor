@@ -21,12 +21,21 @@ class OpenRelaySurface:
         if not session_id or not session_id.strip():
             raise OpenRelaySurfaceError("session_id must not be empty")
         self._session_id = session_id.strip()
+        self._last_read_hash = ""  # for incremental dedup
 
     def read(self, lines: int = 100) -> str:
-        """Read recent output from the oly session."""
+        """Read recent output, returning only new content since last read."""
         result = self._oly("logs", self._session_id,
                            "--tail", str(lines), "--no-truncate")
-        return result.stdout
+        content = result.stdout
+
+        # Dedup: only return content if it changed since last read
+        import hashlib
+        content_hash = hashlib.md5(content.encode()).hexdigest()
+        if content_hash == self._last_read_hash:
+            return ""  # no new content
+        self._last_read_hash = content_hash
+        return content
 
     def inject(self, text: str) -> None:
         """Send text + Enter to the oly session."""

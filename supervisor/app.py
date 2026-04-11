@@ -187,22 +187,41 @@ def _ensure_daemon(config_path: str | None = None) -> "DaemonClient":
     sys.exit(1)
 
 
+def _resolve_target_and_surface(args, config):
+    """Resolve target and surface_type from args + config, with validation."""
+    target = getattr(args, "target", None) or getattr(args, "pane", None) or ""
+    surface = getattr(args, "surface", None) or getattr(config, "surface_type", "tmux")
+
+    if not target:
+        print("Error: --pane or --target is required.")
+        return None, None
+
+    # Validate target format for surface type
+    if surface == "jsonl" and not (target.endswith(".jsonl") or Path(target).exists()):
+        print(f"Warning: jsonl surface expects a .jsonl file path, got '{target}'")
+    elif surface == "tmux" and target.endswith(".jsonl"):
+        print(f"Warning: tmux surface got a .jsonl path — did you mean --surface jsonl?")
+
+    return target, surface
+
+
 def cmd_run_register(args):
     """Register a new run with the daemon."""
-    pane_target = args.pane
-    if not pane_target:
-        print("Error: --pane <target> is required.")
+    config = RuntimeConfig.load(getattr(args, "config", None) or CONFIG_FILE)
+    target, surface = _resolve_target_and_surface(args, config)
+    if not target:
         return 1
+    pane_target = target
 
     client = _ensure_daemon(args.config)
     spec_path = os.path.abspath(args.spec)
     workspace_root = os.getcwd()
 
-    result = client.register(spec_path, pane_target, workspace_root=workspace_root)
+    result = client.register(spec_path, pane_target, workspace_root=workspace_root, surface_type=surface)
     if result.get("ok"):
         print(f"Run registered: {result['run_id']}")
         print(f"  spec: {spec_path}")
-        print(f"  pane: {pane_target}")
+        print(f"  target: {pane_target} ({surface})")
     else:
         print(f"Error: {result.get('error', 'unknown')}")
         return 1
@@ -214,16 +233,15 @@ def cmd_run_foreground(args):
     spec = load_spec(args.spec)
     config = RuntimeConfig.load(args.config or CONFIG_FILE)
 
-    pane_target = args.pane
-    if not pane_target:
-        print("Error: --pane <target> is required.")
+    target, surface_type = _resolve_target_and_surface(args, config)
+    if not target:
         return 1
+    pane_target = target
 
     # Per-run isolated directory
     import uuid
     run_id = f"run_{uuid.uuid4().hex[:12]}"
     run_dir = str(Path(RUNTIME_DIR) / "runs" / run_id)
-    surface_type = getattr(config, "surface_type", "tmux")
     store = StateStore(run_dir)
     state = store.load_or_init(
         spec,
@@ -792,12 +810,16 @@ def main():
 
     p_register = run_sub.add_parser("register", help="Register a new run with the daemon")
     p_register.add_argument("--spec", required=True, help="Path to spec YAML")
-    p_register.add_argument("--pane", required=True, help="tmux pane target")
+    p_register.add_argument("--pane", default=None, help="Surface target (tmux pane, oly session, or jsonl path)")
+    p_register.add_argument("--target", default=None, help="Alias for --pane")
+    p_register.add_argument("--surface", default=None, help="Override surface type (tmux|open_relay|jsonl)")
     p_register.add_argument("--config", default=None)
 
     p_foreground = run_sub.add_parser("foreground", help="Run sidecar in foreground")
     p_foreground.add_argument("--spec", required=True, help="Path to spec YAML")
-    p_foreground.add_argument("--pane", required=True, help="tmux pane target")
+    p_foreground.add_argument("--pane", default=None, help="Surface target")
+    p_foreground.add_argument("--target", default=None, help="Alias for --pane")
+    p_foreground.add_argument("--surface", default=None, help="Override surface type")
     p_foreground.add_argument("--config", default=None)
 
     p_run_stop = run_sub.add_parser("stop", help="Stop a specific run")
