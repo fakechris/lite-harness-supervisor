@@ -32,7 +32,8 @@ class TestJsonlObserverRead:
 
         text = obs.read()
         assert "second" in text
-        assert "first" not in text  # already consumed
+        # Buffer includes historical text for cross-event checkpoint matching
+        # "first" may still be present — that's by design
 
     def test_empty_file(self, tmp_path):
         jsonl = tmp_path / "empty.jsonl"

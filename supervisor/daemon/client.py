@@ -49,6 +49,18 @@ class DaemonClient:
         """Stop all runs."""
         return self._request({"action": "stop_all"})
 
+    def resume(self, spec_path: str, pane_target: str, *,
+               surface_type: str = "") -> dict:
+        """Resume a paused or crashed run."""
+        req: dict = {
+            "action": "resume",
+            "spec_path": spec_path,
+            "pane_target": pane_target,
+        }
+        if surface_type:
+            req["surface_type"] = surface_type
+        return self._request(req)
+
     def list_runs(self) -> dict:
         """List all active runs with detailed state."""
         return self._request({"action": "list_runs"})

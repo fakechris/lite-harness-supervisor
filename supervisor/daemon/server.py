@@ -157,6 +157,8 @@ class DaemonServer:
             response = self._do_stop(request.get("run_id", ""))
         elif action == "stop_all":
             response = self._do_stop_all()
+        elif action == "resume":
+            response = self._do_resume(request)
         elif action == "list_runs":
             response = self._do_list_runs()
         elif action == "observe":
@@ -280,6 +282,63 @@ class DaemonServer:
         for entry in entries:
             entry.stop_event.set()
         return {"ok": True, "stopped": len(entries)}
+
+    def _do_resume(self, request: dict) -> dict:
+        """Resume a paused or crashed run by scanning existing run dirs."""
+        spec_path = request.get("spec_path", "")
+        pane_target = request.get("pane_target", "")
+
+        if not spec_path or not pane_target:
+            return {"ok": False, "error": "spec_path and pane_target required"}
+
+        # Scan run dirs for matching state
+        runs_dir = Path(self.runs_dir)
+        if not runs_dir.exists():
+            return {"ok": False, "error": "no runs directory"}
+
+        for run_dir in sorted(runs_dir.iterdir(), key=lambda d: d.stat().st_mtime, reverse=True):
+            state_path = run_dir / "state.json"
+            if not state_path.exists():
+                continue
+            try:
+                state_data = json.loads(state_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            # Match by spec and pane
+            if (state_data.get("spec_id", "") and state_data.get("pane_target", "") == pane_target
+                    and state_data.get("top_state") in ("PAUSED_FOR_HUMAN", "RUNNING", "READY", "GATING", "VERIFYING")):
+                run_id = state_data["run_id"]
+                # Check not already running
+                with self._lock:
+                    if run_id in self._runs:
+                        return {"ok": False, "error": f"run {run_id} is already active"}
+                # Resume it
+                try:
+                    spec = load_spec(state_data.get("spec_path", spec_path))
+                except Exception as e:
+                    return {"ok": False, "error": f"spec load failed: {e}"}
+                store = StateStore(str(run_dir))
+                surface_type = request.get("surface_type") or state_data.get("surface_type", "tmux")
+                state = store.load_or_init(
+                    spec, spec_path=spec_path, pane_target=pane_target,
+                    surface_type=surface_type,
+                    workspace_root=state_data.get("workspace_root", os.getcwd()),
+                )
+                entry = RunEntry(run_id, spec_path, pane_target,
+                                 state_data.get("workspace_root", ""),
+                                 surface_type=surface_type, thread=None, store=store)
+                with self._lock:
+                    thread = threading.Thread(
+                        target=self._run_worker, args=(entry, spec, state),
+                        name=f"run-{run_id}", daemon=True,
+                    )
+                    entry.thread = thread
+                    self._runs[run_id] = entry
+                thread.start()
+                logger.info("resumed run %s from %s", run_id, state_data.get("top_state"))
+                return {"ok": True, "run_id": run_id, "resumed_from": state_data.get("top_state")}
+
+        return {"ok": False, "error": "no resumable run found for this spec + pane"}
 
     # ------------------------------------------------------------------
     # P0: list + observe

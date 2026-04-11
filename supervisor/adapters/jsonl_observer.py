@@ -33,6 +33,7 @@ class JsonlObserver:
         self._path = Path(jsonl_path)
         self._cwd = cwd
         self._session_id_override = session_id_override
+        self._text_buffer = ""  # cross-read buffer for checkpoint spanning
         self._offset = 0  # bytes read so far
         self._detected_cwd: str | None = None
 
@@ -86,7 +87,14 @@ class JsonlObserver:
             if text:
                 text_parts.append(text)
 
-        return "\n".join(text_parts[-lines:])
+        new_text = "\n".join(text_parts[-lines:])
+        # Append to cross-read buffer for checkpoint blocks that span events
+        self._text_buffer += "\n" + new_text if new_text else ""
+        # Cap buffer size to prevent unbounded growth
+        buf_lines = self._text_buffer.splitlines()
+        if len(buf_lines) > lines * 3:
+            self._text_buffer = "\n".join(buf_lines[-lines * 2:])
+        return self._text_buffer
 
     @property
     def is_observation_only(self) -> bool:
