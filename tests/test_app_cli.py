@@ -63,6 +63,8 @@ def test_status_mentions_local_completed_state_when_daemon_has_no_runs(
     assert "Local state found:" in out
     assert "run_completed" in out
     assert "COMPLETED" in out
+    assert "workflow completed" in out
+    assert "thin-supervisor run summarize run_completed" in out
 
 
 def test_list_mentions_local_completed_state_when_daemon_has_no_runs(
@@ -80,6 +82,8 @@ def test_list_mentions_local_completed_state_when_daemon_has_no_runs(
     assert "Local state found:" in out
     assert "run_from_foreground" in out
     assert "COMPLETED" in out
+    assert "workflow completed" in out
+    assert "thin-supervisor run summarize run_from_foreground" in out
 
 
 def test_status_prints_pause_reason_and_next_action_for_local_state(

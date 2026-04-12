@@ -533,6 +533,8 @@ def _print_local_state_hint() -> None:
             f"node={state.get('current_node_id', '') or '?'} "
             f"pane={state.get('pane_target', '?')}"
         )
+        if state.get("status_reason"):
+            print(f"    status: {state['status_reason']}")
         if state.get("pause_reason"):
             print(f"    reason: {state['pause_reason']}")
         if state.get("next_action"):
@@ -564,6 +566,8 @@ def cmd_list(args):
     for r in runs:
         done = ", ".join(r.get("done_nodes", [])) or "(none)"
         print(f"{r['run_id']:<20} {r['pane_target']:<18} {r['top_state']:<15} {r.get('current_node', ''):<20} {done}")
+        if r.get("status_reason"):
+            print(f"  status: {r['status_reason']}")
         if r.get("pause_reason"):
             print(f"  reason: {r['pause_reason']}")
         if r.get("next_action"):
@@ -967,6 +971,8 @@ def cmd_status(args):
             print(f"{'RUN_ID':<20} {'PANE':<20} {'STATE':<18} {'NODE'}")
             for r in runs:
                 print(f"{r['run_id']:<20} {r['pane_target']:<20} {r['top_state']:<18} {r.get('current_node', '')}")
+                if r.get("status_reason"):
+                    print(f"  status: {r['status_reason']}")
                 if r.get("pause_reason"):
                     print(f"  reason: {r['pause_reason']}")
                 if r.get("next_action"):
@@ -984,6 +990,8 @@ def cmd_status(args):
                 print(f"Run:   {state.get('run_id', '?')}")
                 print(f"State: {state.get('top_state', '?')}")
                 print(f"Node:  {state.get('current_node_id', '?')}")
+                if state.get("status_reason"):
+                    print(f"Status: {state['status_reason']}")
                 if state.get("pause_reason"):
                     print(f"Reason: {state['pause_reason']}")
                 if state.get("next_action"):
@@ -1005,6 +1013,8 @@ def cmd_status(args):
                     print(f"{'RUN_ID':<20} {'PANE':<20} {'STATE':<18} {'NODE'}")
                     found = True
                 print(f"{state.get('run_id', '?'):<20} {state.get('pane_target', '?'):<20} {state.get('top_state', '?'):<18} {state.get('current_node_id', '')}")
+                if state.get("status_reason"):
+                    print(f"  status: {state['status_reason']}")
                 if state.get("pause_reason"):
                     print(f"  reason: {state['pause_reason']}")
                 if state.get("next_action"):

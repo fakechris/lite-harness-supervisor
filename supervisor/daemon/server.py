@@ -67,6 +67,7 @@ class RunEntry:
             "alive": self.thread.is_alive() if self.thread else False,
             "top_state": state.get("top_state", "UNKNOWN") if state else "UNKNOWN",
             "current_node": state.get("current_node_id", "") if state else "",
+            "status_reason": summary.get("status_reason", ""),
             "pause_reason": summary.get("pause_reason", ""),
             "next_action": summary.get("next_action", ""),
         }
