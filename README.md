@@ -14,6 +14,7 @@ thin-supervisor fixes this. It's an acceptance-centered run supervisor that sits
 > - [docs/design/p3-observation-sources.md](docs/design/p3-observation-sources.md) — observation sources and normalization
 > - [docs/design/p4-jsonl-observation.md](docs/design/p4-jsonl-observation.md) — transcript-backed observation mode
 > - [docs/reviews/2026-04-11-deep-code-review.md](docs/reviews/2026-04-11-deep-code-review.md) — latest deep code review log and remaining-risk audit
+> - [docs/reviews/2026-04-12-amp-supervisor-capability-review.md](docs/reviews/2026-04-12-amp-supervisor-capability-review.md) — Amp-vs-thin-supervisor capability review and oracle-layer roadmap
 
 ```text
 ┌────────────────────────────┐  ┌──────────────────────────┐
@@ -210,6 +211,9 @@ thin-supervisor session detect                             # Detect current agen
 thin-supervisor session jsonl                              # Resolve current transcript path
 thin-supervisor session list                               # List recent sessions and cwd
 
+thin-supervisor oracle consult --question "..." [--file path ...]
+                                                            # Advisory second opinion (external or fallback)
+
 thin-supervisor skill install                              # Install Codex / Claude skills
 thin-supervisor bridge <action> [args]                     # tmux bridge operations
 ```
@@ -270,6 +274,20 @@ cp -r skills/thin-supervisor-codex ~/.codex/skills/thin-supervisor
 ```
 
 Invoke with `/thin-supervisor` to auto-generate a spec and start supervised execution.
+
+## Oracle Consultation
+
+If you want an Amp-style "oracle" second opinion without giving up supervisor control, use:
+
+```bash
+thin-supervisor oracle consult \
+  --mode review \
+  --question "Review the retry policy design" \
+  --file supervisor/loop.py \
+  --file supervisor/gates/supervision_policy.py
+```
+
+When an external provider key is configured, thin-supervisor calls that provider as a read-only advisor. Without an external key, it falls back to a self-adversarial review scaffold instead of failing hard. Add `--run <run_id>` to persist the consultation into the shared notes plane for the active supervised run.
 
 ## Development
 

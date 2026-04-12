@@ -23,6 +23,7 @@ What the system talks through. Who it talks to.
 |--------|--------|---------|
 | **ExecutionSurface** | ✅ Implemented | SessionAdapter protocol + tmux + open-relay adapters + JSONL observation surface |
 | **WorkerProfile** | ⚠️ Maturing | Dataclass exists, config wired, consumed by policy engine |
+| **OracleOpinion** | ✅ Implemented | Read-only advisory consultation result from an external or fallback oracle |
 
 ### Layer 2: Observation & Event Normalization
 
@@ -84,6 +85,7 @@ Escalation paths:
 - **Alternate Executor** — planned (worker switching)
 
 Collaboration plane (`list`, `observe`, `note`) is implemented as CLI + daemon IPC.
+Advisory consultation is now available through `thin-supervisor oracle consult`; its outputs are intentionally non-authoritative and can be persisted into the collaboration plane as notes.
 
 ---
 
@@ -106,6 +108,7 @@ Collaboration plane (`list`, `observe`, `note`) is implemented as CLI + daemon I
 | WorkerProfile | `domain/models.py` | worker_id, provider, model_name, role, trust_level |
 | SupervisionPolicy | `domain/models.py` | mode, reason, risk_class, failure_threshold |
 | RoutingDecision | `domain/models.py` | routing_id, target_type, scope, reason, triggered_by_decision_id |
+| OracleOpinion | `domain/models.py` | provider, model_name, mode, question, files, response_text, source |
 | SessionRun | `domain/session.py` | state + acceptance_contract + worker_profile + supervision_policy + routing_history |
 | ExecutionSurface | `adapters/session_adapter.py` | read, inject, current_cwd, session_id, doctor |
 
@@ -142,6 +145,7 @@ All events are appended to `session_log.jsonl` with run_id and sequence numbers 
 - tmux + open-relay + JSONL surfaces
 - Single daemon, multi-run
 - Collaboration plane: list / observe / note
+- Advisory oracle consultation plane (`thin-supervisor oracle consult`)
 - Reviewer-gated completion with explicit human / stronger reviewer acknowledgement
 
 ### V2 (planned)

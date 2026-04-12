@@ -542,6 +542,72 @@ def cmd_note(args):
 
 
 # ------------------------------------------------------------------
+# oracle
+# ------------------------------------------------------------------
+
+
+def cmd_oracle(args):
+    """Consult an external or fallback oracle for a second opinion."""
+    from supervisor.oracle.client import OracleClient
+
+    if args.oracle_action != "consult":
+        print("Usage: thin-supervisor oracle consult --question <text> [--file path ...]")
+        return 1
+    if not args.question:
+        print("Error: --question is required.")
+        return 1
+
+    client = OracleClient()
+    opinion = client.consult(
+        question=args.question,
+        file_paths=args.file or [],
+        mode=args.mode,
+        provider=args.provider,
+    )
+    if hasattr(opinion, "to_dict"):
+        payload = opinion.to_dict()
+    else:
+        payload = opinion
+
+    if args.run:
+        from supervisor.daemon.client import DaemonClient
+
+        daemon = DaemonClient()
+        if not daemon.is_running():
+            print("Daemon not running. Start it before saving oracle notes to a run.")
+            return 1
+        note_lines = [
+            f"Oracle consultation: {payload.get('consultation_id', '?')}",
+            f"provider: {payload.get('provider', '?')}/{payload.get('model_name', '?')}",
+            f"mode: {payload.get('mode', '?')}",
+            f"question: {payload.get('question', '')}",
+            "",
+            payload.get("response_text", ""),
+        ]
+        result = daemon.note_add(
+            "\n".join(note_lines).strip(),
+            note_type="oracle",
+            author_run_id=args.run,
+            title=f"oracle: {payload.get('question', '')[:60]}",
+        )
+        if not result.get("ok"):
+            print(f"Error: {result.get('error', 'unknown')}")
+            return 1
+
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"Consultation: {payload.get('consultation_id', '?')}")
+        print(f"Provider:     {payload.get('provider', '?')}/{payload.get('model_name', '?')}")
+        print(f"Mode:         {payload.get('mode', '?')}")
+        print(f"Files:        {', '.join(payload.get('files', [])) or '(none)'}")
+        print(f"Question:     {payload.get('question', '')}")
+        print("\nResponse:\n")
+        print(payload.get("response_text", ""))
+    return 0
+
+
+# ------------------------------------------------------------------
 # skill install
 # ------------------------------------------------------------------
 
@@ -916,6 +982,17 @@ def main():
     p_note_list.add_argument("--type", default="", help="Filter by type")
     p_note_list.add_argument("--run", default="", help="Filter by author run ID")
 
+    # oracle
+    p_oracle = sub.add_parser("oracle", help="Consult an external or fallback oracle")
+    oracle_sub = p_oracle.add_subparsers(dest="oracle_action")
+    p_oracle_consult = oracle_sub.add_parser("consult", help="Get an advisory second opinion")
+    p_oracle_consult.add_argument("--question", required=True, help="Question for the oracle")
+    p_oracle_consult.add_argument("--file", action="append", default=[], help="Relevant file path (repeatable)")
+    p_oracle_consult.add_argument("--mode", default="review", choices=["review", "plan", "debug"])
+    p_oracle_consult.add_argument("--provider", default="auto", choices=["auto", "openai", "deepseek", "anthropic"])
+    p_oracle_consult.add_argument("--run", default="", help="Optional run ID to persist as a shared oracle note")
+    p_oracle_consult.add_argument("--json", action="store_true", help="Print JSON output")
+
     # skill
     p_skill = sub.add_parser("skill", help="Skill management")
     skill_sub = p_skill.add_subparsers(dest="skill_action")
@@ -992,6 +1069,12 @@ def main():
             sys.exit(cmd_note(args))
         else:
             print("Usage: thin-supervisor note {add|list}")
+            sys.exit(1)
+    elif args.command == "oracle":
+        if args.oracle_action == "consult":
+            sys.exit(cmd_oracle(args))
+        else:
+            print("Usage: thin-supervisor oracle consult --question <text>")
             sys.exit(1)
     elif args.command == "skill":
         if args.skill_action == "install":

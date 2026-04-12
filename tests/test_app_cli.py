@@ -144,3 +144,81 @@ def test_session_jsonl_prefers_current_session_path(monkeypatch, capsys):
     assert result == 0
     out = capsys.readouterr().out.strip()
     assert out == "/tmp/current.jsonl"
+
+
+class _FakeOracleClient:
+    def consult(self, *, question, file_paths, mode, provider):
+        return {
+            "consultation_id": "oracle_123",
+            "provider": "self-review",
+            "model_name": "self-review",
+            "mode": mode,
+            "question": question,
+            "files": file_paths,
+            "response_text": "Advisory review",
+            "source": "fallback",
+            "timestamp": "2026-04-12T00:00:00Z",
+        }
+
+
+class _DaemonForOracle:
+    def __init__(self, sock_path=None):
+        self.saved = []
+
+    def is_running(self) -> bool:
+        return True
+
+    def note_add(self, content: str, *, note_type: str = "context",
+                 author_run_id: str = "human", title: str = "") -> dict:
+        self.saved.append({
+            "content": content,
+            "note_type": note_type,
+            "author_run_id": author_run_id,
+            "title": title,
+        })
+        return {"ok": True, "note_id": "note_123"}
+
+
+def test_oracle_consult_json_output(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "mod.py"
+    target.write_text("print('hi')\n")
+    monkeypatch.setattr("supervisor.oracle.client.OracleClient", lambda: _FakeOracleClient())
+
+    result = app.cmd_oracle(argparse.Namespace(
+        oracle_action="consult",
+        question="Review this file",
+        file=[str(target)],
+        mode="review",
+        provider="auto",
+        run="",
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["consultation_id"] == "oracle_123"
+    assert payload["files"] == [str(target)]
+
+
+def test_oracle_consult_saves_note_for_run(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "mod.py"
+    target.write_text("print('hi')\n")
+    daemon = _DaemonForOracle()
+    monkeypatch.setattr("supervisor.oracle.client.OracleClient", lambda: _FakeOracleClient())
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", lambda: daemon)
+
+    result = app.cmd_oracle(argparse.Namespace(
+        oracle_action="consult",
+        question="Plan this change",
+        file=[str(target)],
+        mode="plan",
+        provider="auto",
+        run="run_abc",
+        json=False,
+    ))
+
+    assert result == 0
+    assert len(daemon.saved) == 1
+    assert daemon.saved[0]["note_type"] == "oracle"
+    assert daemon.saved[0]["author_run_id"] == "run_abc"
+    assert "Advisory review" in daemon.saved[0]["content"]

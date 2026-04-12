@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Advisory Consultation
+
+- Added `thin-supervisor oracle consult`, a lightweight second-opinion path that can call an external reasoning provider or fall back to a self-adversarial review scaffold.
+- Introduced first-class `OracleOpinion` records so advisory consultations can be audited and persisted into the collaboration plane as shared notes.
+
 ### Observation & Session Binding
 
 - `session jsonl` now prefers the active Codex / Claude session ID before falling back to the newest transcript, which makes JSONL observation bind to the right workspace more reliably.
