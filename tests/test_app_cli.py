@@ -146,6 +146,27 @@ def test_session_jsonl_prefers_current_session_path(monkeypatch, capsys):
     assert out == "/tmp/current.jsonl"
 
 
+def test_init_repair_restores_missing_config_and_logs_event(
+    tmp_path, monkeypatch, capsys,
+):
+    monkeypatch.chdir(tmp_path)
+    partial = tmp_path / ".supervisor"
+    (partial / "specs").mkdir(parents=True)
+
+    result = app.cmd_init(argparse.Namespace(force=False, repair=True))
+
+    assert result == 0
+    assert (partial / "config.yaml").exists()
+    ops_log = partial / "runtime" / "ops_log.jsonl"
+    assert ops_log.exists()
+    record = json.loads(ops_log.read_text().strip())
+    assert record["event_type"] == "init_repair"
+    assert record["payload"]["created_config"] is True
+    assert record["payload"]["supervisor_dir_preexisted"] is True
+    out = capsys.readouterr().out
+    assert "Repaired .supervisor/" in out
+
+
 class _FakeOracleClient:
     def consult(self, *, question, file_paths, mode, provider):
         return {
@@ -169,12 +190,14 @@ class _DaemonForOracle:
         return True
 
     def note_add(self, content: str, *, note_type: str = "context",
-                 author_run_id: str = "human", title: str = "") -> dict:
+                 author_run_id: str = "human", title: str = "",
+                 metadata: dict | None = None) -> dict:
         self.saved.append({
             "content": content,
             "note_type": note_type,
             "author_run_id": author_run_id,
             "title": title,
+            "metadata": metadata or {},
         })
         return {"ok": True, "note_id": "note_123"}
 
@@ -222,3 +245,117 @@ def test_oracle_consult_saves_note_for_run(tmp_path, monkeypatch, capsys):
     assert daemon.saved[0]["note_type"] == "oracle"
     assert daemon.saved[0]["author_run_id"] == "run_abc"
     assert "Advisory review" in daemon.saved[0]["content"]
+    assert daemon.saved[0]["metadata"]["consultation_id"] == "oracle_123"
+
+
+def test_run_export_json_output(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("supervisor.history.export_run", lambda run_id: {
+        "schema_version": "run_export.v1",
+        "run_id": run_id,
+        "state": {"spec_id": "demo"},
+        "decision_log": [],
+        "session_log": [],
+        "notes": [],
+    })
+
+    result = app.cmd_run_export(argparse.Namespace(run_id="run_demo", output="", json=True))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["run_id"] == "run_demo"
+
+
+def test_run_summarize_json_output(monkeypatch, capsys):
+    monkeypatch.setattr("supervisor.history.export_run", lambda run_id: {"run_id": run_id})
+    monkeypatch.setattr("supervisor.history.summarize_run", lambda exported: {
+        "run_id": exported["run_id"],
+        "top_state": "COMPLETED",
+        "counts": {"checkpoints": 3},
+    })
+
+    result = app.cmd_run_summarize(argparse.Namespace(run_id="run_demo", json=True))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["counts"]["checkpoints"] == 3
+
+
+def test_run_replay_json_output(monkeypatch, capsys):
+    monkeypatch.setattr("supervisor.history.export_run", lambda run_id: {"run_id": run_id})
+    monkeypatch.setattr("supervisor.history.replay_run", lambda exported: {
+        "run_id": exported["run_id"],
+        "matched_count": 2,
+        "decision_count": 2,
+        "mismatches": [],
+    })
+
+    result = app.cmd_run_replay(argparse.Namespace(run_id="run_demo", json=True))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["matched_count"] == 2
+
+
+def test_run_postmortem_writes_default_report(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("supervisor.history.export_run", lambda run_id: {"run_id": run_id})
+    monkeypatch.setattr("supervisor.history.render_postmortem", lambda exported: f"# Run Postmortem: {exported['run_id']}\n")
+
+    result = app.cmd_run_postmortem(argparse.Namespace(run_id="run_demo", output=""))
+
+    assert result == 0
+    report = tmp_path / ".supervisor" / "reports" / "run_demo.md"
+    assert report.exists()
+    assert "# Run Postmortem: run_demo" in report.read_text()
+
+
+def test_oracle_consult_returns_controlled_error_when_consult_raises(monkeypatch, capsys):
+    class _BoomOracleClient:
+        def consult(self, **kwargs):
+            raise ValueError("OPENAI_API_KEY is not set")
+
+    monkeypatch.setattr("supervisor.oracle.client.OracleClient", lambda: _BoomOracleClient())
+
+    result = app.cmd_oracle(argparse.Namespace(
+        oracle_action="consult",
+        question="Review this file",
+        file=[],
+        mode="review",
+        provider="openai",
+        run="",
+        json=False,
+    ))
+
+    assert result == 1
+    out = capsys.readouterr().out
+    assert "oracle consultation failed" in out.lower()
+
+
+def test_oracle_consult_returns_controlled_error_when_note_persist_raises(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "mod.py"
+    target.write_text("print('hi')\n")
+
+    class _FailingDaemon:
+        def is_running(self) -> bool:
+            return True
+
+        def note_add(self, *args, **kwargs):
+            raise OSError("socket closed")
+
+    monkeypatch.setattr("supervisor.oracle.client.OracleClient", lambda: _FakeOracleClient())
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", lambda: _FailingDaemon())
+
+    result = app.cmd_oracle(argparse.Namespace(
+        oracle_action="consult",
+        question="Plan this change",
+        file=[str(target)],
+        mode="plan",
+        provider="auto",
+        run="run_abc",
+        json=False,
+    ))
+
+    assert result == 1
+    out = capsys.readouterr().out
+    assert "failed to persist oracle note" in out.lower()

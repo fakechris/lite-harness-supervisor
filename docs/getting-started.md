@@ -47,6 +47,7 @@ thin-supervisor init
 ```
 
 This creates `.supervisor/` with config, specs, and runtime directories.
+If the directory already exists but is missing `config.yaml`, run `thin-supervisor init --repair` to restore the scaffold without overwriting the current config.
 
 ### 4. Start the supervisor daemon
 
@@ -104,6 +105,12 @@ thin-supervisor observe <run_id>
 thin-supervisor note add "handoff: waiting on staging token" --type handoff
 thin-supervisor note list
 
+# Export or analyze a completed run
+thin-supervisor run export <run_id>
+thin-supervisor run summarize <run_id>
+thin-supervisor run replay <run_id>
+thin-supervisor run postmortem <run_id>
+
 # Watch the daemon log
 tail -f .supervisor/runtime/daemon.log
 
@@ -128,6 +135,7 @@ Agent receives instruction, starts step 2
 
 If verification fails, supervisor injects a retry instruction with failure details.
 If agent is blocked, supervisor escalates to you (pauses and waits).
+If you want to improve the system from past runs instead of only watching the live pane, use `run export`, `run summarize`, `run replay`, and `run postmortem` against the finished `run_id`.
 
 If the spec requires reviewer sign-off (`acceptance.must_review_by`), the run pauses at the finish gate until you acknowledge it:
 

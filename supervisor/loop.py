@@ -18,6 +18,7 @@ from supervisor.verifiers.suite import VerifierSuite
 from supervisor.adapters.transcript_adapter import TranscriptAdapter
 from supervisor.instructions.composer import InstructionComposer
 from supervisor.gates.supervision_policy import SupervisionPolicyEngine
+from supervisor.history import latest_oracle_consultation_id_for_run
 from supervisor.progress import write_progress
 
 logger = logging.getLogger(__name__)
@@ -173,6 +174,10 @@ class SupervisorLoop:
                 scope="single_question",
                 reason=decision.reason if hasattr(decision, "reason") else str(decision.get("reason", "")),
                 triggered_by_decision_id=decision_id,
+                consultation_id=latest_oracle_consultation_id_for_run(
+                    state.run_id if hasattr(state, "run_id") else "",
+                    str(self.store.runtime_dir.parent.parent) if hasattr(self.store, "runtime_dir") else ".supervisor/runtime",
+                ),
             )
             self.store.append_session_event(
                 state.run_id if hasattr(state, "run_id") else "",

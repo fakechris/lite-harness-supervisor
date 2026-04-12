@@ -5,6 +5,7 @@ import socket
 import tempfile
 import threading
 import time
+import uuid
 
 import pytest
 
@@ -49,17 +50,18 @@ class TestListRuns:
     def test_list_after_register(self, collab_daemon, tmp_path):
         _, client = collab_daemon
         spec_path = tmp_path / "test.yaml"
+        pane_target = f"test-pane:{uuid.uuid4().hex[:8]}"
         spec_path.write_text(
             "kind: linear_plan\nid: test\ngoal: test\n"
             "steps:\n  - id: s1\n    type: task\n    objective: do\n"
             "    verify:\n      - type: command\n        run: echo ok\n        expect: pass\n"
         )
-        reg = client.register(str(spec_path), "test-pane:0")
+        reg = client.register(str(spec_path), pane_target)
         assert reg["ok"]
 
         result = client.list_runs()
         assert len(result["runs"]) == 1
-        assert result["runs"][0]["pane_target"] == "test-pane:0"
+        assert result["runs"][0]["pane_target"] == pane_target
         assert result["runs"][0]["spec_id"] == "test"
 
 
@@ -73,12 +75,13 @@ class TestObserve:
     def test_observe_active_run(self, collab_daemon, tmp_path):
         _, client = collab_daemon
         spec_path = tmp_path / "test.yaml"
+        pane_target = f"obs-pane:{uuid.uuid4().hex[:8]}"
         spec_path.write_text(
             "kind: linear_plan\nid: observe_test\ngoal: test\n"
             "steps:\n  - id: s1\n    type: task\n    objective: do\n"
             "    verify:\n      - type: command\n        run: echo ok\n        expect: pass\n"
         )
-        reg = client.register(str(spec_path), "obs-pane:0")
+        reg = client.register(str(spec_path), pane_target)
         run_id = reg["run_id"]
         time.sleep(0.3)
 
@@ -138,3 +141,17 @@ class TestNotes:
 
         result = client.note_list()
         assert len(result["notes"]) == 3
+
+    def test_note_metadata_round_trip(self, collab_daemon):
+        _, client = collab_daemon
+        result = client.note_add(
+            "oracle note",
+            note_type="oracle",
+            author_run_id="run_xyz",
+            title="oracle",
+            metadata={"consultation_id": "oracle_123"},
+        )
+        assert result["ok"] is True
+
+        notes = client.note_list(run_id="run_xyz")
+        assert notes["notes"][0]["metadata"]["consultation_id"] == "oracle_123"

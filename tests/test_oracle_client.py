@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from supervisor.domain.models import OracleOpinion
 from supervisor.oracle.client import OracleClient
 
@@ -79,3 +81,38 @@ def test_consult_with_provider_includes_file_context(tmp_path, monkeypatch):
     assert "mod.py" in captured["prompt"]
     assert "def add(a, b)" in captured["prompt"]
     assert opinion.response_text == "External review says this is fine."
+
+
+def test_detect_provider_errors_when_explicit_provider_missing_key(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        OracleClient.detect_provider("openai")
+
+
+def test_consult_falls_back_when_provider_call_fails(tmp_path, monkeypatch):
+    target = tmp_path / "mod.py"
+    target.write_text("def add(a, b):\n    return a + b\n")
+
+    client = OracleClient()
+    monkeypatch.setattr(client, "detect_provider", lambda preferred="auto": ("openai", "o3"))
+    monkeypatch.setattr(client, "_call_provider", lambda provider, model_name, prompt: (_ for _ in ()).throw(OSError("rate limited")))
+
+    opinion = client.consult(
+        question="Review this helper",
+        file_paths=[str(target)],
+        mode="review",
+    )
+
+    assert opinion.provider == "self-review"
+    assert opinion.source == "fallback"
+    assert "external consultation failed" in opinion.response_text.lower()
+
+
+def test_load_file_context_truncates_and_handles_decode_errors(tmp_path):
+    target = tmp_path / "binary.bin"
+    target.write_bytes(b"\xff\xfe\xfd")
+
+    context = OracleClient()._load_file_context([str(target)], max_chars=5)
+
+    assert context[0]["content"] == "<unreadable>"

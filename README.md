@@ -81,6 +81,8 @@ thin-supervisor skill install
 # Initialize in your project
 cd your-project
 thin-supervisor init
+# If .supervisor/ exists but is missing config, repair the scaffold in place
+thin-supervisor init --repair
 
 # Write a spec (or let the Skill generate one)
 cat > .supervisor/specs/my-plan.yaml << 'EOF'
@@ -136,7 +138,18 @@ scripts/thin-supervisor-attach.sh my-plan
    - **Escalate** — missing credentials, dangerous action, or low confidence — pause for human
    - **Finish** — all steps done, all verifiers pass, finish policy and review requirements satisfied
 4. If continuing or retrying, supervisor injects the next instruction into the pane
-5. Everything is logged to `session_log.jsonl` — append-only, durable, recoverable
+5. Run-level decisions are logged to `session_log.jsonl`; project-level bootstrap and repair incidents are logged to `.supervisor/runtime/ops_log.jsonl`
+
+Historical runs can now be turned into stable artifacts and reports:
+
+```bash
+thin-supervisor run export <run_id> > run.json
+thin-supervisor run summarize <run_id> --json
+thin-supervisor run replay <run_id> --json
+thin-supervisor run postmortem <run_id>
+```
+
+`run replay` re-evaluates historical checkpoints with the current gate logic but does not inject or verify against live surfaces. `run postmortem` writes a markdown report under `.supervisor/reports/` by default.
 
 If your spec sets `acceptance.must_review_by`, the run pauses at the finish gate until someone acknowledges review:
 
@@ -186,7 +199,7 @@ All verifiers run in the agent's working directory (pane cwd), not the superviso
 ## CLI
 
 ```bash
-thin-supervisor init [--force]                             # Create .supervisor/ directory
+thin-supervisor init [--force|--repair]                   # Create or repair .supervisor/ directory
 thin-supervisor deinit [--force]                           # Remove .supervisor/
 
 thin-supervisor daemon start [--config <path>]             # Start background daemon
@@ -198,6 +211,10 @@ thin-supervisor run foreground --spec <spec> --pane <target> [--surface ...]
 thin-supervisor run stop <run_id>
 thin-supervisor run resume --spec <spec> --pane <target> [--surface ...]
 thin-supervisor run review <run_id> --by human|stronger_reviewer
+thin-supervisor run export <run_id> [--output file]
+thin-supervisor run summarize <run_id> [--json]
+thin-supervisor run replay <run_id> [--json]
+thin-supervisor run postmortem <run_id> [--output file]
 
 thin-supervisor status                                     # Active runs in current worktree
 thin-supervisor list                                       # Detailed active-run view

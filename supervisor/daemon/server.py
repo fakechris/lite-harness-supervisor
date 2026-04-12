@@ -531,6 +531,7 @@ class DaemonServer:
             "note_type": request.get("note_type", "context"),
             "title": request.get("title", content[:80]),
             "content": content,
+            "metadata": request.get("metadata", {}) or {},
         }
 
         path = self._shared_notes_path()

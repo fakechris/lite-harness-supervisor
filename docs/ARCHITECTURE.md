@@ -44,6 +44,7 @@ A run is a durable, addressable, auditable object.
 | **SessionRun** | ⚠️ Maturing | Wrapper exists with state + acceptance + worker + policy properties. Not yet the single entry point for all run operations. |
 
 Material: `state.json` snapshot, `session_log.jsonl` durable history, per-run runtime dirs, completed review acknowledgements, and spec hash / surface / workspace resume validation.
+Historical analysis now has a first-class read path through `supervisor.history`: stable export, derived summary, decision replay, and markdown postmortem generation.
 
 ### Layer 4: Acceptance & Verification
 
@@ -77,7 +78,7 @@ Routing when supervisor can't resolve alone.
 
 | Object | Status | Purpose |
 |--------|--------|---------|
-| **RoutingDecision** | ⚠️ Maturing | Created on ESCALATE_TO_HUMAN, logged to session_log. Stronger reviewer and worker switching are planned but not implemented. |
+| **RoutingDecision** | ⚠️ Maturing | Created on ESCALATE_TO_HUMAN, logged to session_log, and can carry an advisory `consultation_id` back to a prior oracle note. Stronger reviewer and worker switching are planned but not implemented. |
 
 Escalation paths:
 - **Human** — high risk, multi-failure, evidence gaps
@@ -85,7 +86,7 @@ Escalation paths:
 - **Alternate Executor** — planned (worker switching)
 
 Collaboration plane (`list`, `observe`, `note`) is implemented as CLI + daemon IPC.
-Advisory consultation is now available through `thin-supervisor oracle consult`; its outputs are intentionally non-authoritative and can be persisted into the collaboration plane as notes.
+Advisory consultation is now available through `thin-supervisor oracle consult`; its outputs are intentionally non-authoritative and can be persisted into the collaboration plane as structured oracle notes. When a later escalation is informed by that note, the routing event can reference the consultation ID for auditability.
 
 ---
 
@@ -107,10 +108,11 @@ Advisory consultation is now available through `thin-supervisor oracle consult`;
 | AcceptanceContract | `domain/models.py` | goal, required_evidence, forbidden_states, risk_class, must_review_by |
 | WorkerProfile | `domain/models.py` | worker_id, provider, model_name, role, trust_level |
 | SupervisionPolicy | `domain/models.py` | mode, reason, risk_class, failure_threshold |
-| RoutingDecision | `domain/models.py` | routing_id, target_type, scope, reason, triggered_by_decision_id |
+| RoutingDecision | `domain/models.py` | routing_id, target_type, scope, reason, triggered_by_decision_id, consultation_id |
 | OracleOpinion | `domain/models.py` | provider, model_name, mode, question, files, response_text, source |
 | SessionRun | `domain/session.py` | state + acceptance_contract + worker_profile + supervision_policy + routing_history |
 | ExecutionSurface | `adapters/session_adapter.py` | read, inject, current_cwd, session_id, doctor |
+| RunHistory Export | `history.py` | schema_version, state, decision_log, session_log, notes |
 
 ### Planned (design docs exist, not implemented)
 
@@ -129,7 +131,11 @@ Every instruction traces back through decision to the checkpoint that triggered 
 Checkpoint(seq=N) → SupervisorDecision(triggered_by_seq=N) → HandoffInstruction(triggered_by_decision_id=X)
 ```
 
-All events are appended to `session_log.jsonl` with run_id and sequence numbers for durable audit.
+Run events are appended to `session_log.jsonl` with run_id and sequence numbers for durable audit. Project-level bootstrap and scaffold repairs are appended to `.supervisor/runtime/ops_log.jsonl` so pre-run operational incidents are preserved too. Historical analysis reads those append-only artifacts and produces:
+- stable JSON exports
+- derived run summaries
+- gate-decision replay without live injection
+- markdown postmortems under `.supervisor/reports/`
 
 ---
 

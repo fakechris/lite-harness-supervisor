@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from urllib import request as urllib_request
@@ -17,6 +18,7 @@ DEFAULT_MODELS = {
 
 class OracleClient:
     """Lightweight external consultation client for second-opinion workflows."""
+    logger = logging.getLogger(__name__)
 
     @staticmethod
     def detect_provider(preferred: str = "auto") -> tuple[str, str]:
@@ -28,7 +30,9 @@ class OracleClient:
             }.get(preferred, "")
             if key and os.environ.get(key):
                 return preferred, DEFAULT_MODELS[preferred]
-            return "", ""
+            if key:
+                raise ValueError(f"Provider {preferred} requested but {key} is not set")
+            raise ValueError(f"unsupported oracle provider: {preferred}")
 
         if os.environ.get("OPENAI_API_KEY"):
             return "openai", DEFAULT_MODELS["openai"]
@@ -62,7 +66,23 @@ class OracleClient:
                 source="fallback",
             )
 
-        response_text = self._call_provider(selected_provider, model_name, prompt)
+        try:
+            response_text = self._call_provider(selected_provider, model_name, prompt)
+        except Exception as exc:
+            self.logger.warning("oracle provider call failed: provider=%s model=%s error=%s",
+                                selected_provider, model_name, exc)
+            return OracleOpinion(
+                provider="self-review",
+                model_name="self-review",
+                mode=mode,
+                question=question,
+                files=normalized_files,
+                response_text=(
+                    f"{self._fallback_response(question, normalized_files)}\n"
+                    f"External consultation failed: {exc}"
+                ),
+                source="fallback",
+            )
         return OracleOpinion(
             provider=selected_provider,
             model_name=model_name,
@@ -78,10 +98,11 @@ class OracleClient:
         for file_path in file_paths:
             path = Path(file_path)
             try:
-                content = path.read_text(encoding="utf-8")
-            except OSError:
+                with path.open("r", encoding="utf-8") as f:
+                    content = f.read(max_chars + 1)
+            except (OSError, UnicodeDecodeError):
                 content = "<unreadable>"
-            if len(content) > max_chars:
+            if content != "<unreadable>" and len(content) > max_chars:
                 content = content[:max_chars] + "\n...<truncated>..."
             context.append({"path": str(path), "content": content})
         return context

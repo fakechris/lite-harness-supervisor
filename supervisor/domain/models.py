@@ -136,6 +136,7 @@ class RoutingDecision:
     scope: str = ""                       # bounded_review | full_takeover | single_question
     reason: str = ""
     triggered_by_decision_id: str = ""
+    consultation_id: str = ""
     timestamp: str = ""
 
     def __post_init__(self):
