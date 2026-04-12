@@ -5,6 +5,7 @@ from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
 from supervisor.loop import SupervisorLoop
 from supervisor.domain.enums import TopState
+from supervisor.interventions import AutoInterventionManager
 from supervisor.notifications import NotificationManager
 
 
@@ -259,3 +260,37 @@ def test_sidecar_notifies_on_checkpoint_mismatch_pause(tmp_path):
     assert channel.events
     assert channel.events[-1].reason == "node mismatch persisted for 5 checkpoints"
     assert "--pane" in channel.events[-1].next_action
+
+
+def test_sidecar_discards_stale_mismatch_batch_after_auto_intervention(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(
+        spec,
+        spec_path="/tmp/plan.yaml",
+        pane_target="%0",
+        surface_type="tmux",
+    )
+    loop = SupervisorLoop(
+        store,
+        auto_intervention_manager=AutoInterventionManager(
+            mode="notify_then_ai",
+            max_auto_interventions=1,
+        ),
+    )
+
+    stale_batch = "".join(
+        _make_checkpoint("working", "final_verify", f"stale mismatch {idx}")
+        for idx in range(10)
+    )
+    terminal = MockTerminal([
+        _make_checkpoint("step_done", "write_test", "wrote the test"),
+        stale_batch,
+        _make_checkpoint("step_done", "implement_feature", "feature done"),
+        _make_checkpoint("step_done", "final_verify", "all done"),
+    ])
+
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+
+    assert final.top_state == TopState.COMPLETED
+    assert final.auto_intervention_count == 1

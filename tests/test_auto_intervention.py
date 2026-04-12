@@ -134,3 +134,20 @@ def test_sidecar_auto_handles_node_mismatch_when_enabled(tmp_path):
 
     assert final.top_state == TopState.COMPLETED
     assert any("Supervisor expected current_node: implement_feature" in text for text in terminal.injected)
+
+
+def test_maybe_plan_returns_none_when_spec_is_missing(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    manager = AutoInterventionManager(mode="notify_then_ai")
+    terminal = MockTerminal([])
+
+    plan = manager.maybe_plan(
+        None,
+        state,
+        {"reason": "retry budget exhausted after failed verification"},
+        terminal,
+    )
+
+    assert plan is None

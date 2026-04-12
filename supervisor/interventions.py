@@ -22,6 +22,8 @@ class AutoInterventionManager:
             return None
         if getattr(terminal, "is_observation_only", False):
             return None
+        if spec is None:
+            return None
 
         reason = str(payload.get("reason", "")).strip()
         if not reason or reason.startswith("requires review by:"):

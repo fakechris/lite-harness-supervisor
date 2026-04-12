@@ -499,7 +499,8 @@ class SupervisorLoop:
                             })
                             if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
                                 node_mismatch_count = 0
-                                continue
+                                restart_loop = True
+                                break
                             self.store.save(state)
                             return
                         continue
