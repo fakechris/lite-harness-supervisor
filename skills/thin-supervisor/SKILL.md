@@ -35,19 +35,8 @@ You focus on execution. It handles the orchestration.
 **Goal**: Eliminate ambiguity before planning. A vague plan wastes more
 time than a thorough question.
 
-### Skip condition
-
-If the user's request contains ANY concrete signal, skip directly to
-Stage 2 (Plan):
-
-| Signal | Example |
-|--------|---------|
-| File path | "fix src/auth.py" |
-| Function/class name | "refactor validateToken" |
-| Issue/PR number | "implement #42" |
-| Test command | "make pytest pass" |
-| Numbered steps | "1. Add X  2. Test Y" |
-| Acceptance criteria | "done when all tests green" |
+**Default behavior**: always do a clarify pass before planning or
+attaching. Do not jump directly from user intent to execution.
 
 ### Clarify loop (when needed)
 
@@ -64,6 +53,11 @@ Rules:
 - Explore the codebase FIRST. Never ask users for facts you can discover.
 - Stay on one thread until it's clear. Don't rotate dimensions for breadth.
 - Exit when all dimensions have clear answers, or user says "enough".
+
+If the request is already concrete, do a **contract confirmation** pass
+instead of skipping clarify: summarize your inferred goal, scope,
+non-goals, and acceptance criteria, then ask the user to confirm or
+correct that understanding before planning.
 
 ### Artifact
 
@@ -115,6 +109,9 @@ Write to `.supervisor/specs/<slug>.yaml`:
 kind: linear_plan
 id: <slug>
 goal: <one-line goal>
+approval:
+  required: true
+  status: draft
 finish_policy:
   require_all_steps_done: true
   require_verification_pass: true
@@ -221,16 +218,35 @@ Acceptance: <key criteria>
 3. ❌ Reject — cancel
 ```
 
-Skip condition: User explicitly said "don't ask, just run" or "直接执行".
-
 ### Attach immediately after approval
 
-As soon as the user approves, or if approval is skipped, attach the
+Do **not** attach or begin implementation until the user explicitly
+approves the spec.
+
+The following count as **explicit approval** and must NOT trigger a second
+confirmation question:
+- "可以"
+- "同意"
+- "开始吧"
+- "按这个来"
+- "就这么做"
+- "approve"
+- "approved"
+- any clear equivalent that means "yes, start with this spec"
+
+Once the user has already approved in the conversation, do not ask again.
+Immediately mark the spec approved and continue to attach.
+
+As soon as the user approves, mark the spec approved and then attach the
 supervisor BEFORE any implementation work:
 
 ```bash
+thin-supervisor spec approve --spec .supervisor/specs/<slug>.yaml --by human
 scripts/thin-supervisor-attach.sh <slug>
 ```
+
+Execution commands now reject draft specs. This is intentional: user
+confirmation is part of the execution contract.
 
 Do not start coding, git cleanup, worktree edits, or long test runs
 until this command succeeds.

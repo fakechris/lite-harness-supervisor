@@ -132,6 +132,30 @@ class TestDaemonRegister:
         assert result["ok"] is False
         assert "spec load failed" in result["error"]
 
+    def test_register_rejects_draft_spec(self, client, tmp_path):
+        spec_path = tmp_path / "draft.yaml"
+        spec_path.write_text(
+            "kind: linear_plan\n"
+            "id: draft_plan\n"
+            "goal: test\n"
+            "approval:\n"
+            "  required: true\n"
+            "  status: draft\n"
+            "steps:\n"
+            "  - id: s1\n"
+            "    type: task\n"
+            "    objective: do something\n"
+            "    verify:\n"
+            "      - type: command\n"
+            "        run: echo ok\n"
+            "        expect: pass\n"
+        )
+
+        result = client.register(str(spec_path), "pane:1")
+
+        assert result["ok"] is False
+        assert "requires user approval" in result["error"]
+
     def test_register_valid(self, client, tmp_path):
         # Create a minimal spec
         spec_path = tmp_path / "test.yaml"

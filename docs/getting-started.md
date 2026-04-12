@@ -32,6 +32,7 @@ cp -r skills/thin-supervisor-codex ~/.codex/skills/thin-supervisor
 ```
 
 This teaches Codex the checkpoint protocol and the 4-stage workflow (Clarify → Plan → Approve → Execute).
+The default is now clarify-first: the skill should produce a draft spec, ask you to confirm it, then approve and attach.
 
 ### 2. Start tmux
 
@@ -74,12 +75,15 @@ Or invoke the skill directly:
 > /thin-supervisor
 
 The Skill will:
-1. Clarify your requirements (if vague)
-2. Generate a spec YAML with verification steps
+1. Clarify your requirements or run a contract-confirmation pass if the request already looks concrete
+2. Generate a draft spec YAML with verification steps
 3. Self-review the plan (architect + critic passes)
 4. Ask you to approve
-5. Attach immediately with `scripts/thin-supervisor-attach.sh <slug>`
-6. Start emitting checkpoints as it works
+5. Mark the spec approved with `thin-supervisor spec approve --spec .supervisor/specs/<slug>.yaml --by human`
+6. Attach immediately with `scripts/thin-supervisor-attach.sh <slug>`
+7. Start emitting checkpoints as it works
+
+If a spec is still in `approval.status: draft`, execution commands reject it until you approve it.
 
 ### 6. Monitor
 

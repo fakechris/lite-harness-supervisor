@@ -31,6 +31,7 @@ from supervisor.global_registry import (
 from supervisor.interventions import AutoInterventionManager
 from supervisor.notifications import NotificationManager
 from supervisor.pause_summary import summarize_state
+from supervisor.spec_approval import load_runnable_spec
 
 logger = logging.getLogger(__name__)
 
@@ -193,7 +194,7 @@ class DaemonServer:
             return {"ok": False, "error": "spec_path and pane_target required"}
 
         try:
-            spec = load_spec(spec_path)
+            spec = load_runnable_spec(spec_path)
         except Exception as e:
             return {"ok": False, "error": f"spec load failed: {e}"}
 
@@ -316,7 +317,7 @@ class DaemonServer:
 
         # Load spec to get spec_id for matching
         try:
-            target_spec = load_spec(spec_path)
+            target_spec = load_runnable_spec(spec_path)
         except Exception as e:
             return {"ok": False, "error": f"spec load failed: {e}"}
 

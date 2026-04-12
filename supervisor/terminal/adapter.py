@@ -211,9 +211,10 @@ class TerminalAdapter:
 
     @staticmethod
     def _tail_looks_stuck(snapshot: str, needle: str) -> bool:
-        tail = [line.strip() for line in snapshot.splitlines() if line.strip()][-3:]
+        tail = [line.strip() for line in snapshot.splitlines() if line.strip()][-12:]
         normalized_tail = [" ".join(line.split()) for line in tail]
-        return any(needle in line for line in normalized_tail)
+        joined_tail = " ".join(normalized_tail)
+        return needle in joined_tail
 
     def _detect_socket(self) -> str | None:
         """Auto-detect the tmux socket (4-level priority like smux)."""
