@@ -9,6 +9,7 @@ from pathlib import Path
 
 from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
+from supervisor.learning import list_friction_events, load_user_preferences
 
 
 SCHEMA_VERSION = "run_export.v1"
@@ -91,6 +92,7 @@ def export_run(run_id: str, runtime_dir: str = ".supervisor/runtime") -> dict:
     run_dir = _run_dir(run_id, runtime_dir)
     state = _read_json(run_dir / "state.json", {})
     spec_snapshot = _spec_snapshot_from_state(state)
+    user_id = "default"
     return {
         "schema_version": SCHEMA_VERSION,
         "exported_at": datetime.now(timezone.utc).isoformat(),
@@ -104,13 +106,17 @@ def export_run(run_id: str, runtime_dir: str = ".supervisor/runtime") -> dict:
         "decision_log": _read_jsonl(run_dir / "decision_log.jsonl"),
         "session_log": _read_jsonl(run_dir / "session_log.jsonl"),
         "notes": related_notes(run_id, runtime_dir),
+        "friction_events": list_friction_events(runtime_dir, run_id=run_id, user_id=user_id),
+        "user_preferences": load_user_preferences(runtime_dir, user_id=user_id),
     }
 
 
 def summarize_run(exported: dict) -> dict:
     session_log = exported.get("session_log", [])
     notes = exported.get("notes", [])
+    friction_events = exported.get("friction_events", [])
     event_counts = Counter(event.get("event_type", "") for event in session_log)
+    friction_kinds = sorted({event.get("kind", "") for event in friction_events if event.get("kind", "")})
     verification_ok = 0
     verification_failed = 0
     oracle_ids: list[str] = []
@@ -149,8 +155,10 @@ def summarize_run(exported: dict) -> dict:
             "review_acknowledged": event_counts.get("review_acknowledged", 0),
             "notes": len(notes),
             "oracle_notes": sum(1 for note in notes if note.get("note_type") == "oracle"),
+            "friction_events": len(friction_events),
         },
         "oracle_consultation_ids": oracle_ids,
+        "friction_kinds": friction_kinds,
     }
 
 
@@ -233,6 +241,7 @@ def render_postmortem(exported: dict) -> str:
     summary = summarize_run(exported)
     counts = summary["counts"]
     oracle_text = ", ".join(summary["oracle_consultation_ids"]) or "(none)"
+    friction_text = ", ".join(summary.get("friction_kinds", [])) or "(none)"
     return (
         f"# Run Postmortem: {summary['run_id']}\n\n"
         f"- Top state: `{summary['top_state']}`\n"
@@ -244,5 +253,7 @@ def render_postmortem(exported: dict) -> str:
         f"- Verifications failed: {counts['verifications_failed']}\n"
         f"- Routing events: {counts['routing_events']}\n"
         f"- Oracle consultations: `{oracle_text}`\n"
+        f"- Friction events: {counts['friction_events']}\n"
+        f"- Friction kinds: `{friction_text}`\n"
         f"- Notes: {counts['notes']}\n"
     )

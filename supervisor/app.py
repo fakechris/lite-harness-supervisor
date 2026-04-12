@@ -21,6 +21,12 @@ from supervisor.interventions import AutoInterventionManager
 from supervisor.notifications import NotificationManager
 from supervisor.pause_summary import summarize_state
 from supervisor.spec_approval import approve_spec, load_runnable_spec
+from supervisor.learning import (
+    append_friction_event,
+    list_friction_events,
+    load_user_preferences,
+    save_user_preferences,
+)
 
 
 SUPERVISOR_DIR = ".supervisor"
@@ -527,6 +533,8 @@ def _print_local_state_hint() -> None:
             f"node={state.get('current_node_id', '') or '?'} "
             f"pane={state.get('pane_target', '?')}"
         )
+        if state.get("status_reason"):
+            print(f"    status: {state['status_reason']}")
         if state.get("pause_reason"):
             print(f"    reason: {state['pause_reason']}")
         if state.get("next_action"):
@@ -558,6 +566,8 @@ def cmd_list(args):
     for r in runs:
         done = ", ".join(r.get("done_nodes", [])) or "(none)"
         print(f"{r['run_id']:<20} {r['pane_target']:<18} {r['top_state']:<15} {r.get('current_node', ''):<20} {done}")
+        if r.get("status_reason"):
+            print(f"  status: {r['status_reason']}")
         if r.get("pause_reason"):
             print(f"  reason: {r['pause_reason']}")
         if r.get("next_action"):
@@ -781,6 +791,84 @@ def cmd_spec(args):
     return 1
 
 
+def cmd_learn(args):
+    """Manage friction logs and user preference memory."""
+    runtime_dir = RuntimeConfig.load(getattr(args, "config", None) or CONFIG_FILE).runtime_dir
+
+    if args.learn_action == "friction":
+        if args.friction_action == "add":
+            try:
+                event = append_friction_event(
+                    runtime_dir,
+                    kind=args.kind,
+                    message=args.message,
+                    run_id=args.run_id or "",
+                    user_id=args.user_id or "default",
+                    signals=list(getattr(args, "signal", []) or []),
+                )
+            except Exception as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+            if getattr(args, "json", False):
+                print(json.dumps(event, ensure_ascii=False))
+            else:
+                print(f"Friction event recorded: {event['event_id']}")
+                print(f"  kind: {event['kind']}")
+                print(f"  run_id: {event['run_id'] or '-'}")
+            return 0
+
+        if args.friction_action == "list":
+            try:
+                events = list_friction_events(
+                    runtime_dir,
+                    run_id=args.run_id or "",
+                    kind=args.kind or "",
+                    user_id=args.user_id or "",
+                )
+            except Exception as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+            if getattr(args, "json", False):
+                print(json.dumps(events, ensure_ascii=False))
+            else:
+                for event in events:
+                    print(f"{event['event_id']} {event['kind']} run={event.get('run_id', '') or '-'}")
+            return 0
+
+    if args.learn_action == "prefs":
+        if args.prefs_action == "set":
+            try:
+                prefs = save_user_preferences(
+                    runtime_dir,
+                    {args.key: args.value},
+                    user_id=args.user_id or "default",
+                )
+            except Exception as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+            if getattr(args, "json", False):
+                print(json.dumps(prefs, ensure_ascii=False))
+            else:
+                print(f"Preference saved: {args.key}={args.value}")
+            return 0
+
+        if args.prefs_action == "show":
+            try:
+                prefs = load_user_preferences(runtime_dir, user_id=args.user_id or "default")
+            except Exception as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+            if getattr(args, "json", False):
+                print(json.dumps(prefs, ensure_ascii=False))
+            else:
+                for key, value in sorted(prefs.items()):
+                    print(f"{key}: {value}")
+            return 0
+
+    print("Usage: thin-supervisor learn {friction,prefs} ...")
+    return 1
+
+
 # ------------------------------------------------------------------
 # skill install
 # ------------------------------------------------------------------
@@ -899,6 +987,8 @@ def cmd_status(args):
             print(f"{'RUN_ID':<20} {'PANE':<20} {'STATE':<18} {'NODE'}")
             for r in runs:
                 print(f"{r['run_id']:<20} {r['pane_target']:<20} {r['top_state']:<18} {r.get('current_node', '')}")
+                if r.get("status_reason"):
+                    print(f"  status: {r['status_reason']}")
                 if r.get("pause_reason"):
                     print(f"  reason: {r['pause_reason']}")
                 if r.get("next_action"):
@@ -916,6 +1006,8 @@ def cmd_status(args):
                 print(f"Run:   {state.get('run_id', '?')}")
                 print(f"State: {state.get('top_state', '?')}")
                 print(f"Node:  {state.get('current_node_id', '?')}")
+                if state.get("status_reason"):
+                    print(f"Status: {state['status_reason']}")
                 if state.get("pause_reason"):
                     print(f"Reason: {state['pause_reason']}")
                 if state.get("next_action"):
@@ -937,6 +1029,8 @@ def cmd_status(args):
                     print(f"{'RUN_ID':<20} {'PANE':<20} {'STATE':<18} {'NODE'}")
                     found = True
                 print(f"{state.get('run_id', '?'):<20} {state.get('pane_target', '?'):<20} {state.get('top_state', '?'):<18} {state.get('current_node_id', '')}")
+                if state.get("status_reason"):
+                    print(f"  status: {state['status_reason']}")
                 if state.get("pause_reason"):
                     print(f"  reason: {state['pause_reason']}")
                 if state.get("next_action"):
@@ -1213,6 +1307,42 @@ def main():
     p_spec_approve.add_argument("--spec", required=True, help="Path to spec YAML")
     p_spec_approve.add_argument("--by", default="human", help="Approver label")
 
+    # learn
+    p_learn = sub.add_parser("learn", help="Persist learning signals for future skill evolution")
+    learn_sub = p_learn.add_subparsers(dest="learn_action")
+
+    p_learn_friction = learn_sub.add_parser("friction", help="Add or list friction events")
+    friction_sub = p_learn_friction.add_subparsers(dest="friction_action")
+    p_friction_add = friction_sub.add_parser("add", help="Record a friction event")
+    p_friction_add.add_argument("--kind", required=True, help="Event kind")
+    p_friction_add.add_argument("--message", required=True, help="Human-readable event summary")
+    p_friction_add.add_argument("--run-id", default="", help="Related run id")
+    p_friction_add.add_argument("--user-id", default="default", help="Preference owner / user id")
+    p_friction_add.add_argument("--signal", action="append", default=[], help="Structured signal(s)")
+    p_friction_add.add_argument("--json", action="store_true", help="Print JSON output")
+    p_friction_add.add_argument("--config", default=None, help="Config YAML path")
+
+    p_friction_list = friction_sub.add_parser("list", help="List friction events")
+    p_friction_list.add_argument("--kind", default="", help="Filter by kind")
+    p_friction_list.add_argument("--run-id", default="", help="Filter by run id")
+    p_friction_list.add_argument("--user-id", default="", help="Filter by user id")
+    p_friction_list.add_argument("--json", action="store_true", help="Print JSON output")
+    p_friction_list.add_argument("--config", default=None, help="Config YAML path")
+
+    p_learn_prefs = learn_sub.add_parser("prefs", help="Set or show user preference memory")
+    prefs_sub = p_learn_prefs.add_subparsers(dest="prefs_action")
+    p_prefs_set = prefs_sub.add_parser("set", help="Persist one preference")
+    p_prefs_set.add_argument("--key", required=True, help="Preference key")
+    p_prefs_set.add_argument("--value", required=True, help="Preference value")
+    p_prefs_set.add_argument("--user-id", default="default", help="Preference owner / user id")
+    p_prefs_set.add_argument("--json", action="store_true", help="Print JSON output")
+    p_prefs_set.add_argument("--config", default=None, help="Config YAML path")
+
+    p_prefs_show = prefs_sub.add_parser("show", help="Show user preferences")
+    p_prefs_show.add_argument("--user-id", default="default", help="Preference owner / user id")
+    p_prefs_show.add_argument("--json", action="store_true", help="Print JSON output")
+    p_prefs_show.add_argument("--config", default=None, help="Config YAML path")
+
     # session
     p_session = sub.add_parser("session", help="Session detection")
     session_sub = p_session.add_subparsers(dest="session_action")
@@ -1307,6 +1437,8 @@ def main():
             sys.exit(1)
     elif args.command == "spec":
         sys.exit(cmd_spec(args))
+    elif args.command == "learn":
+        sys.exit(cmd_learn(args))
     elif args.command == "session":
         if args.session_action in ("detect", "jsonl", "list"):
             sys.exit(cmd_session(args))

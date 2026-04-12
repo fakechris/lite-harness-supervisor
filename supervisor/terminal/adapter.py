@@ -87,7 +87,6 @@ class TerminalAdapter:
         target = self._resolve_target()
         self._require_read(target)
         self._tmux("send-keys", "-t", target, "-l", "--", text)
-        self._tmux("send-keys", "-t", target, "Enter")
         self._read_guard.discard(target)
         self._confirm_injection(target, text)
 
@@ -193,11 +192,13 @@ class TerminalAdapter:
         if not needle:
             return
 
-        for _ in range(10):
-            snapshot = self._capture_tail(target, lines=30)
-            if not self._tail_looks_stuck(snapshot, needle):
-                return
-            time.sleep(0.5)
+        for _ in range(2):
+            self._tmux("send-keys", "-t", target, "Enter")
+            for _ in range(10):
+                snapshot = self._capture_tail(target, lines=30)
+                if self._tail_shows_submission_progress(snapshot, needle):
+                    return
+                time.sleep(0.5)
 
         raise InjectionConfirmationError(
             f"submit not confirmed for pane '{target}'; injected text still visible near the tail"
@@ -215,6 +216,20 @@ class TerminalAdapter:
         normalized_tail = [" ".join(line.split()) for line in tail]
         joined_tail = " ".join(normalized_tail)
         return needle in joined_tail
+
+    @classmethod
+    def _tail_shows_submission_progress(cls, snapshot: str, needle: str) -> bool:
+        if not cls._tail_looks_stuck(snapshot, needle):
+            return True
+        normalized = " ".join(snapshot.split())
+        progress_markers = (
+            "• Working",
+            "• Planning",
+            "• Explored",
+            "• Implementing",
+            "esc to interrupt",
+        )
+        return any(marker in normalized for marker in progress_markers)
 
     def _detect_socket(self) -> str | None:
         """Auto-detect the tmux socket (4-level priority like smux)."""

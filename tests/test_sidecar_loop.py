@@ -1,6 +1,8 @@
 """Tests for the sidecar loop with a mock terminal adapter."""
 from __future__ import annotations
 
+import json
+
 from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
 from supervisor.loop import SupervisorLoop
@@ -294,3 +296,38 @@ def test_sidecar_discards_stale_mismatch_batch_after_auto_intervention(tmp_path)
 
     assert final.top_state == TopState.COMPLETED
     assert final.auto_intervention_count == 1
+
+
+def test_sidecar_notifies_on_verified_step_and_completion(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(
+        spec,
+        spec_path="/tmp/plan.yaml",
+        pane_target="%0",
+        surface_type="tmux",
+    )
+    channel = RecordingChannel()
+    loop = SupervisorLoop(store, notification_manager=NotificationManager([channel]))
+
+    terminal = MockTerminal([
+        _make_checkpoint("step_done", "write_test", "wrote the test"),
+        _make_checkpoint("step_done", "implement_feature", "feature done"),
+        _make_checkpoint("step_done", "final_verify", "all done"),
+    ])
+
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+
+    assert final.top_state == TopState.COMPLETED
+    event_types = [event.event_type for event in channel.events]
+    assert "step_verified" in event_types
+    assert "run_completed" in event_types
+    assert channel.events[-1].event_type == "run_completed"
+    assert channel.events[-1].reason == "workflow completed"
+    assert channel.events[-1].next_action == f"thin-supervisor run summarize {final.run_id}"
+    session_events = [
+        json.loads(line)["event_type"]
+        for line in store.session_log_path.read_text().splitlines()
+    ]
+    assert "step_verified" in session_events
+    assert "run_completed" in session_events

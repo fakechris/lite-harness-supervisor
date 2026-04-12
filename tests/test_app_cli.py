@@ -63,6 +63,8 @@ def test_status_mentions_local_completed_state_when_daemon_has_no_runs(
     assert "Local state found:" in out
     assert "run_completed" in out
     assert "COMPLETED" in out
+    assert "workflow_done" in out
+    assert "thin-supervisor run summarize run_completed" in out
 
 
 def test_list_mentions_local_completed_state_when_daemon_has_no_runs(
@@ -80,6 +82,8 @@ def test_list_mentions_local_completed_state_when_daemon_has_no_runs(
     assert "Local state found:" in out
     assert "run_from_foreground" in out
     assert "COMPLETED" in out
+    assert "workflow_done" in out
+    assert "thin-supervisor run summarize run_from_foreground" in out
 
 
 def test_status_prints_pause_reason_and_next_action_for_local_state(
@@ -378,6 +382,133 @@ def test_spec_approve_rejects_non_mapping_approval(tmp_path, capsys):
     assert result == 1
     out = capsys.readouterr().out
     assert "approval must be a YAML mapping" in out
+
+
+def test_learn_friction_add_and_list_json(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    add_result = app.cmd_learn(argparse.Namespace(
+        learn_action="friction",
+        friction_action="add",
+        prefs_action=None,
+        kind="repeated_confirmation",
+        message="user approved twice",
+        run_id="run_123",
+        user_id="default",
+        signal=["user_repeated_approval"],
+        json=False,
+        key=None,
+        value=None,
+    ))
+
+    assert add_result == 0
+    add_out = capsys.readouterr().out
+    assert "Friction event recorded:" in add_out
+
+    list_result = app.cmd_learn(argparse.Namespace(
+        learn_action="friction",
+        friction_action="list",
+        prefs_action=None,
+        kind="",
+        message=None,
+        run_id="run_123",
+        user_id="default",
+        signal=[],
+        json=True,
+        key=None,
+        value=None,
+    ))
+
+    assert list_result == 0
+    events = json.loads(capsys.readouterr().out)
+    assert len(events) == 1
+    assert events[0]["kind"] == "repeated_confirmation"
+
+
+def test_learn_prefs_set_and_show_json(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    set_result = app.cmd_learn(argparse.Namespace(
+        learn_action="prefs",
+        friction_action=None,
+        prefs_action="set",
+        kind=None,
+        message=None,
+        run_id=None,
+        user_id="default",
+        signal=[],
+        json=False,
+        key="approval_style",
+        value="terse",
+    ))
+
+    assert set_result == 0
+    set_out = capsys.readouterr().out
+    assert "Preference saved:" in set_out
+
+    show_result = app.cmd_learn(argparse.Namespace(
+        learn_action="prefs",
+        friction_action=None,
+        prefs_action="show",
+        kind=None,
+        message=None,
+        run_id=None,
+        user_id="default",
+        signal=[],
+        json=True,
+        key=None,
+        value=None,
+    ))
+
+    assert show_result == 0
+    prefs = json.loads(capsys.readouterr().out)
+    assert prefs["approval_style"] == "terse"
+
+
+def test_learn_friction_add_returns_controlled_error_on_store_failure(monkeypatch, capsys):
+    monkeypatch.setattr(app, "append_friction_event", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    result = app.cmd_learn(argparse.Namespace(
+        learn_action="friction",
+        friction_action="add",
+        prefs_action=None,
+        kind="repeated_confirmation",
+        message="user approved twice",
+        run_id="run_123",
+        user_id="default",
+        signal=["user_repeated_approval"],
+        json=False,
+        key=None,
+        value=None,
+        config=None,
+    ))
+
+    assert result == 1
+    err = capsys.readouterr().err
+    assert "Error: boom" in err
+
+
+def test_learn_prefs_show_returns_controlled_error_on_store_failure(monkeypatch, capsys):
+    monkeypatch.setattr(app, "load_user_preferences", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("corrupt user preferences store")))
+
+    result = app.cmd_learn(argparse.Namespace(
+        learn_action="prefs",
+        friction_action=None,
+        prefs_action="show",
+        kind=None,
+        message=None,
+        run_id=None,
+        user_id="default",
+        signal=[],
+        json=True,
+        key=None,
+        value=None,
+        config=None,
+    ))
+
+    assert result == 1
+    err = capsys.readouterr().err
+    assert "Error: corrupt user preferences store" in err
 
 
 def test_oracle_consult_json_output(tmp_path, monkeypatch, capsys):

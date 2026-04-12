@@ -210,6 +210,7 @@ class SupervisorLoop:
     def apply_verification(self, spec, state, verification: dict, *, cwd: str | None = None):
         state.verification = verification
         if verification["ok"]:
+            completed_node_id = state.current_node_id
             if state.current_node_id not in state.done_node_ids:
                 state.done_node_ids.append(state.current_node_id)
             next_id = spec.next_node_id(state.current_node_id)
@@ -217,12 +218,24 @@ class SupervisorLoop:
                 finish = self.finish_gate.evaluate(spec, state, cwd=cwd)
                 if finish["ok"]:
                     state.top_state = TopState.COMPLETED
+                    self._notify_transition(
+                        state,
+                        event_type="run_completed",
+                        reason="workflow completed",
+                        next_action=f"thin-supervisor run summarize {state.run_id}",
+                    )
                 else:
                     self._pause_for_human(state, finish)
             else:
                 state.current_node_id = next_id
                 state.current_attempt = 0
                 state.top_state = TopState.RUNNING
+                self._notify_transition(
+                    state,
+                    event_type="step_verified",
+                    reason=f"verified {completed_node_id}; advanced to {next_id}",
+                    next_action=f"continue current_node {next_id}",
+                )
             return
         state.current_attempt += 1
         state.retry_budget.used_global += 1
@@ -262,6 +275,26 @@ class SupervisorLoop:
             surface_type=state.surface_type,
         ))
         return event_payload
+
+    def _notify_transition(self, state, *, event_type: str, reason: str, next_action: str) -> None:
+        payload = {
+            "reason": reason,
+            "next_action": next_action,
+            "top_state": state.top_state.value,
+            "current_node": state.current_node_id,
+        }
+        self.store.append_session_event(state.run_id, event_type, payload)
+        self.notification_manager.notify(NotificationEvent(
+            event_type=event_type,
+            run_id=state.run_id,
+            top_state=state.top_state.value,
+            reason=reason,
+            next_action=next_action,
+            pane_target=state.pane_target,
+            spec_path=state.spec_path,
+            workspace_root=state.workspace_root,
+            surface_type=state.surface_type,
+        ))
 
     def _attempt_auto_intervention(self, spec, state, terminal, payload: dict | None) -> bool:
         plan = self.auto_intervention_manager.maybe_plan(spec, state, payload or {}, terminal)
