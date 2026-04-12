@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.10 stdlib (`json`, `pathlib`, `collections`, `tempfile`), existing CLI in `supervisor/app.py`, existing models in `supervisor/domain/models.py`, existing daemon note plane, pytest.
 
-### Task 1: Add failing tests for historical export and summary
+## Task 1: Add failing tests for historical export and summary
 
 **Files:**
 - Create: `tests/test_run_history.py`
@@ -25,7 +25,7 @@ Add tests that construct a fake run directory and assert:
 Run: `pytest -q tests/test_run_history.py tests/test_app_cli.py -k "export or summarize"`
 Expected: FAIL because the history helpers and CLI subcommands do not exist yet
 
-### Task 2: Add failing tests for replay and postmortem
+## Task 2: Add failing tests for replay and postmortem
 
 **Files:**
 - Modify: `tests/test_run_history.py`
@@ -43,7 +43,7 @@ Add tests that assert:
 Run: `pytest -q tests/test_run_history.py tests/test_app_cli.py -k "replay or postmortem"`
 Expected: FAIL because replay/postmortem interfaces do not exist yet
 
-### Task 3: Add failing tests for oracle-aware routing metadata
+## Task 3: Add failing tests for oracle-aware routing metadata
 
 **Files:**
 - Modify: `tests/test_collaboration.py`
@@ -63,7 +63,7 @@ Add tests that assert:
 Run: `pytest -q tests/test_collaboration.py tests/test_supervision_policy.py tests/test_app_cli.py -k "oracle or routing"`
 Expected: FAIL because note metadata and consultation-linked routing are not implemented yet
 
-### Task 4: Implement the history layer
+## Task 4: Implement the history layer
 
 **Files:**
 - Create: `supervisor/history.py`
@@ -84,7 +84,7 @@ Implement helpers to:
 Run: `pytest -q tests/test_run_history.py tests/test_app_cli.py -k "export or summarize or replay or postmortem"`
 Expected: PASS
 
-### Task 5: Wire CLI subcommands
+## Task 5: Wire CLI subcommands
 
 **Files:**
 - Modify: `supervisor/app.py`
@@ -104,7 +104,7 @@ Use the shared history module instead of embedding logic in CLI handlers.
 Run: `pytest -q tests/test_app_cli.py tests/test_run_history.py`
 Expected: PASS
 
-### Task 6: Wire oracle-aware routing
+## Task 6: Wire oracle-aware routing
 
 **Files:**
 - Modify: `supervisor/domain/models.py`
@@ -121,7 +121,7 @@ Add note metadata support, persist oracle payload metadata from `cmd_oracle`, ex
 Run: `pytest -q tests/test_collaboration.py tests/test_supervision_policy.py tests/test_app_cli.py`
 Expected: PASS
 
-### Task 7: Update docs and verify end-to-end
+## Task 7: Update docs and verify end-to-end
 
 **Files:**
 - Modify: `README.md`

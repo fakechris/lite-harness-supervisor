@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import hashlib
+
+import pytest
 
 
 def _build_history_workspace(tmp_path: Path) -> tuple[Path, str]:
@@ -142,6 +145,11 @@ def test_export_run_includes_state_logs_and_notes(tmp_path, monkeypatch):
     assert len(exported["decision_log"]) == 3
     assert len(exported["session_log"]) == 10
     assert len(exported["notes"]) == 2
+    assert "spec_snapshot" in exported
+    assert exported["spec_snapshot"]["path"].endswith("demo.yaml")
+    assert exported["spec_snapshot"]["hash"] == hashlib.sha256(
+        exported["spec_snapshot"]["content"].encode("utf-8")
+    ).hexdigest()[:16]
 
 
 def test_summarize_run_reports_counts_and_oracle_links(tmp_path, monkeypatch):
@@ -187,3 +195,106 @@ def test_render_postmortem_generates_markdown(tmp_path, monkeypatch):
     assert "Top state: `COMPLETED`" in markdown
     assert "Oracle consultations: `oracle_123`" in markdown
     assert "Routing events: 1" in markdown
+
+
+def test_replay_run_uses_exported_spec_snapshot_when_worktree_spec_changes(tmp_path, monkeypatch):
+    workspace, run_id = _build_history_workspace(tmp_path)
+    monkeypatch.chdir(workspace)
+
+    from supervisor.history import export_run, replay_run
+
+    exported = export_run(run_id)
+    spec_path = Path(exported["state"]["spec_path"])
+    spec_path.write_text(
+        "kind: linear_plan\nid: demo\ngoal: changed\nsteps:\n"
+        "  - id: other\n    type: task\n    objective: mismatch\n"
+        "    verify:\n      - type: command\n        run: echo nope\n        expect: pass\n"
+    )
+
+    replay = replay_run(exported)
+
+    assert replay["matched_count"] == 3
+
+
+def test_replay_run_uses_exported_spec_snapshot_when_spec_file_is_missing(tmp_path, monkeypatch):
+    workspace, run_id = _build_history_workspace(tmp_path)
+    monkeypatch.chdir(workspace)
+
+    from supervisor.history import export_run, replay_run
+
+    exported = export_run(run_id)
+    Path(exported["state"]["spec_path"]).unlink()
+
+    replay = replay_run(exported)
+
+    assert replay["matched_count"] == 3
+
+
+def test_replay_run_passes_runtime_root_to_routing_lookup(tmp_path, monkeypatch):
+    workspace, run_id = _build_history_workspace(tmp_path)
+    monkeypatch.chdir(workspace)
+
+    exported = {
+        "schema_version": "run_export.v1",
+        "run_id": run_id,
+        "paths": {
+            "run_dir": str(workspace / ".supervisor" / "runtime" / "runs" / run_id),
+            "runtime_dir": str(workspace / ".supervisor" / "runtime"),
+        },
+        "state": {
+            "run_id": run_id,
+            "spec_id": "demo",
+            "mode": "linear_plan",
+            "top_state": "PAUSED_FOR_HUMAN",
+            "current_node_id": "write_test",
+            "current_attempt": 0,
+            "done_node_ids": [],
+            "branch_history": [],
+            "human_escalations": [],
+            "retry_budget": {"per_node": 3, "global_limit": 12, "used_global": 0},
+            "last_agent_checkpoint": {},
+            "checkpoint_seq": 1,
+            "verification": {},
+            "last_event": {},
+            "spec_path": str(workspace / ".supervisor" / "specs" / "demo.yaml"),
+            "spec_hash": "",
+            "pane_target": "%1",
+            "surface_type": "tmux",
+            "workspace_root": str(workspace),
+            "completed_reviews": [],
+            "last_injected_node_id": "",
+            "last_injected_attempt": 0,
+        },
+        "spec_snapshot": {
+            "path": str(workspace / ".supervisor" / "specs" / "demo.yaml"),
+            "content": (
+                "kind: linear_plan\nid: demo\ngoal: history test\n"
+                "steps:\n  - id: write_test\n    type: task\n    objective: write tests\n"
+                "    verify:\n      - type: command\n        run: echo ok\n        expect: pass\n"
+            ),
+        },
+        "decision_log": [
+            {"decision_id": "dec_1", "decision": "ESCALATE_TO_HUMAN", "reason": "checkpoint says blocked", "confidence": 1.0, "needs_human": True, "timestamp": "2026-04-12T00:00:01Z", "gate_type": "checkpoint_status", "triggered_by_seq": 1, "triggered_by_checkpoint_id": "cp_1"}
+        ],
+        "session_log": [
+            {"run_id": run_id, "seq": 1, "event_type": "checkpoint", "timestamp": "2026-04-12T00:00:01Z", "payload": {"checkpoint_id": "cp_1", "run_id": run_id, "checkpoint_seq": 1, "status": "blocked", "current_node": "write_test", "summary": "need help"}},
+            {"run_id": run_id, "seq": 2, "event_type": "gate_decision", "timestamp": "2026-04-12T00:00:01Z", "payload": {"decision_id": "dec_1", "decision": "ESCALATE_TO_HUMAN", "reason": "checkpoint says blocked", "confidence": 1.0, "needs_human": True, "timestamp": "2026-04-12T00:00:01Z", "gate_type": "checkpoint_status", "triggered_by_seq": 1, "triggered_by_checkpoint_id": "cp_1"}},
+        ],
+        "notes": [],
+    }
+
+    captured: dict[str, str] = {}
+
+    def fake_lookup(run_id_arg: str, runtime_dir: str = ".supervisor/runtime") -> str:
+        captured["run_id"] = run_id_arg
+        captured["runtime_dir"] = runtime_dir
+        return ""
+
+    monkeypatch.setattr("supervisor.loop.latest_oracle_consultation_id_for_run", fake_lookup)
+
+    from supervisor.history import replay_run
+
+    replay_run(exported)
+
+    assert captured["run_id"] == run_id
+    assert captured["runtime_dir"] == str(workspace / ".supervisor" / "runtime")

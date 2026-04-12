@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import tempfile
 from collections import Counter
 from datetime import datetime, timezone
@@ -57,6 +58,23 @@ def related_notes(run_id: str, runtime_dir: str = ".supervisor/runtime") -> list
     return [note for note in notes if note.get("author_run_id") == run_id]
 
 
+def _spec_snapshot_from_state(state: dict) -> dict:
+    spec_path = state.get("spec_path", "")
+    if not spec_path:
+        return {"path": "", "content": "", "hash": ""}
+    path = Path(spec_path)
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        content = ""
+    snapshot_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16] if content else ""
+    return {
+        "path": str(path),
+        "content": content,
+        "hash": snapshot_hash,
+    }
+
+
 def latest_oracle_consultation_id_for_run(run_id: str, runtime_dir: str = ".supervisor/runtime") -> str:
     consultation_id = ""
     for note in related_notes(run_id, runtime_dir):
@@ -72,6 +90,7 @@ def latest_oracle_consultation_id_for_run(run_id: str, runtime_dir: str = ".supe
 def export_run(run_id: str, runtime_dir: str = ".supervisor/runtime") -> dict:
     run_dir = _run_dir(run_id, runtime_dir)
     state = _read_json(run_dir / "state.json", {})
+    spec_snapshot = _spec_snapshot_from_state(state)
     return {
         "schema_version": SCHEMA_VERSION,
         "exported_at": datetime.now(timezone.utc).isoformat(),
@@ -81,6 +100,7 @@ def export_run(run_id: str, runtime_dir: str = ".supervisor/runtime") -> dict:
             "runtime_dir": str(_runtime_root(runtime_dir)),
         },
         "state": state,
+        "spec_snapshot": spec_snapshot,
         "decision_log": _read_jsonl(run_dir / "decision_log.jsonl"),
         "session_log": _read_jsonl(run_dir / "session_log.jsonl"),
         "notes": related_notes(run_id, runtime_dir),
@@ -139,19 +159,28 @@ def replay_run(exported: dict) -> dict:
 
     state_data = exported.get("state") or {}
     spec_path = state_data.get("spec_path", "")
-    if not spec_path:
+    spec_snapshot = exported.get("spec_snapshot") or {}
+    snapshot_content = spec_snapshot.get("content", "")
+    snapshot_path = spec_snapshot.get("path", spec_path)
+    if not spec_path and not snapshot_path:
         raise ValueError("exported run has no spec_path")
-    spec = load_spec(spec_path)
 
     with tempfile.TemporaryDirectory(prefix="thin_supervisor_replay_") as tmpdir:
-        store = StateStore(tmpdir)
+        replay_spec_path = Path(tmpdir) / Path(snapshot_path or spec_path).name
+        if snapshot_content:
+            replay_spec_path.write_text(snapshot_content, encoding="utf-8")
+        else:
+            replay_spec_path.write_text(Path(spec_path).read_text(encoding="utf-8"), encoding="utf-8")
+        spec = load_spec(str(replay_spec_path))
+        store = StateStore(tmpdir, runtime_root=exported.get("paths", {}).get("runtime_dir"))
         state = store.load_or_init(
             spec,
-            spec_path=spec_path,
+            spec_path=str(replay_spec_path),
             pane_target=state_data.get("pane_target", ""),
             surface_type=state_data.get("surface_type", "tmux"),
             workspace_root=state_data.get("workspace_root", ""),
         )
+        state.run_id = state_data.get("run_id", exported.get("run_id", state.run_id))
         loop = SupervisorLoop(store)
         actual_decisions = [
             (event.get("payload") or {})

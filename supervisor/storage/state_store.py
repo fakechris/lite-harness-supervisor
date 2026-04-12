@@ -12,9 +12,15 @@ from supervisor.domain.models import SupervisorState, WorkflowSpec
 
 
 class StateStore:
-    def __init__(self, runtime_dir: str = "runtime"):
+    def __init__(self, runtime_dir: str = "runtime", *, runtime_root: str | None = None):
         self.runtime_dir = Path(runtime_dir)
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        if runtime_root is not None:
+            self.runtime_root = Path(runtime_root)
+        elif self.runtime_dir.parent.name == "runs":
+            self.runtime_root = self.runtime_dir.parent.parent
+        else:
+            self.runtime_root = self.runtime_dir
         self.state_path = self.runtime_dir / "state.json"
         self.event_log_path = self.runtime_dir / "event_log.jsonl"
         self.decision_log_path = self.runtime_dir / "decision_log.jsonl"

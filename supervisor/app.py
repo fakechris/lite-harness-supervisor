@@ -362,7 +362,12 @@ def cmd_run_export(args):
     """Export a run's durable history as stable JSON."""
     from supervisor.history import export_run
 
-    payload = export_run(args.run_id)
+    runtime_dir = RuntimeConfig.load(getattr(args, "config", None) or CONFIG_FILE).runtime_dir
+    try:
+        payload = export_run(args.run_id, runtime_dir=runtime_dir)
+    except Exception as exc:
+        print(f"Error: {exc}")
+        return 1
     if args.output:
         target = Path(args.output)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -377,7 +382,12 @@ def cmd_run_summarize(args):
     """Summarize a historical run."""
     from supervisor.history import export_run, summarize_run
 
-    payload = summarize_run(export_run(args.run_id))
+    runtime_dir = RuntimeConfig.load(getattr(args, "config", None) or CONFIG_FILE).runtime_dir
+    try:
+        payload = summarize_run(export_run(args.run_id, runtime_dir=runtime_dir))
+    except Exception as exc:
+        print(f"Error: {exc}")
+        return 1
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
@@ -394,7 +404,12 @@ def cmd_run_replay(args):
     """Replay historical gate decisions without execution."""
     from supervisor.history import export_run, replay_run
 
-    payload = replay_run(export_run(args.run_id))
+    runtime_dir = RuntimeConfig.load(getattr(args, "config", None) or CONFIG_FILE).runtime_dir
+    try:
+        payload = replay_run(export_run(args.run_id, runtime_dir=runtime_dir))
+    except Exception as exc:
+        print(f"Error: {exc}")
+        return 1
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
@@ -408,7 +423,12 @@ def cmd_run_postmortem(args):
     """Write a markdown postmortem for a historical run."""
     from supervisor.history import export_run, render_postmortem
 
-    markdown = render_postmortem(export_run(args.run_id))
+    runtime_dir = RuntimeConfig.load(getattr(args, "config", None) or CONFIG_FILE).runtime_dir
+    try:
+        markdown = render_postmortem(export_run(args.run_id, runtime_dir=runtime_dir))
+    except Exception as exc:
+        print(f"Error: {exc}")
+        return 1
     target = Path(args.output) if args.output else Path(".supervisor") / "reports" / f"{args.run_id}.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(markdown, encoding="utf-8")
@@ -1055,18 +1075,22 @@ def main():
     p_export.add_argument("run_id", help="Run ID to export")
     p_export.add_argument("--output", default="", help="Optional file path for exported JSON")
     p_export.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    p_export.add_argument("--config", default=None, help="Optional config file")
 
     p_summarize = run_sub.add_parser("summarize", help="Summarize a historical run")
     p_summarize.add_argument("run_id", help="Run ID to summarize")
     p_summarize.add_argument("--json", action="store_true", help="Print JSON output")
+    p_summarize.add_argument("--config", default=None, help="Optional config file")
 
     p_replay = run_sub.add_parser("replay", help="Replay historical gate decisions without execution")
     p_replay.add_argument("run_id", help="Run ID to replay")
     p_replay.add_argument("--json", action="store_true", help="Print JSON output")
+    p_replay.add_argument("--config", default=None, help="Optional config file")
 
     p_postmortem = run_sub.add_parser("postmortem", help="Write a markdown postmortem for a run")
     p_postmortem.add_argument("run_id", help="Run ID to analyze")
     p_postmortem.add_argument("--output", default="", help="Optional markdown output path")
+    p_postmortem.add_argument("--config", default=None, help="Optional config file")
 
     # Removed legacy syntax is still parsed so we can print a migration error.
     p_run.add_argument("spec_path", nargs="?", default=None, help=argparse.SUPPRESS)

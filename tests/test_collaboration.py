@@ -155,3 +155,9 @@ class TestNotes:
 
         notes = client.note_list(run_id="run_xyz")
         assert notes["notes"][0]["metadata"]["consultation_id"] == "oracle_123"
+
+    def test_note_metadata_must_be_object(self, collab_daemon):
+        _, client = collab_daemon
+        result = client.note_add("bad metadata", metadata="not-a-dict")
+        assert result["ok"] is False
+        assert "metadata must be an object" in result["error"]

@@ -176,7 +176,7 @@ class SupervisorLoop:
                 triggered_by_decision_id=decision_id,
                 consultation_id=latest_oracle_consultation_id_for_run(
                     state.run_id if hasattr(state, "run_id") else "",
-                    str(self.store.runtime_dir.parent.parent) if hasattr(self.store, "runtime_dir") else ".supervisor/runtime",
+                    str(getattr(self.store, "runtime_root", ".supervisor/runtime")),
                 ),
             )
             self.store.append_session_event(

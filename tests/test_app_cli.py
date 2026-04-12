@@ -250,7 +250,7 @@ def test_oracle_consult_saves_note_for_run(tmp_path, monkeypatch, capsys):
 
 def test_run_export_json_output(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("supervisor.history.export_run", lambda run_id: {
+    monkeypatch.setattr("supervisor.history.export_run", lambda run_id, runtime_dir=".supervisor/runtime": {
         "schema_version": "run_export.v1",
         "run_id": run_id,
         "state": {"spec_id": "demo"},
@@ -259,7 +259,7 @@ def test_run_export_json_output(tmp_path, monkeypatch, capsys):
         "notes": [],
     })
 
-    result = app.cmd_run_export(argparse.Namespace(run_id="run_demo", output="", json=True))
+    result = app.cmd_run_export(argparse.Namespace(run_id="run_demo", output="", json=True, config=None))
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
@@ -267,14 +267,14 @@ def test_run_export_json_output(tmp_path, monkeypatch, capsys):
 
 
 def test_run_summarize_json_output(monkeypatch, capsys):
-    monkeypatch.setattr("supervisor.history.export_run", lambda run_id: {"run_id": run_id})
+    monkeypatch.setattr("supervisor.history.export_run", lambda run_id, runtime_dir=".supervisor/runtime": {"run_id": run_id})
     monkeypatch.setattr("supervisor.history.summarize_run", lambda exported: {
         "run_id": exported["run_id"],
         "top_state": "COMPLETED",
         "counts": {"checkpoints": 3},
     })
 
-    result = app.cmd_run_summarize(argparse.Namespace(run_id="run_demo", json=True))
+    result = app.cmd_run_summarize(argparse.Namespace(run_id="run_demo", json=True, config=None))
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
@@ -282,7 +282,7 @@ def test_run_summarize_json_output(monkeypatch, capsys):
 
 
 def test_run_replay_json_output(monkeypatch, capsys):
-    monkeypatch.setattr("supervisor.history.export_run", lambda run_id: {"run_id": run_id})
+    monkeypatch.setattr("supervisor.history.export_run", lambda run_id, runtime_dir=".supervisor/runtime": {"run_id": run_id})
     monkeypatch.setattr("supervisor.history.replay_run", lambda exported: {
         "run_id": exported["run_id"],
         "matched_count": 2,
@@ -290,7 +290,7 @@ def test_run_replay_json_output(monkeypatch, capsys):
         "mismatches": [],
     })
 
-    result = app.cmd_run_replay(argparse.Namespace(run_id="run_demo", json=True))
+    result = app.cmd_run_replay(argparse.Namespace(run_id="run_demo", json=True, config=None))
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
@@ -299,15 +299,51 @@ def test_run_replay_json_output(monkeypatch, capsys):
 
 def test_run_postmortem_writes_default_report(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("supervisor.history.export_run", lambda run_id: {"run_id": run_id})
+    monkeypatch.setattr("supervisor.history.export_run", lambda run_id, runtime_dir=".supervisor/runtime": {"run_id": run_id})
     monkeypatch.setattr("supervisor.history.render_postmortem", lambda exported: f"# Run Postmortem: {exported['run_id']}\n")
 
-    result = app.cmd_run_postmortem(argparse.Namespace(run_id="run_demo", output=""))
+    result = app.cmd_run_postmortem(argparse.Namespace(run_id="run_demo", output="", config=None))
 
     assert result == 0
     report = tmp_path / ".supervisor" / "reports" / "run_demo.md"
     assert report.exists()
     assert "# Run Postmortem: run_demo" in report.read_text()
+
+
+def test_history_commands_use_configured_runtime_dir(monkeypatch, capsys):
+    captured: dict[str, str] = {}
+
+    class _Cfg:
+        runtime_dir = "/tmp/custom-runtime"
+
+    monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: _Cfg())
+    monkeypatch.setattr("supervisor.history.export_run", lambda run_id, runtime_dir=".supervisor/runtime": {
+        "run_id": run_id,
+        "runtime_dir": runtime_dir,
+    } if not captured.setdefault("runtime_dir", runtime_dir) else {"run_id": run_id, "runtime_dir": runtime_dir})
+    monkeypatch.setattr("supervisor.history.summarize_run", lambda exported: {
+        "run_id": exported["run_id"],
+        "top_state": "COMPLETED",
+        "counts": {"checkpoints": 0, "verifications_ok": 0, "routing_events": 0},
+        "oracle_consultation_ids": [],
+    })
+
+    result = app.cmd_run_summarize(argparse.Namespace(run_id="run_demo", json=True, config="alt.yaml"))
+
+    assert result == 0
+    assert captured["runtime_dir"] == "/tmp/custom-runtime"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["run_id"] == "run_demo"
+
+
+def test_history_commands_return_controlled_error(monkeypatch, capsys):
+    monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: type("Cfg", (), {"runtime_dir": ".supervisor/runtime"})())
+    monkeypatch.setattr("supervisor.history.export_run", lambda run_id, runtime_dir=".supervisor/runtime": (_ for _ in ()).throw(FileNotFoundError("missing run")))
+
+    result = app.cmd_run_export(argparse.Namespace(run_id="run_demo", output="", json=True, config=None))
+
+    assert result == 1
+    assert "Error: missing run" in capsys.readouterr().out
 
 
 def test_oracle_consult_returns_controlled_error_when_consult_raises(monkeypatch, capsys):

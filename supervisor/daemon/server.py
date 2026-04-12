@@ -521,6 +521,13 @@ class DaemonServer:
         content = request.get("content", "")
         if not content:
             return {"ok": False, "error": "content required"}
+        raw_metadata = request.get("metadata", {})
+        if raw_metadata is None:
+            metadata = {}
+        elif isinstance(raw_metadata, dict):
+            metadata = raw_metadata
+        else:
+            return {"ok": False, "error": "metadata must be an object"}
 
         note = {
             "note_id": f"note_{uuid.uuid4().hex[:12]}",
@@ -531,7 +538,7 @@ class DaemonServer:
             "note_type": request.get("note_type", "context"),
             "title": request.get("title", content[:80]),
             "content": content,
-            "metadata": request.get("metadata", {}) or {},
+            "metadata": metadata,
         }
 
         path = self._shared_notes_path()
