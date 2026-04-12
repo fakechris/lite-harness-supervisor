@@ -308,6 +308,25 @@ def cmd_run_resume(args):
     return 0
 
 
+def cmd_run_review(args):
+    """Record reviewer acknowledgement for a paused run."""
+    from supervisor.daemon.client import DaemonClient
+
+    client = DaemonClient()
+    if not client.is_running():
+        print("Daemon not running.")
+        return 1
+
+    result = client.ack_review(args.run_id, reviewer=args.by)
+    if result.get("ok"):
+        print(f"Review recorded for {result['run_id']} by {args.by}")
+        print(f"  top_state: {result.get('top_state', 'UNKNOWN')}")
+    else:
+        print(f"Error: {result.get('error', 'unknown')}")
+        return 1
+    return 0
+
+
 def cmd_run_stop(args):
     """Stop a specific run."""
     from supervisor.daemon.client import DaemonClient
@@ -580,7 +599,13 @@ def cmd_skill_install(args):
 
 def cmd_session(args):
     """Session detection commands."""
-    from supervisor.session_detect import detect_agent, detect_session_id, find_latest_jsonl, list_sessions
+    from supervisor.session_detect import (
+        detect_agent,
+        detect_session_id,
+        find_jsonl_for_session,
+        find_latest_jsonl,
+        list_sessions,
+    )
 
     if args.session_action == "detect":
         agent = detect_agent()
@@ -593,7 +618,10 @@ def cmd_session(args):
 
     elif args.session_action == "jsonl":
         agent = detect_agent()
-        path = find_latest_jsonl(agent)
+        sid = detect_session_id(agent)
+        path = find_jsonl_for_session(sid, agent) if sid else None
+        if path is None:
+            path = find_latest_jsonl(agent)
         if path:
             print(str(path))
         else:
@@ -851,6 +879,10 @@ def main():
     p_resume.add_argument("--surface", default=None, help="Surface type override")
     p_resume.add_argument("--config", default=None)
 
+    p_review = run_sub.add_parser("review", help="Record reviewer acknowledgement")
+    p_review.add_argument("run_id", help="Run ID to mark as reviewed")
+    p_review.add_argument("--by", required=True, choices=["human", "stronger_reviewer"])
+
     # Removed legacy syntax is still parsed so we can print a migration error.
     p_run.add_argument("spec_path", nargs="?", default=None, help=argparse.SUPPRESS)
     p_run.add_argument("--pane", default=None, help=argparse.SUPPRESS)
@@ -937,6 +969,8 @@ def main():
             sys.exit(cmd_run_stop(args))
         elif args.run_action == "resume":
             sys.exit(cmd_run_resume(args))
+        elif args.run_action == "review":
+            sys.exit(cmd_run_review(args))
         elif args.spec_path:
             # Legacy mode
             sys.exit(cmd_run_legacy(args))

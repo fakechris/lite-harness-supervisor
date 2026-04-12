@@ -116,17 +116,19 @@ class StateStore:
     def _read_last_seq(self) -> int:
         if not self.session_log_path.exists():
             return 0
-        last_seq = 0
         try:
-            for line in self.session_log_path.read_text().strip().splitlines():
-                try:
-                    record = json.loads(line)
-                    last_seq = max(last_seq, record.get("seq", 0))
-                except json.JSONDecodeError:
-                    continue
+            lines = self._tail_lines(self.session_log_path, max_lines=256)
         except OSError:
-            pass
-        return last_seq
+            return 0
+        for line in reversed(lines):
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            seq = record.get("seq", 0)
+            if isinstance(seq, int):
+                return seq
+        return 0
 
     @staticmethod
     def _hash_spec(path: str) -> str:
@@ -135,3 +137,17 @@ class StateStore:
             return hashlib.sha256(content).hexdigest()[:16]
         except (OSError, FileNotFoundError):
             return ""
+
+    @staticmethod
+    def _tail_lines(path: Path, *, max_lines: int = 256, chunk_size: int = 4096) -> list[str]:
+        with path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            buffer = b""
+            pos = size
+            while pos > 0 and buffer.count(b"\n") <= max_lines:
+                read_size = min(chunk_size, pos)
+                pos -= read_size
+                f.seek(pos)
+                buffer = f.read(read_size) + buffer
+            return buffer.decode("utf-8", errors="replace").splitlines()[-max_lines:]

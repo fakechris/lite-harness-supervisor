@@ -12,6 +12,16 @@ class FinishGate:
     Uses AcceptanceContract (if available) or falls back to FinishPolicy.
     """
 
+    @staticmethod
+    def _review_requirement_met(required: str, completed: set[str]) -> bool:
+        if not required:
+            return True
+        if required == "human":
+            return "human" in completed or "stronger_reviewer" in completed
+        if required == "stronger_reviewer":
+            return "stronger_reviewer" in completed
+        return False
+
     def evaluate(self, spec, state, *, cwd: str | None = None) -> dict:
         contract = spec.acceptance
         if contract is None:
@@ -88,7 +98,9 @@ class FinishGate:
 
         # Check must_review_by
         if contract.must_review_by:
-            failures.append(f"requires review by: {contract.must_review_by}")
+            completed_reviews = set(getattr(state, "completed_reviews", []) or [])
+            if not self._review_requirement_met(contract.must_review_by, completed_reviews):
+                failures.append(f"requires review by: {contract.must_review_by}")
 
         return {
             "ok": len(failures) == 0,

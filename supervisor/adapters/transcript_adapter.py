@@ -11,18 +11,27 @@ class TranscriptAdapter:
     CHECKPOINT_RE = re.compile(r"<checkpoint>(.*?)</checkpoint>", re.S)
 
     def parse_checkpoint(self, text: str, *, run_id: str = "", surface_id: str = "") -> Checkpoint | None:
+        checkpoints = self.parse_checkpoints(text, run_id=run_id, surface_id=surface_id)
+        return checkpoints[-1] if checkpoints else None
+
+    def parse_checkpoints(self, text: str, *, run_id: str = "", surface_id: str = "") -> list[Checkpoint]:
         """Parse the most recent checkpoint from terminal output.
 
-        Returns a Checkpoint dataclass or None if no checkpoint found.
+        Returns a list of Checkpoint dataclasses in appearance order.
         *run_id* and *surface_id* are filled in by the caller (supervisor loop)
         to ensure identity even if the agent omitted them.
         """
         matches = self.CHECKPOINT_RE.findall(text)
         if not matches:
-            return None
-        block = matches[-1]
+            return []
+        parsed: list[Checkpoint] = []
+        for block in matches:
+            checkpoint = self._build_checkpoint(block, run_id=run_id, surface_id=surface_id)
+            if checkpoint is not None:
+                parsed.append(checkpoint)
+        return parsed
 
-        # Try YAML first, fallback to line-by-line
+    def _build_checkpoint(self, block: str, *, run_id: str = "", surface_id: str = "") -> Checkpoint | None:
         raw: dict = {}
         try:
             parsed = yaml.safe_load(block)
@@ -32,11 +41,8 @@ class TranscriptAdapter:
             pass
         if not raw:
             raw = self._parse_lines(block)
-
-        # Must have at least status and current_node
         if "status" not in raw or "current_node" not in raw:
             return None
-
         return Checkpoint(
             status=raw.get("status", ""),
             current_node=raw.get("current_node", ""),

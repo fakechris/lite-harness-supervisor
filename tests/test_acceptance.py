@@ -93,6 +93,36 @@ class TestFinishGateWithContract:
         assert result["ok"] is False
         assert "requires review" in result["reason"]
 
+    def test_must_review_allows_completion_after_human_ack(self, tmp_path):
+        spec = load_spec("specs/examples/linear_plan.example.yaml")
+        spec.acceptance = AcceptanceContract(
+            goal="test", must_review_by="human",
+            require_all_steps_done=False, require_verification_pass=False,
+        )
+
+        store = StateStore(str(tmp_path / "runtime"))
+        state = store.load_or_init(spec)
+        state.completed_reviews = ["human"]
+
+        loop = SupervisorLoop(store)
+        result = loop.finish_gate.evaluate(spec, state)
+        assert result["ok"] is True
+
+    def test_stronger_reviewer_satisfies_human_requirement(self, tmp_path):
+        spec = load_spec("specs/examples/linear_plan.example.yaml")
+        spec.acceptance = AcceptanceContract(
+            goal="test", must_review_by="human",
+            require_all_steps_done=False, require_verification_pass=False,
+        )
+
+        store = StateStore(str(tmp_path / "runtime"))
+        state = store.load_or_init(spec)
+        state.completed_reviews = ["stronger_reviewer"]
+
+        loop = SupervisorLoop(store)
+        result = loop.finish_gate.evaluate(spec, state)
+        assert result["ok"] is True
+
     def test_forbidden_state_blocks_completion(self, tmp_path):
         spec = load_spec("specs/examples/linear_plan.example.yaml")
         spec.acceptance = AcceptanceContract(

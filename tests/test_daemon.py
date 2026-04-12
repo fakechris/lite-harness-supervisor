@@ -9,6 +9,9 @@ import pytest
 
 from supervisor.daemon.server import DaemonServer
 from supervisor.daemon.client import DaemonClient
+from supervisor.domain.enums import TopState
+from supervisor.plan.loader import load_spec
+from supervisor.storage.state_store import StateStore
 
 
 @pytest.fixture
@@ -127,3 +130,152 @@ class TestDaemonStopRun:
         result = client.stop_all()
         assert result["ok"] is True
         assert result["stopped"] == 0
+
+
+class TestDaemonReviewAck:
+    def test_ack_review_completes_run_when_review_was_only_blocker(self, tmp_path):
+        spec_path = tmp_path / "test.yaml"
+        spec_path.write_text(
+            "kind: linear_plan\n"
+            "id: test\n"
+            "goal: test\n"
+            "acceptance:\n"
+            "  must_review_by: human\n"
+            "steps:\n"
+            "  - id: s1\n"
+            "    type: task\n"
+            "    objective: do something\n"
+            "    verify:\n"
+            "      - type: command\n"
+            "        run: echo ok\n"
+            "        expect: pass\n"
+        )
+        spec = load_spec(str(spec_path))
+        run_dir = tmp_path / "runs" / "run_123"
+        store = StateStore(str(run_dir))
+        state = store.load_or_init(
+            spec,
+            spec_path=str(spec_path),
+            pane_target="%1",
+            workspace_root=str(tmp_path),
+        )
+        state.top_state = TopState.PAUSED_FOR_HUMAN
+        state.done_node_ids = ["s1"]
+        state.verification = {"ok": True}
+        store.save(state)
+
+        server = DaemonServer(runs_dir=str(tmp_path / "runs"))
+        result = server._do_ack_review({"run_id": state.run_id, "reviewer": "human"})
+
+        assert result["ok"] is True
+        updated = StateStore(str(run_dir)).load_or_init(spec)
+        assert updated.top_state == TopState.COMPLETED
+        assert "human" in updated.completed_reviews
+
+
+class _DummyThread:
+    def __init__(self, target=None, args=(), name="", daemon=False):
+        self.target = target
+        self.args = args
+        self.name = name
+        self.daemon = daemon
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+    def is_alive(self):
+        return self.started
+
+
+class TestDaemonResume:
+    def test_resume_paused_for_human_transitions_back_to_running(self, tmp_path, monkeypatch):
+        spec_path = tmp_path / "test.yaml"
+        spec_path.write_text(
+            "kind: linear_plan\n"
+            "id: test\n"
+            "goal: test\n"
+            "steps:\n"
+            "  - id: s1\n"
+            "    type: task\n"
+            "    objective: do something\n"
+            "    verify:\n"
+            "      - type: command\n"
+            "        run: echo ok\n"
+            "        expect: pass\n"
+        )
+        spec = load_spec(str(spec_path))
+        run_dir = tmp_path / "runs" / "run_123"
+        store = StateStore(str(run_dir))
+        state = store.load_or_init(
+            spec,
+            spec_path=str(spec_path),
+            pane_target="%1",
+            workspace_root=str(tmp_path),
+        )
+        state.top_state = TopState.PAUSED_FOR_HUMAN
+        store.save(state)
+
+        monkeypatch.setattr("supervisor.daemon.server.acquire_pane_lock", lambda pane, owner: (True, {}))
+        monkeypatch.setattr("supervisor.daemon.server.update_daemon", lambda *a, **k: None)
+        monkeypatch.setattr("threading.Thread", _DummyThread)
+
+        server = DaemonServer(runs_dir=str(tmp_path / "runs"))
+        result = server._do_resume({"spec_path": str(spec_path), "pane_target": "%1"})
+
+        assert result["ok"] is True
+        resumed = StateStore(str(run_dir)).load_or_init(spec, spec_path=str(spec_path), pane_target="%1")
+        assert resumed.top_state == TopState.RUNNING
+        session_events = (run_dir / "session_log.jsonl").read_text()
+        assert "resume_requested" in session_events
+
+    def test_resume_rejects_modified_spec_instead_of_silent_restart(self, tmp_path, monkeypatch):
+        spec_path = tmp_path / "test.yaml"
+        spec_path.write_text(
+            "kind: linear_plan\n"
+            "id: test\n"
+            "goal: test\n"
+            "steps:\n"
+            "  - id: s1\n"
+            "    type: task\n"
+            "    objective: do something\n"
+            "    verify:\n"
+            "      - type: command\n"
+            "        run: echo ok\n"
+            "        expect: pass\n"
+        )
+        spec = load_spec(str(spec_path))
+        run_dir = tmp_path / "runs" / "run_123"
+        store = StateStore(str(run_dir))
+        state = store.load_or_init(
+            spec,
+            spec_path=str(spec_path),
+            pane_target="%1",
+            workspace_root=str(tmp_path),
+        )
+        state.top_state = TopState.PAUSED_FOR_HUMAN
+        store.save(state)
+
+        spec_path.write_text(
+            "kind: linear_plan\n"
+            "id: test\n"
+            "goal: test changed\n"
+            "steps:\n"
+            "  - id: s1\n"
+            "    type: task\n"
+            "    objective: do something else\n"
+            "    verify:\n"
+            "      - type: command\n"
+            "        run: echo changed\n"
+            "        expect: pass\n"
+        )
+
+        monkeypatch.setattr("supervisor.daemon.server.acquire_pane_lock", lambda pane, owner: (True, {}))
+        monkeypatch.setattr("supervisor.daemon.server.update_daemon", lambda *a, **k: None)
+        monkeypatch.setattr("threading.Thread", _DummyThread)
+
+        server = DaemonServer(runs_dir=str(tmp_path / "runs"))
+        result = server._do_resume({"spec_path": str(spec_path), "pane_target": "%1"})
+
+        assert result["ok"] is False
+        assert "spec was modified" in result["error"]

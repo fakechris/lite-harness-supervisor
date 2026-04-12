@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 
 from supervisor import app
 
@@ -124,3 +125,22 @@ def test_pane_owner_reports_global_lock(monkeypatch, capsys):
     assert "%7" in out
     assert "run_lock" in out
     assert "/tmp/project-c" in out
+
+
+def test_session_jsonl_prefers_current_session_path(monkeypatch, capsys):
+    monkeypatch.setattr("supervisor.session_detect.detect_agent", lambda: "codex")
+    monkeypatch.setattr("supervisor.session_detect.detect_session_id", lambda agent="": "thread-123")
+    monkeypatch.setattr(
+        "supervisor.session_detect.find_jsonl_for_session",
+        lambda session_id, agent="": Path("/tmp/current.jsonl"),
+    )
+    monkeypatch.setattr(
+        "supervisor.session_detect.find_latest_jsonl",
+        lambda agent="": Path("/tmp/latest.jsonl"),
+    )
+
+    result = app.cmd_session(argparse.Namespace(session_action="jsonl"))
+
+    assert result == 0
+    out = capsys.readouterr().out.strip()
+    assert out == "/tmp/current.jsonl"

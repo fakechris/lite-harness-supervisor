@@ -288,3 +288,216 @@ Traced all code paths:
 | tmux | ✅ Full | ✅ | ❌ No resume | ⚠️ Ready with caveat |
 | open_relay | ✅ Full | ✅ | ❌ No resume | ⚠️ Ready with caveat |
 | jsonl | ❌ Single-step only | ⚠️ Cross-event risk | ❌ No resume | 🔴 Not ready for multi-step |
+
+---
+
+## Round 3: Post-Fix #23 Review (resume, JSONL buffer, fat skills)
+
+> **Scope**: PR #23 — `fix/deep-review-r2-fat-skills` (3 commits, +792 lines across 17 files)
+> **Tests**: 172 passed ✅
+
+### Changes reviewed
+
+1. **Resume command** — `_do_resume` in daemon, `client.resume()`, CLI `run resume`
+2. **JSONL cross-read buffer** — `_text_buffer` in `JsonlObserver`
+3. **Observation-only node mismatch tolerance** — skip done-node checkpoints in JSONL mode
+4. **Init inject skip for observation-only** — don't inject into JSONL surfaces on startup
+5. **Fat skills reference docs** — 5 reference documents in `skills/*/references/`
+
+### Resume flow trace
+
+```
+User: thin-supervisor run resume --spec plan.yaml --pane %42
+→ cmd_run_resume → client.resume(spec, pane)
+→ daemon._do_resume:
+  1. Scan runs_dir by mtime (newest first)
+  2. Match state_data: spec_id + pane_target + resumable top_state
+  3. Lock check: run_id not in _runs, pane not occupied
+  4. Load state via store.load_or_init
+  5. Acquire pane lock
+  6. Start worker thread
+→ _run_worker → run_sidecar → _run_sidecar_inner
+```
+
+### Round 3 Findings
+
+#### R3-1 🔴 High: Resume PAUSED_FOR_HUMAN immediately exits sidecar
+
+**Location**: `server.py:286-356` + `loop.py:324`
+
+**Trace**:
+```python
+# _do_resume finds state with top_state = "PAUSED_FOR_HUMAN"
+# Loads it as-is, starts _run_worker
+
+# _run_sidecar_inner:
+#   line 299: if state.top_state == TopState.READY → False (it's PAUSED)
+#   line 324: while not is_final(state) and state.top_state != TopState.PAUSED_FOR_HUMAN
+#   → PAUSED_FOR_HUMAN makes condition False → while never executes
+#   → sidecar returns immediately
+```
+
+**Impact**: Resume of the most common resumable state (PAUSED_FOR_HUMAN) is a
+complete no-op. The worker thread starts, does nothing, and exits. The run
+appears to have been resumed but actually wasn't.
+
+**Fix**: In `_do_resume` (or at the start of `_run_worker`), transition state
+from PAUSED_FOR_HUMAN to RUNNING before entering the sidecar loop. The
+transition should be logged as a session event for audit trail.
+
+#### R3-2 🟡 Medium: Resume has TOCTOU race between lock check and pane acquisition
+
+**Location**: `server.py:318-351`
+
+**Trace**:
+```python
+# Phase 1 (line 318): with self._lock — check run_id and pane not in _runs
+# Lock released
+
+# Phase 2 (line 326-331): outside lock — load state, create store
+# Phase 3 (line 340): outside lock — acquire_pane_lock (file lock)
+
+# Phase 4 (line 344): with self._lock — register in _runs
+```
+
+Compare with `_do_register` (lines 206-230) which does all of pane check +
+acquire + register inside a single `with self._lock` block.
+
+**Impact**: Concurrent resume+register for the same pane could both pass the
+in-memory check (phase 1), then race on `acquire_pane_lock`. The file lock
+should catch this, but the in-memory registry may become inconsistent with
+the file lock state.
+
+**Fix**: Move the `acquire_pane_lock` call and `_runs` registration into a
+single `with self._lock` block, matching the pattern in `_do_register`.
+
+#### R3-3 🟡 Medium: Resume does not check spec hash — silent restart on modified spec
+
+**Location**: `server.py:314`
+
+**Trace**:
+```python
+# _do_resume matches on spec_id only:
+if state_data.get("spec_id") == target_spec.id
+    and state_data.get("pane_target") == pane_target
+    and state_data.get("top_state") in (...):
+
+# Then calls store.load_or_init which DOES check spec_hash:
+#   if spec_hash != state.spec_hash → _archive_state → create new state from step_1
+```
+
+**Impact**: User modifies spec (e.g., fixes a verify command), runs `resume`,
+expects to continue from where they paused. Instead, `load_or_init` detects
+hash mismatch, archives the old state, and creates a fresh state starting
+from step_1. User sees "resumed" but is actually restarting. No warning.
+
+**Fix**: Check spec hash in `_do_resume` before calling `load_or_init`. If hash
+changed, return an explicit error: "spec was modified since the run was created.
+Use `register` to start a new run, or revert the spec to resume."
+
+#### R3-4 🟡 Medium: JSONL buffer returns cumulative content — relies on dedup as safety net
+
+**Location**: `jsonl_observer.py:91-98`
+
+**Trace**:
+```python
+# read() appends new text to _text_buffer and returns entire buffer:
+self._text_buffer += "\n" + new_text if new_text else ""
+return self._text_buffer
+
+# Next read() with new non-checkpoint events:
+#   buffer grows, still contains old checkpoint
+#   parse_checkpoint → matches old checkpoint again
+#   sidecar content-based dedup (loop.py:357-363) → catches duplicate ✅
+```
+
+The buffer correctly solves the cross-event checkpoint split problem (Round 2
+finding #1). However, returning the full buffer means:
+
+1. Every `parse_checkpoint` call scans all accumulated text (up to `lines * 3`
+   lines, default 300). Performance degrades over long sessions.
+2. If two different checkpoints are in the buffer, `matches[-1]` only processes
+   the last one — earlier checkpoints are permanently lost.
+3. The dedup layer is the only thing preventing re-processing of old checkpoints.
+   If a checkpoint's content changes slightly across buffer builds (e.g., buffer
+   cap truncates the beginning), dedup may not match and the old checkpoint
+   could be re-processed.
+
+**Fix**: After a checkpoint is successfully parsed AND processed (past dedup),
+clear the buffer up to the end of that checkpoint. This ensures old checkpoints
+don't accumulate.
+
+#### R3-5 🟡 Medium: Observation-only mode requires agent to know spec node IDs
+
+**Location**: `loop.py:308-322, 369-375`
+
+**Trace**:
+```python
+# line 309: Skip init inject for observation-only surfaces
+if not getattr(terminal, "is_observation_only", False):
+    # inject init instruction ← SKIPPED for JSONL
+
+# Agent doesn't receive init instruction → doesn't know which node ID to use
+# Agent emits checkpoint with its own node naming (e.g., "write_tests")
+# Spec has node IDs like "step_1", "step_2"
+# → Every checkpoint is a node mismatch
+# → mismatch tolerance (line 370-371) only helps for done_node_ids
+# → After 5 mismatches → PAUSED_FOR_HUMAN
+```
+
+**Impact**: Observation-only mode only works if the agent independently knows
+the spec's node IDs (e.g., from reading the spec file directly, or from a
+previous inject in a non-observation-only run). For a fresh JSONL-only run
+where the agent has never seen the spec, the mode fails immediately.
+
+**Fix**: Either (a) don't require node ID matching in observation-only mode
+(accept any node name and track progress by checkpoint status alone), or
+(b) document that observation-only mode requires the agent to have read the
+spec independently (e.g., via AGENTS.md or SKILL.md referencing the spec file).
+
+#### R3-6 🟢 Low: Reference docs exist but SKILL.md doesn't reference them
+
+**Location**: `skills/thin-supervisor/references/*.md`
+
+Five high-quality reference documents were added:
+- `supervision-modes.md` — three mode descriptions ✅
+- `debugging-playbook.md` — four-step retry process ✅
+- `spec-writing-guide.md` — rules and anti-patterns ✅
+- `escalation-rules.md` — escalate vs continue criteria ✅
+- `improve.md` — post-run learning loop ✅
+
+However, `SKILL.md` contains no instructions to load these references at the
+appropriate moments. They are the raw material for a resolver pattern but the
+routing logic ("when verification fails → load debugging-playbook.md") is not
+yet wired.
+
+**Fix**: Add conditional loading instructions to SKILL.md:
+```markdown
+## Context Loading
+- When writing a spec → read `references/spec-writing-guide.md`
+- When verification fails → read `references/debugging-playbook.md`
+- When deciding whether to escalate → read `references/escalation-rules.md`
+- When a run completes → read `references/improve.md`
+```
+
+### Updated maturity assessment
+
+| Surface | Workflow driving | Observation | Resume | Production readiness |
+|---------|-----------------|-------------|--------|---------------------|
+| tmux | ✅ Full | ✅ | 🔴 Resume bug (R3-1) | ⚠️ Ready (resume broken) |
+| open_relay | ✅ Full | ✅ | 🔴 Resume bug (R3-1) | ⚠️ Ready (resume broken) |
+| jsonl | ⚠️ Observation-only | ✅ Buffer fix | 🔴 Resume bug (R3-1) | ⚠️ Improved (R3-5 limits) |
+
+**Key improvement since Round 2**: JSONL cross-event checkpoint split is fixed
+(buffer). Observation-only node mismatch tolerance works for the common case.
+Resume infrastructure is in place but has a critical bug (R3-1) that makes
+it non-functional for the most common scenario.
+
+### Cumulative fix status across all rounds
+
+| Round | Total findings | Fixed | Remaining |
+|-------|---------------|-------|-----------|
+| Round 1 | 10 | 10 ✅ | 0 |
+| Round 2 (scenario trace) | 8 | 5 ✅ | 3 (R2-4 tmux fast-cp, R2-5 oly echo, R2-7 _read_last_seq) |
+| Round 3 | 6 | 0 | 6 (R3-1 through R3-6) |
+| **Total** | **24** | **15** | **9** |

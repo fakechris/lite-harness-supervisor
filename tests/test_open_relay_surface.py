@@ -33,6 +33,18 @@ class TestOpenRelaySurfaceRead:
         assert "sess-123" in cmd
         assert "50" in cmd
 
+    @patch("subprocess.run")
+    def test_read_filters_recent_supervisor_echo(self, mock_run):
+        mock_run.side_effect = [
+            _mock_run(),  # inject
+            _mock_run(stdout="supervisor instruction\n<checkpoint>\nstatus: step_done\ncurrent_node: s1\nsummary: ok\n</checkpoint>\n"),
+        ]
+        surface = OpenRelaySurface("sess-123")
+        surface.inject("supervisor instruction")
+        text = surface.read(lines=50)
+        assert "supervisor instruction" not in text
+        assert "<checkpoint>" in text
+
 
 class TestOpenRelaySurfaceInject:
     @patch("subprocess.run")
@@ -50,11 +62,11 @@ class TestOpenRelaySurfaceInject:
 
 class TestOpenRelaySurfaceCwd:
     @patch("subprocess.run")
-    def test_cwd_from_session_metadata(self, mock_run):
+    def test_cwd_returns_empty_when_only_startup_metadata_is_available(self, mock_run):
         sessions = [{"id": "sess-123", "cwd": "/home/user/project"}]
         mock_run.return_value = _mock_run(stdout=json.dumps(sessions))
         surface = OpenRelaySurface("sess-123")
-        assert surface.current_cwd() == "/home/user/project"
+        assert surface.current_cwd() == ""
 
     @patch("subprocess.run")
     def test_cwd_returns_empty_on_failure(self, mock_run):

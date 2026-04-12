@@ -22,12 +22,13 @@ class OpenRelaySurface:
             raise OpenRelaySurfaceError("session_id must not be empty")
         self._session_id = session_id.strip()
         self._last_read_hash = ""  # for incremental dedup
+        self._pending_echo_filters: list[str] = []
 
     def read(self, lines: int = 100) -> str:
         """Read recent output, returning only new content since last read."""
         result = self._oly("logs", self._session_id,
                            "--tail", str(lines), "--no-truncate")
-        content = result.stdout
+        content = self._strip_pending_echoes(result.stdout)
 
         # Dedup: only return content if it changed since last read
         import hashlib
@@ -39,24 +40,16 @@ class OpenRelaySurface:
 
     def inject(self, text: str) -> None:
         """Send text + Enter to the oly session."""
+        self._pending_echo_filters.append(text)
         self._oly("send", self._session_id, text, "key:enter")
 
     def current_cwd(self) -> str:
-        """Get the session's working directory from metadata.
+        """Return empty so verifier falls back to persisted workspace_root.
 
-        open-relay tracks the cwd the session was started with.
-        This may not reflect runtime `cd` operations by the agent.
-        Returns empty string if unavailable (verifier will fall back).
+        `oly ls --json` only exposes the session startup cwd, which is not
+        reliable after runtime `cd` operations. Returning the stale startup cwd
+        is worse than using the run's known workspace root fallback.
         """
-        try:
-            result = self._oly("ls", "--json")
-            sessions = json.loads(result.stdout)
-            if isinstance(sessions, list):
-                for s in sessions:
-                    if str(s.get("id", "")) == self._session_id:
-                        return s.get("cwd", "")
-        except (json.JSONDecodeError, OpenRelaySurfaceError):
-            pass
         return ""
 
     def session_id(self) -> str:
@@ -113,3 +106,15 @@ class OpenRelaySurface:
                 f"{result.stderr.strip()}"
             )
         return result
+
+    def _strip_pending_echoes(self, content: str) -> str:
+        if not self._pending_echo_filters:
+            return content
+        remaining: list[str] = []
+        for echo in self._pending_echo_filters:
+            if echo and echo in content:
+                content = content.replace(echo, "", 1)
+            else:
+                remaining.append(echo)
+        self._pending_echo_filters = remaining
+        return content.lstrip("\n")

@@ -61,6 +61,14 @@ def _make_checkpoint(status: str, node: str, summary: str) -> str:
     )
 
 
+def _make_two_checkpoints(first_summary: str, second_summary: str, *, node: str = "write_test") -> str:
+    return (
+        _make_checkpoint("working", node, first_summary)
+        + "\nnoise\n"
+        + _make_checkpoint("working", node, second_summary)
+    )
+
+
 def test_sidecar_full_plan(tmp_path):
     """Walk through a 3-step linear plan via sidecar loop."""
     spec = load_spec("specs/examples/linear_plan.example.yaml")
@@ -133,6 +141,28 @@ def test_sidecar_skips_duplicate_checkpoints(tmp_path):
 
     final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
     assert final.top_state == TopState.COMPLETED
+
+
+def test_sidecar_processes_multiple_checkpoints_in_single_read(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    terminal = MockTerminal([
+        _make_two_checkpoints("first progress", "second progress"),
+        _make_checkpoint("step_done", "write_test", "wrote the test"),
+        _make_checkpoint("step_done", "implement_feature", "feature done"),
+        _make_checkpoint("step_done", "final_verify", "all done"),
+    ])
+
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+    assert final.top_state == TopState.COMPLETED
+    events = [
+        line for line in store.event_log_path.read_text().splitlines()
+        if "first progress" in line or "second progress" in line
+    ]
+    assert len(events) == 2
 
 
 def test_sidecar_injects_initial_instruction_before_first_checkpoint(tmp_path):

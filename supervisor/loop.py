@@ -336,126 +336,152 @@ class SupervisorLoop:
             pending_text = None
 
             # 2. Parse checkpoint with identity
-            checkpoint = adapter.parse_checkpoint(text, run_id=state.run_id, surface_id=surface_id)
-            if checkpoint is None:
+            checkpoints = adapter.parse_checkpoints(text, run_id=state.run_id, surface_id=surface_id)
+            if not checkpoints:
                 time.sleep(poll_interval)
                 continue
 
-            # #2: reject checkpoints from wrong run
-            if checkpoint.run_id and checkpoint.run_id != state.run_id:
-                time.sleep(poll_interval)
-                continue
-
-            # #7: seq-based dedup with reset tolerance
-            if checkpoint.checkpoint_seq > 0:
-                if checkpoint.checkpoint_seq <= state.checkpoint_seq:
-                    # Allow seq reset if gap is large (agent restarted)
-                    if state.checkpoint_seq - checkpoint.checkpoint_seq < 100:
-                        time.sleep(poll_interval)
-                        continue
-            # Content-based dedup
-            last_cp = state.last_agent_checkpoint
-            if (last_cp
-                    and checkpoint.status == last_cp.get("status")
-                    and checkpoint.current_node == last_cp.get("current_node")
-                    and checkpoint.summary == last_cp.get("summary")
-                    and checkpoint.checkpoint_seq == last_cp.get("checkpoint_seq", 0)):
-                time.sleep(poll_interval)
-                continue
-
-            # #5: node mismatch — but for observation-only surfaces, be lenient:
-            # if the checkpoint reports a node we've already done, just skip it
-            # (agent doesn't know we advanced because inject is a no-op)
-            if checkpoint.current_node != state.current_node_id:
-                if (getattr(terminal, "is_observation_only", False)
-                        and checkpoint.current_node in state.done_node_ids):
-                    logger.info("observation-only: skipping done node checkpoint cp=%s",
-                                checkpoint.current_node)
-                    time.sleep(poll_interval)
-                    continue
-                node_mismatch_count += 1
-                logger.warning("checkpoint node mismatch (%d/%d): cp=%s state=%s",
-                               node_mismatch_count, max_node_mismatch,
-                               checkpoint.current_node, state.current_node_id)
-                self.store.append_session_event(
-                    state.run_id, "checkpoint_mismatch",
-                    {"checkpoint_node": checkpoint.current_node, "state_node": state.current_node_id,
-                     "count": node_mismatch_count},
-                )
-                if node_mismatch_count >= max_node_mismatch:
-                    state.top_state = TopState.PAUSED_FOR_HUMAN
-                    state.human_escalations.append({
-                        "reason": f"node mismatch persisted for {node_mismatch_count} checkpoints",
-                        "checkpoint_node": checkpoint.current_node,
-                        "state_node": state.current_node_id,
-                    })
-                    self.store.save(state)
-                    return
-                time.sleep(poll_interval)
-                continue
-            node_mismatch_count = 0  # reset on match
-
-            if checkpoint.checkpoint_seq > 0:
-                state.checkpoint_seq = checkpoint.checkpoint_seq
-            logger.info("checkpoint: %s (id=%s)", checkpoint.summary, checkpoint.checkpoint_id)
-
-            # 3. Event
-            cp_dict = checkpoint.to_dict()
-            event = {"type": "agent_output", "payload": {"checkpoint": cp_dict}}
-            self.store.append_event(event)
-            self.store.append_session_event(state.run_id, "checkpoint", cp_dict)
-            self.handle_event(state, event)
-
-            # 4. Gate → SupervisorDecision
-            decision: SupervisorDecision | None = None
-            if state.top_state == TopState.GATING:
-                decision = self.gate(
-                    spec, state,
-                    triggered_by_seq=checkpoint.checkpoint_seq,
-                    triggered_by_checkpoint_id=checkpoint.checkpoint_id,
-                )
-                self.store.append_decision(decision.to_dict())
-                self.store.append_session_event(state.run_id, "gate_decision", decision.to_dict())
-                self.apply_decision(spec, state, decision)
-                logger.info("decision: %s (id=%s)", decision.decision, decision.decision_id)
-
-            # 5. Verify
-            if state.top_state == TopState.VERIFYING:
-                cwd = self._get_cwd(terminal, state)
+            if hasattr(terminal, "consume_checkpoint"):
                 try:
-                    verification = self.verify_current_node(spec, state, cwd=cwd)
-                except Exception as e:
-                    logger.error("verification error: %s", e)
-                    verification = {"ok": False, "results": [{"type": "error", "ok": False, "reason": str(e)}]}
-                self.store.append_event({"type": "verification_finished", "payload": verification})
-                self.store.append_session_event(state.run_id, "verification", verification)
-                self.apply_verification(spec, state, verification, cwd=cwd)
-                logger.info("verification ok=%s, state=%s", verification.get("ok"), state.top_state.value)
+                    terminal.consume_checkpoint()
+                except Exception:
+                    pass
 
-            # 6. Inject — #11: save BEFORE inject
-            if state.top_state == TopState.RUNNING:
-                node_changed = state.current_node_id != state.last_injected_node_id
-                new_retry = state.current_attempt > 0 and state.current_attempt != state.last_injected_attempt
-                if node_changed or new_retry:
-                    node = spec.get_node(state.current_node_id)
-                    decision_id = decision.decision_id if decision else ""
-                    trigger = "retry" if new_retry else ("branch" if decision and decision.decision.upper() == "BRANCH" else "node_advance")
-                    # Re-evaluate policy (node advance resets attempt, failures escalate)
-                    policy = self.policy_engine.determine(self.worker_profile, contract, state)
-                    instruction = self.composer.build(
-                        node, state,
-                        triggered_by_decision_id=decision_id,
-                        trigger_type=trigger,
-                        policy=policy,
+            for checkpoint in checkpoints:
+                # #2: reject checkpoints from wrong run
+                if checkpoint.run_id and checkpoint.run_id != state.run_id:
+                    continue
+
+                # #7: seq-based dedup with reset tolerance
+                if checkpoint.checkpoint_seq > 0:
+                    if checkpoint.checkpoint_seq <= state.checkpoint_seq:
+                        # Allow seq reset if gap is large (agent restarted)
+                        if state.checkpoint_seq - checkpoint.checkpoint_seq < 100:
+                            continue
+                # Content-based dedup
+                last_cp = state.last_agent_checkpoint
+                if (last_cp
+                        and checkpoint.status == last_cp.get("status")
+                        and checkpoint.current_node == last_cp.get("current_node")
+                        and checkpoint.summary == last_cp.get("summary")
+                        and checkpoint.checkpoint_seq == last_cp.get("checkpoint_seq", 0)):
+                    continue
+
+                # #5: node mismatch — observation-only surfaces cannot rely on
+                # injected instructions, so bind unknown nodes to the current spec
+                # node but escalate if the agent is still reporting an already-done
+                # node (delivery clearly stalled).
+                if checkpoint.current_node != state.current_node_id:
+                    if getattr(terminal, "is_observation_only", False):
+                        if checkpoint.current_node in state.done_node_ids:
+                            reason = (
+                                "observation-only surface is still reporting a completed node; "
+                                "supervisor instruction was likely not delivered"
+                            )
+                            logger.warning("%s: cp=%s state=%s",
+                                           reason, checkpoint.current_node, state.current_node_id)
+                            payload = {
+                                "reason": reason,
+                                "checkpoint_node": checkpoint.current_node,
+                                "state_node": state.current_node_id,
+                            }
+                            state.top_state = TopState.PAUSED_FOR_HUMAN
+                            state.human_escalations.append(payload)
+                            self.store.append_session_event(
+                                state.run_id, "observation_delivery_stalled", payload
+                            )
+                            self.store.save(state)
+                            return
+                        logger.info(
+                            "observation-only: rebinding checkpoint node cp=%s -> state=%s",
+                            checkpoint.current_node, state.current_node_id,
+                        )
+                        checkpoint.current_node = state.current_node_id
+                    else:
+                        node_mismatch_count += 1
+                        logger.warning("checkpoint node mismatch (%d/%d): cp=%s state=%s",
+                                       node_mismatch_count, max_node_mismatch,
+                                       checkpoint.current_node, state.current_node_id)
+                        self.store.append_session_event(
+                            state.run_id, "checkpoint_mismatch",
+                            {"checkpoint_node": checkpoint.current_node, "state_node": state.current_node_id,
+                             "count": node_mismatch_count},
+                        )
+                        if node_mismatch_count >= max_node_mismatch:
+                            state.top_state = TopState.PAUSED_FOR_HUMAN
+                            state.human_escalations.append({
+                                "reason": f"node mismatch persisted for {node_mismatch_count} checkpoints",
+                                "checkpoint_node": checkpoint.current_node,
+                                "state_node": state.current_node_id,
+                            })
+                            self.store.save(state)
+                            return
+                        continue
+                node_mismatch_count = 0  # reset on match
+
+                if checkpoint.checkpoint_seq > 0:
+                    state.checkpoint_seq = checkpoint.checkpoint_seq
+                logger.info("checkpoint: %s (id=%s)", checkpoint.summary, checkpoint.checkpoint_id)
+
+                # 3. Event
+                cp_dict = checkpoint.to_dict()
+                event = {"type": "agent_output", "payload": {"checkpoint": cp_dict}}
+                self.store.append_event(event)
+                self.store.append_session_event(state.run_id, "checkpoint", cp_dict)
+                self.handle_event(state, event)
+
+                # 4. Gate → SupervisorDecision
+                decision: SupervisorDecision | None = None
+                if state.top_state == TopState.GATING:
+                    decision = self.gate(
+                        spec, state,
+                        triggered_by_seq=checkpoint.checkpoint_seq,
+                        triggered_by_checkpoint_id=checkpoint.checkpoint_id,
                     )
-                    # Save state BEFORE inject to prevent replay on crash
-                    state.last_injected_node_id = state.current_node_id
-                    state.last_injected_attempt = state.current_attempt
-                    self.store.save(state)
-                    if not self._inject_or_pause(state, terminal, instruction):
-                        return
-                    logger.info("injected: %s (id=%s, trigger=%s)", node.id, instruction.instruction_id, trigger)
-                    continue  # skip double save
+                    self.store.append_decision(decision.to_dict())
+                    self.store.append_session_event(state.run_id, "gate_decision", decision.to_dict())
+                    self.apply_decision(spec, state, decision)
+                    logger.info("decision: %s (id=%s)", decision.decision, decision.decision_id)
+
+                # 5. Verify
+                if state.top_state == TopState.VERIFYING:
+                    cwd = self._get_cwd(terminal, state)
+                    try:
+                        verification = self.verify_current_node(spec, state, cwd=cwd)
+                    except Exception as e:
+                        logger.error("verification error: %s", e)
+                        verification = {"ok": False, "results": [{"type": "error", "ok": False, "reason": str(e)}]}
+                    self.store.append_event({"type": "verification_finished", "payload": verification})
+                    self.store.append_session_event(state.run_id, "verification", verification)
+                    self.apply_verification(spec, state, verification, cwd=cwd)
+                    logger.info("verification ok=%s, state=%s", verification.get("ok"), state.top_state.value)
+
+                # 6. Inject — #11: save BEFORE inject
+                if state.top_state == TopState.RUNNING:
+                    node_changed = state.current_node_id != state.last_injected_node_id
+                    new_retry = state.current_attempt > 0 and state.current_attempt != state.last_injected_attempt
+                    if node_changed or new_retry:
+                        node = spec.get_node(state.current_node_id)
+                        decision_id = decision.decision_id if decision else ""
+                        trigger = "retry" if new_retry else ("branch" if decision and decision.decision.upper() == "BRANCH" else "node_advance")
+                        # Re-evaluate policy (node advance resets attempt, failures escalate)
+                        policy = self.policy_engine.determine(self.worker_profile, contract, state)
+                        instruction = self.composer.build(
+                            node, state,
+                            triggered_by_decision_id=decision_id,
+                            trigger_type=trigger,
+                            policy=policy,
+                        )
+                        # Save state BEFORE inject to prevent replay on crash
+                        state.last_injected_node_id = state.current_node_id
+                        state.last_injected_attempt = state.current_attempt
+                        self.store.save(state)
+                        if not self._inject_or_pause(state, terminal, instruction):
+                            return
+                        logger.info("injected: %s (id=%s, trigger=%s)", node.id, instruction.instruction_id, trigger)
+                        if state.top_state == TopState.PAUSED_FOR_HUMAN:
+                            return
+                        continue
 
             # 7. Persist + progress
             self.store.save(state)

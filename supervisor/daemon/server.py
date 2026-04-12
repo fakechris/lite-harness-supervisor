@@ -14,8 +14,10 @@ import threading
 import uuid
 from pathlib import Path
 
+from supervisor.domain.enums import TopState
 from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
+from supervisor.gates.finish_gate import FinishGate
 from supervisor.loop import SupervisorLoop
 from supervisor.adapters.surface_factory import create_surface
 from supervisor.config import RuntimeConfig
@@ -159,6 +161,8 @@ class DaemonServer:
             response = self._do_stop_all()
         elif action == "resume":
             response = self._do_resume(request)
+        elif action == "ack_review":
+            response = self._do_ack_review(request)
         elif action == "list_runs":
             response = self._do_list_runs()
         elif action == "observe":
@@ -315,13 +319,16 @@ class DaemonServer:
                     and state_data.get("pane_target", "") == pane_target
                     and state_data.get("top_state") in ("PAUSED_FOR_HUMAN", "RUNNING", "READY", "GATING", "VERIFYING")):
                 run_id = state_data["run_id"]
-                with self._lock:
-                    if run_id in self._runs:
-                        return {"ok": False, "error": f"run {run_id} is already active"}
-                    # Check pane not owned by another run
-                    for existing in self._runs.values():
-                        if existing.pane_target == pane_target and existing.thread and existing.thread.is_alive():
-                            return {"ok": False, "error": f"pane {pane_target} owned by run {existing.run_id}"}
+                current_spec_hash = StateStore._hash_spec(spec_path)
+                saved_spec_hash = state_data.get("spec_hash", "")
+                if current_spec_hash and saved_spec_hash and current_spec_hash != saved_spec_hash:
+                    return {
+                        "ok": False,
+                        "error": (
+                            "spec was modified since the run was created. "
+                            "Use register to start a new run, or revert the spec to resume."
+                        ),
+                    }
 
                 store = StateStore(str(run_dir))
                 surface_type = request.get("surface_type") or state_data.get("surface_type", "tmux")
@@ -330,6 +337,15 @@ class DaemonServer:
                     surface_type=surface_type,
                     workspace_root=state_data.get("workspace_root", os.getcwd()),
                 )
+                resumed_from = state.top_state.value
+                if state.top_state == TopState.PAUSED_FOR_HUMAN:
+                    state.top_state = TopState.RUNNING
+                    store.append_session_event(
+                        run_id,
+                        "resume_requested",
+                        {"resumed_from": resumed_from},
+                    )
+                    store.save(state)
                 entry = RunEntry(run_id, spec_path, pane_target,
                                  state_data.get("workspace_root", ""),
                                  surface_type=surface_type, thread=None, store=store)
@@ -337,11 +353,15 @@ class DaemonServer:
                 # Acquire pane lock before starting
                 pane_owner = self._pane_owner_metadata(run_id, spec_path, pane_target,
                                                        state_data.get("workspace_root", ""))
-                acquired, existing_owner = acquire_pane_lock(pane_target, pane_owner)
-                if not acquired:
-                    return {"ok": False, "error": f"pane {pane_target} locked by {existing_owner}"}
-
                 with self._lock:
+                    if run_id in self._runs:
+                        return {"ok": False, "error": f"run {run_id} is already active"}
+                    for existing in self._runs.values():
+                        if existing.pane_target == pane_target and existing.thread and existing.thread.is_alive():
+                            return {"ok": False, "error": f"pane {pane_target} owned by run {existing.run_id}"}
+                    acquired, existing_owner = acquire_pane_lock(pane_target, pane_owner)
+                    if not acquired:
+                        return {"ok": False, "error": f"pane {pane_target} locked by {existing_owner}"}
                     thread = threading.Thread(
                         target=self._run_worker, args=(entry, target_spec, state),
                         name=f"run-{run_id}", daemon=True,
@@ -350,10 +370,73 @@ class DaemonServer:
                     self._runs[run_id] = entry
                     self._update_daemon_record_locked()
                 thread.start()
-                logger.info("resumed run %s from %s", run_id, state_data.get("top_state"))
-                return {"ok": True, "run_id": run_id, "resumed_from": state_data.get("top_state")}
+                logger.info("resumed run %s from %s", run_id, resumed_from)
+                return {"ok": True, "run_id": run_id, "resumed_from": resumed_from}
 
         return {"ok": False, "error": "no resumable run found for this spec + pane"}
+
+    def _do_ack_review(self, request: dict) -> dict:
+        """Record review acknowledgement and re-check finish gate."""
+        run_id = request.get("run_id", "")
+        reviewer = request.get("reviewer", "")
+        if not run_id or not reviewer:
+            return {"ok": False, "error": "run_id and reviewer required"}
+        if reviewer not in {"human", "stronger_reviewer"}:
+            return {"ok": False, "error": f"invalid reviewer: {reviewer}"}
+
+        with self._lock:
+            active_entry = self._runs.get(run_id)
+
+        if active_entry is not None:
+            store = active_entry.store
+            try:
+                state_data = json.loads(store.state_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                return {"ok": False, "error": f"could not read state for {run_id}"}
+        else:
+            store = None
+            state_data = None
+            for run_dir in sorted(Path(self.runs_dir).iterdir()):
+                state_path = run_dir / "state.json"
+                if not state_path.exists():
+                    continue
+                try:
+                    candidate = json.loads(state_path.read_text())
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if candidate.get("run_id") == run_id:
+                    store = StateStore(str(run_dir))
+                    state_data = candidate
+                    break
+            if store is None or state_data is None:
+                return {"ok": False, "error": f"run {run_id} not found"}
+
+        spec_path = state_data.get("spec_path", "")
+        if not spec_path:
+            return {"ok": False, "error": f"run {run_id} has no spec_path"}
+        try:
+            spec = load_spec(spec_path)
+        except Exception as e:
+            return {"ok": False, "error": f"spec load failed: {e}"}
+
+        state = store.load_or_init(
+            spec,
+            spec_path=spec_path,
+            pane_target=state_data.get("pane_target", ""),
+            surface_type=state_data.get("surface_type", "tmux"),
+            workspace_root=state_data.get("workspace_root", os.getcwd()),
+        )
+        completed_reviews = set(getattr(state, "completed_reviews", []) or [])
+        completed_reviews.add(reviewer)
+        state.completed_reviews = sorted(completed_reviews)
+        store.append_session_event(run_id, "review_acknowledged", {"reviewer": reviewer})
+
+        finish = FinishGate().evaluate(spec, state, cwd=state.workspace_root)
+        if finish["ok"]:
+            state.top_state = TopState.COMPLETED
+            store.append_session_event(run_id, "completed_after_review", {"reviewer": reviewer})
+        store.save(state)
+        return {"ok": True, "run_id": run_id, "top_state": state.top_state.value}
 
     # ------------------------------------------------------------------
     # P0: list + observe

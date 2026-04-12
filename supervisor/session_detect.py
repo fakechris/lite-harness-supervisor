@@ -17,7 +17,7 @@ from pathlib import Path
 
 def detect_agent() -> str:
     """Detect which agent environment we're in."""
-    if (Path.home() / ".codex").exists() and os.environ.get("CODEX_SESSION_ID"):
+    if (Path.home() / ".codex").exists() and _codex_session_env_id():
         return "codex"
     # Check for recent Codex session files
     codex_sessions = Path.home() / ".codex" / "sessions"
@@ -39,7 +39,7 @@ def detect_session_id(agent: str = "") -> str:
 
     if agent == "codex":
         # Try env var first
-        sid = os.environ.get("CODEX_SESSION_ID", "")
+        sid = _codex_session_env_id()
         if sid:
             return sid
         # Fall back to most recent rollout file
@@ -62,6 +62,31 @@ def detect_session_id(agent: str = "") -> str:
         return ""
 
     return ""
+
+
+def find_jsonl_for_session(session_id: str, agent: str = "") -> Path | None:
+    """Find the transcript file for a specific session ID."""
+    if not session_id:
+        return None
+    if not agent:
+        agent = detect_agent()
+
+    if agent == "codex":
+        base = Path.home() / ".codex" / "sessions"
+        if not base.exists():
+            return None
+        candidates = sorted(
+            base.rglob(f"rollout-*-{session_id}.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        return candidates[0] if candidates else None
+
+    if agent == "claude":
+        path = Path.home() / ".claude" / "transcripts" / f"ses_{session_id}.jsonl"
+        return path if path.exists() else None
+
+    return None
 
 
 def find_latest_jsonl(agent: str = "") -> Path | None:
@@ -89,6 +114,13 @@ def find_latest_jsonl(agent: str = "") -> Path | None:
         return candidates[0] if candidates else None
 
     return None
+
+
+def _codex_session_env_id() -> str:
+    return (
+        os.environ.get("CODEX_SESSION_ID", "")
+        or os.environ.get("CODEX_THREAD_ID", "")
+    )
 
 
 def detect_cwd_from_jsonl(jsonl_path: Path, agent: str = "") -> str:
