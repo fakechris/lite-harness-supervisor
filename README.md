@@ -89,6 +89,9 @@ cat > .supervisor/specs/my-plan.yaml << 'EOF'
 kind: linear_plan
 id: my_feature
 goal: implement feature X with tests
+approval:
+  required: true
+  status: draft
 finish_policy:
   require_all_steps_done: true
   require_verification_pass: true
@@ -122,9 +125,13 @@ steps:
         expect: pass
 EOF
 
-# Start your agent in a tmux pane, then attach the supervisor immediately
+# Approve the draft spec, then attach
+thin-supervisor spec approve --spec .supervisor/specs/my-plan.yaml --by human
 scripts/thin-supervisor-attach.sh my-plan
 ```
+
+Execution entry points reject draft specs. This is deliberate: the
+clarify/approve step is part of the contract.
 
 ## What happens next
 
@@ -246,6 +253,7 @@ thin-supervisor run export <run_id> [--output file]
 thin-supervisor run summarize <run_id> [--json]
 thin-supervisor run replay <run_id> [--json]
 thin-supervisor run postmortem <run_id> [--output file]
+thin-supervisor spec approve --spec <spec> [--by human]
 
 thin-supervisor status                                     # Active runs in current worktree
 thin-supervisor list                                       # Detailed active-run view
@@ -323,7 +331,8 @@ Install for Codex:
 cp -r skills/thin-supervisor-codex ~/.codex/skills/thin-supervisor
 ```
 
-Invoke with `/thin-supervisor` to auto-generate a spec and start supervised execution.
+Invoke with `/thin-supervisor` to run the default clarify-first flow:
+clarify -> draft spec -> user approval -> attach -> supervised execution.
 
 ## Oracle Consultation
 

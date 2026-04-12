@@ -6,7 +6,7 @@
 
 1. **Takeover layer, not replacement layer.** Users stay in Codex / Claude. Supervisor intervenes only in supervised mode.
 2. **Session-first.** The system's truth lives in `SessionRun`, not in any process or pane.
-3. **Acceptance-first.** `WorkflowSpec` defines how to do it. `AcceptanceContract` defines what counts as done.
+3. **Acceptance-first.** `WorkflowSpec` defines how to do it. `AcceptanceContract` defines what counts as done. `WorkflowSpec.approval` defines whether the plan is still draft or cleared to execute.
 4. **Surface is a hand.** tmux, open-relay, transcript-backed JSONL observation, and future browsers are all just `ExecutionSurface` implementations. None is the system itself.
 5. **Capability-aware.** Supervision intensity adapts to worker strength, risk, and failure history. A thin supervisor does NOT micromanage a strong worker.
 6. **Collaboration supplements, doesn't replace correctness.** Notes, observation, and cross-run coordination enhance the system but never substitute for checkpoint + verifier + acceptance.
@@ -98,7 +98,7 @@ Testing-oriented pause handling now sits above that layer: `pause_handling_mode=
 
 | Object | File | Key Fields |
 |--------|------|------------|
-| WorkflowSpec | `domain/models.py` | kind, id, goal, steps/nodes, finish_policy, acceptance |
+| WorkflowSpec | `domain/models.py` | kind, id, goal, steps/nodes, finish_policy, acceptance, approval |
 | Checkpoint | `domain/models.py` | status, current_node, summary, run_id, checkpoint_seq, checkpoint_id, surface_id |
 | SupervisorDecision | `domain/models.py` | decision_id, decision, reason, confidence, gate_type, triggered_by_seq |
 | HandoffInstruction | `domain/models.py` | instruction_id, content, node_id, triggered_by_decision_id, trigger_type |

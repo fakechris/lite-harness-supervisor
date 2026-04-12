@@ -32,10 +32,13 @@ You focus on execution. It handles the orchestration.
 
 ## Stage 1: Clarify
 
-**Skip** if the user's request has concrete signals (file path, function
-name, issue number, test command, acceptance criteria). Go to Stage 2.
+**Default behavior**: always start with a clarify pass before planning or
+attaching. Do not jump directly from a user request to execution.
 
-Otherwise, ask ONE question per round to clarify:
+Explore the codebase first. Never ask for facts you can discover.
+
+If the request is still ambiguous, ask **ONE question per round** until the
+task contract is clear:
 1. Intent — Why?
 2. Outcome — What does success look like?
 3. Scope — What's in/out?
@@ -43,7 +46,10 @@ Otherwise, ask ONE question per round to clarify:
 5. Acceptance criteria — How to verify?
 6. Decision boundaries — What can you decide alone?
 
-Explore the codebase first. Never ask for facts you can discover.
+If the request is already concrete, do a **contract confirmation pass**
+instead of skipping clarify: summarize your inferred goal, scope,
+non-goals, and acceptance criteria, then ask the user to confirm or
+correct that understanding before planning.
 
 Write clarification to `.supervisor/clarify/<slug>.md`.
 
@@ -59,6 +65,9 @@ Write to `.supervisor/specs/<slug>.yaml`:
 kind: linear_plan
 id: <slug>
 goal: <one-line goal>
+approval:
+  required: true
+  status: draft
 finish_policy:
   require_all_steps_done: true
   require_verification_pass: true
@@ -100,14 +109,19 @@ Write review to `.supervisor/plans/<slug>-review.md`.
 Show user: spec summary + acceptance criteria + self-review verdict.
 User chooses: Approve / Adjust / Reject.
 
-Skip if user said "just run it".
+Do **not** attach or begin implementation until the user explicitly
+approves the spec.
 
-As soon as the user approves, or if approval is skipped, attach the
+As soon as the user approves, mark the spec approved and then attach the
 supervisor BEFORE any implementation work:
 
 ```bash
+thin-supervisor spec approve --spec .supervisor/specs/<slug>.yaml --by human
 scripts/thin-supervisor-attach.sh <slug>
 ```
+
+Execution commands will reject a draft spec. This is intentional: the
+approval step is part of the contract, not optional ceremony.
 
 Do not start coding, git cleanup, worktree edits, or long test runs
 until this command succeeds.

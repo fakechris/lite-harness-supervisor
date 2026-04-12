@@ -177,6 +177,19 @@ class RuntimePolicy:
     max_retries_per_node: int = 3
     max_retries_global: int = 12
 
+
+@dataclass
+class SpecApproval:
+    required: bool = False
+    status: str = "approved"            # draft | approved
+    approved_by: str = ""
+    approved_at: str = ""
+
+    def __post_init__(self):
+        valid_status = {"draft", "approved"}
+        if self.status not in valid_status:
+            raise ValueError(f"invalid approval.status: {self.status!r} (expected one of {valid_status})")
+
 @dataclass
 class WorkflowSpec:
     kind: str
@@ -187,6 +200,7 @@ class WorkflowSpec:
     finish_policy: FinishPolicy = field(default_factory=FinishPolicy)
     policy: RuntimePolicy = field(default_factory=RuntimePolicy)
     acceptance: AcceptanceContract | None = None
+    approval: SpecApproval = field(default_factory=SpecApproval)
 
     def ordered_nodes(self) -> list[StepSpec]:
         return self.steps if self.kind == "linear_plan" else self.nodes

@@ -2,7 +2,7 @@ from __future__ import annotations
 import pathlib
 import yaml
 
-from supervisor.domain.models import WorkflowSpec, StepSpec, VerifyCheck, BranchOption, FinishPolicy, RuntimePolicy, AcceptanceContract
+from supervisor.domain.models import WorkflowSpec, StepSpec, VerifyCheck, BranchOption, FinishPolicy, RuntimePolicy, AcceptanceContract, SpecApproval
 
 class SpecValidationError(ValueError):
     pass
@@ -84,6 +84,19 @@ def load_spec(path: str) -> WorkflowSpec:
     else:
         acceptance = AcceptanceContract.from_finish_policy(finish_policy, goal=data.get("goal", ""))
 
+    approval_data = data.get("approval", {})
+    if approval_data is None:
+        approval_data = {}
+    if not isinstance(approval_data, dict):
+        raise SpecValidationError("approval must be a YAML mapping")
+    approval_required = approval_data.get("required", False)
+    approval = SpecApproval(
+        required=approval_required,
+        status=approval_data.get("status", "draft" if approval_required else "approved"),
+        approved_by=approval_data.get("approved_by", ""),
+        approved_at=approval_data.get("approved_at", ""),
+    )
+
     steps = _parse_nodes(data.get("steps", []))
     nodes = _parse_nodes(data.get("nodes", []))
 
@@ -101,4 +114,5 @@ def load_spec(path: str) -> WorkflowSpec:
         finish_policy=finish_policy,
         policy=policy,
         acceptance=acceptance,
+        approval=approval,
     )

@@ -4,8 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import yaml
 
 from supervisor import app
+from supervisor.config import RuntimeConfig
 
 
 class _DaemonWithNoRuns:
@@ -248,6 +250,84 @@ class _DaemonForOracle:
             "metadata": metadata or {},
         })
         return {"ok": True, "note_id": "note_123"}
+
+
+def _write_draft_spec(path: Path) -> None:
+    path.write_text(
+        "kind: linear_plan\n"
+        "id: draft_plan\n"
+        "goal: test approval gate\n"
+        "approval:\n"
+        "  required: true\n"
+        "  status: draft\n"
+        "steps:\n"
+        "  - id: s1\n"
+        "    type: task\n"
+        "    objective: do something\n"
+        "    verify:\n"
+        "      - type: command\n"
+        "        run: echo ok\n"
+        "        expect: pass\n"
+    )
+
+
+def test_run_register_rejects_draft_spec_before_starting_daemon(
+    tmp_path, monkeypatch, capsys,
+):
+    spec_path = tmp_path / "draft.yaml"
+    _write_draft_spec(spec_path)
+    monkeypatch.setattr(app.RuntimeConfig, "load", lambda path: RuntimeConfig())
+    monkeypatch.setattr(app, "_ensure_daemon", lambda *_: (_ for _ in ()).throw(AssertionError("daemon should not start")))
+
+    result = app.cmd_run_register(argparse.Namespace(
+        spec=str(spec_path),
+        pane="%1",
+        target=None,
+        surface="tmux",
+        config=None,
+    ))
+
+    assert result == 1
+    out = capsys.readouterr().out
+    assert "requires user approval" in out
+    assert "thin-supervisor spec approve --spec" in out
+
+
+def test_run_foreground_rejects_draft_spec(tmp_path, monkeypatch, capsys):
+    spec_path = tmp_path / "draft.yaml"
+    _write_draft_spec(spec_path)
+    monkeypatch.setattr(app.RuntimeConfig, "load", lambda path: RuntimeConfig())
+
+    result = app.cmd_run_foreground(argparse.Namespace(
+        spec=str(spec_path),
+        pane="%1",
+        target=None,
+        surface="tmux",
+        config=None,
+    ))
+
+    assert result == 1
+    out = capsys.readouterr().out
+    assert "requires user approval" in out
+
+
+def test_spec_approve_updates_yaml_status(tmp_path, capsys):
+    spec_path = tmp_path / "draft.yaml"
+    _write_draft_spec(spec_path)
+
+    result = app.cmd_spec(argparse.Namespace(
+        spec_action="approve",
+        spec=str(spec_path),
+        by="human",
+    ))
+
+    assert result == 0
+    data = yaml.safe_load(spec_path.read_text())
+    assert data["approval"]["status"] == "approved"
+    assert data["approval"]["approved_by"] == "human"
+    assert data["approval"]["approved_at"]
+    out = capsys.readouterr().out
+    assert "Spec approved" in out
 
 
 def test_oracle_consult_json_output(tmp_path, monkeypatch, capsys):

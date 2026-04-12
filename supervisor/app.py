@@ -12,7 +12,6 @@ import time as _time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
 from supervisor.loop import SupervisorLoop
 from supervisor.config import RuntimeConfig
@@ -21,6 +20,7 @@ from supervisor.global_registry import find_pane_owner, list_daemons
 from supervisor.interventions import AutoInterventionManager
 from supervisor.notifications import NotificationManager
 from supervisor.pause_summary import summarize_state
+from supervisor.spec_approval import approve_spec, load_runnable_spec
 
 
 SUPERVISOR_DIR = ".supervisor"
@@ -247,8 +247,14 @@ def cmd_run_register(args):
         return 1
     pane_target = target
 
-    client = _ensure_daemon(args.config)
     spec_path = os.path.abspath(args.spec)
+    try:
+        load_runnable_spec(spec_path)
+    except Exception as exc:
+        print(f"Error: {exc}")
+        return 1
+
+    client = _ensure_daemon(args.config)
     workspace_root = os.getcwd()
 
     result = client.register(spec_path, pane_target, workspace_root=workspace_root, surface_type=surface)
@@ -264,7 +270,11 @@ def cmd_run_register(args):
 
 def cmd_run_foreground(args):
     """Run a single sidecar in foreground (no daemon needed)."""
-    spec = load_spec(args.spec)
+    try:
+        spec = load_runnable_spec(args.spec)
+    except Exception as exc:
+        print(f"Error: {exc}")
+        return 1
     config = RuntimeConfig.load(args.config or CONFIG_FILE)
 
     target, surface_type = _resolve_target_and_surface(args, config)
@@ -338,8 +348,14 @@ def cmd_run_resume(args):
     if not target:
         return 1
 
-    client = _ensure_daemon(getattr(args, "config", None))
     spec_path = os.path.abspath(args.spec)
+    try:
+        load_runnable_spec(spec_path)
+    except Exception as exc:
+        print(f"Error: {exc}")
+        return 1
+
+    client = _ensure_daemon(getattr(args, "config", None))
 
     result = client.resume(spec_path, target, surface_type=surface)
     if result.get("ok"):
@@ -745,6 +761,23 @@ def cmd_oracle(args):
         print("\nResponse:\n")
         print(payload.get("response_text", ""))
     return 0
+
+
+def cmd_spec(args):
+    """Manage spec lifecycle operations."""
+    if args.spec_action == "approve":
+        try:
+            approval = approve_spec(args.spec, approved_by=args.by)
+        except Exception as exc:
+            print(f"Error: {exc}")
+            return 1
+        print(f"Spec approved: {os.path.abspath(args.spec)}")
+        print(f"  by: {approval.get('approved_by', '') or args.by}")
+        print(f"  at: {approval.get('approved_at', '')}")
+        return 0
+
+    print("Usage: thin-supervisor spec approve --spec <path> [--by human]")
+    return 1
 
 
 # ------------------------------------------------------------------
@@ -1172,6 +1205,13 @@ def main():
     skill_sub = p_skill.add_subparsers(dest="skill_action")
     skill_sub.add_parser("install", help="Auto-detect agent and install skill")
 
+    # spec
+    p_spec = sub.add_parser("spec", help="Manage spec lifecycle state")
+    spec_sub = p_spec.add_subparsers(dest="spec_action")
+    p_spec_approve = spec_sub.add_parser("approve", help="Mark a draft spec approved for execution")
+    p_spec_approve.add_argument("--spec", required=True, help="Path to spec YAML")
+    p_spec_approve.add_argument("--by", default="human", help="Approver label")
+
     # session
     p_session = sub.add_parser("session", help="Session detection")
     session_sub = p_session.add_subparsers(dest="session_action")
@@ -1264,6 +1304,8 @@ def main():
         else:
             print("Usage: thin-supervisor skill {install}")
             sys.exit(1)
+    elif args.command == "spec":
+        sys.exit(cmd_spec(args))
     elif args.command == "session":
         if args.session_action in ("detect", "jsonl", "list"):
             sys.exit(cmd_session(args))
