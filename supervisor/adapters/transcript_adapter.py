@@ -15,9 +15,8 @@ class TranscriptAdapter:
         return checkpoints[-1] if checkpoints else None
 
     def parse_checkpoints(self, text: str, *, run_id: str = "", surface_id: str = "") -> list[Checkpoint]:
-        """Parse the most recent checkpoint from terminal output.
+        """Parse all checkpoints from terminal output in appearance order.
 
-        Returns a list of Checkpoint dataclasses in appearance order.
         *run_id* and *surface_id* are filled in by the caller (supervisor loop)
         to ensure identity even if the agent omitted them.
         """

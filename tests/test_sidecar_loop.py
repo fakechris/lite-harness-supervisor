@@ -43,6 +43,22 @@ class MockTerminal:
         self._read_done = False
 
 
+class ConsumeTrackingTerminal(MockTerminal):
+    def __init__(self, outputs: list[str]):
+        super().__init__(outputs)
+        self.consume_calls = 0
+        self._inject_calls = 0
+
+    def inject(self, text: str) -> None:
+        self._inject_calls += 1
+        if self._inject_calls > 1:
+            raise RuntimeError("delivery failed")
+        super().inject(text)
+
+    def consume_checkpoint(self) -> None:
+        self.consume_calls += 1
+
+
 def _make_checkpoint(status: str, node: str, summary: str) -> str:
     return (
         f"<checkpoint>\n"
@@ -182,3 +198,20 @@ def test_sidecar_injects_initial_instruction_before_first_checkpoint(tmp_path):
     final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
     assert final.top_state == TopState.COMPLETED
     assert terminal.injected[0].startswith("write a failing test")
+
+
+def test_sidecar_does_not_consume_checkpoint_buffer_when_followup_inject_fails(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    terminal = ConsumeTrackingTerminal([
+        "",
+        _make_checkpoint("step_done", "write_test", "wrote the test"),
+    ])
+
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+
+    assert final.top_state == TopState.PAUSED_FOR_HUMAN
+    assert terminal.consume_calls == 0

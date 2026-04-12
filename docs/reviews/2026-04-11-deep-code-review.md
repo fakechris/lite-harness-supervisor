@@ -306,7 +306,7 @@ Traced all code paths:
 
 ### Resume flow trace
 
-```
+```text
 User: thin-supervisor run resume --spec plan.yaml --pane %42
 → cmd_run_resume → client.resume(spec, pane)
 → daemon._do_resume:

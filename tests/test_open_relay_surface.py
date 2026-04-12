@@ -59,6 +59,15 @@ class TestOpenRelaySurfaceInject:
         assert "hello world" in cmd
         assert "key:enter" in cmd
 
+    def test_inject_does_not_queue_echo_filter_when_send_fails(self):
+        surface = OpenRelaySurface("sess-123")
+
+        with patch.object(surface, "_oly", side_effect=OpenRelaySurfaceError("boom")):
+            with pytest.raises(OpenRelaySurfaceError, match="boom"):
+                surface.inject("hello world")
+
+        assert surface._pending_echo_filters == []
+
 
 class TestOpenRelaySurfaceCwd:
     @patch("subprocess.run")
@@ -73,6 +82,17 @@ class TestOpenRelaySurfaceCwd:
         mock_run.side_effect = FileNotFoundError()
         surface = OpenRelaySurface("sess-123")
         assert surface.current_cwd() == ""
+
+
+class TestOpenRelaySurfaceEchoFiltering:
+    def test_strip_pending_echoes_only_removes_trailing_echo_line(self):
+        surface = OpenRelaySurface("sess-123")
+        surface._pending_echo_filters = ["hello world"]
+
+        content = "hello world from agent\nhello world\n"
+
+        assert surface._strip_pending_echoes(content) == "hello world from agent\n"
+        assert surface._pending_echo_filters == []
 
 
 class TestOpenRelaySurfaceDoctor:

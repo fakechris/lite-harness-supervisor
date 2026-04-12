@@ -40,8 +40,9 @@ class OpenRelaySurface:
 
     def inject(self, text: str) -> None:
         """Send text + Enter to the oly session."""
-        self._pending_echo_filters.append(text)
         self._oly("send", self._session_id, text, "key:enter")
+        if text:
+            self._pending_echo_filters.append(text)
 
     def current_cwd(self) -> str:
         """Return empty so verifier falls back to persisted workspace_root.
@@ -110,11 +111,17 @@ class OpenRelaySurface:
     def _strip_pending_echoes(self, content: str) -> str:
         if not self._pending_echo_filters:
             return content
+        lines = content.splitlines(keepends=True)
         remaining: list[str] = []
         for echo in self._pending_echo_filters:
-            if echo and echo in content:
-                content = content.replace(echo, "", 1)
-            else:
+            matched = False
+            if echo:
+                for idx in range(len(lines) - 1, -1, -1):
+                    if lines[idx].rstrip("\r\n") == echo:
+                        del lines[idx]
+                        matched = True
+                        break
+            if not matched:
                 remaining.append(echo)
         self._pending_echo_filters = remaining
-        return content.lstrip("\n")
+        return "".join(lines).lstrip("\n")

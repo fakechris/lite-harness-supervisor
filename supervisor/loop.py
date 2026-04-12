@@ -304,6 +304,12 @@ class SupervisorLoop:
             # #2: validate run_id on startup to avoid stale pane content
             if cp and cp.run_id and cp.run_id != state.run_id:
                 cp = None  # stale checkpoint from previous run
+            if cp:
+                # The pane/session is already emitting progress for the current
+                # node, so avoid re-injecting the same instruction on the first
+                # working checkpoint.
+                state.last_injected_node_id = state.current_node_id
+                state.last_injected_attempt = state.current_attempt
             if not cp:
                 # Skip init inject for observation-only surfaces (agent already running)
                 if not getattr(terminal, "is_observation_only", False):
@@ -341,12 +347,7 @@ class SupervisorLoop:
                 time.sleep(poll_interval)
                 continue
 
-            if hasattr(terminal, "consume_checkpoint"):
-                try:
-                    terminal.consume_checkpoint()
-                except Exception:
-                    pass
-
+            restart_loop = False
             for checkpoint in checkpoints:
                 # #2: reject checkpoints from wrong run
                 if checkpoint.run_id and checkpoint.run_id != state.run_id:
@@ -472,7 +473,8 @@ class SupervisorLoop:
                             trigger_type=trigger,
                             policy=policy,
                         )
-                        # Save state BEFORE inject to prevent replay on crash
+                        # Persist the selected next node before delivery so a
+                        # crash cannot replay the previous instruction.
                         state.last_injected_node_id = state.current_node_id
                         state.last_injected_attempt = state.current_attempt
                         self.store.save(state)
@@ -481,14 +483,22 @@ class SupervisorLoop:
                         logger.info("injected: %s (id=%s, trigger=%s)", node.id, instruction.instruction_id, trigger)
                         if state.top_state == TopState.PAUSED_FOR_HUMAN:
                             return
-                        continue
+                        restart_loop = True
+                        break
 
             # 7. Persist + progress
             self.store.save(state)
+            if hasattr(terminal, "consume_checkpoint"):
+                try:
+                    terminal.consume_checkpoint()
+                except Exception as exc:
+                    logger.debug("consume_checkpoint failed: %s", exc)
             try:
                 write_progress(state, spec, str(self.store.runtime_dir))
             except Exception:
                 pass  # progress is best-effort
+            if restart_loop:
+                continue
 
     def _get_cwd(self, terminal, state=None) -> str | None:
         if hasattr(terminal, "current_cwd"):

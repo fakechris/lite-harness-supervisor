@@ -338,14 +338,6 @@ class DaemonServer:
                     workspace_root=state_data.get("workspace_root", os.getcwd()),
                 )
                 resumed_from = state.top_state.value
-                if state.top_state == TopState.PAUSED_FOR_HUMAN:
-                    state.top_state = TopState.RUNNING
-                    store.append_session_event(
-                        run_id,
-                        "resume_requested",
-                        {"resumed_from": resumed_from},
-                    )
-                    store.save(state)
                 entry = RunEntry(run_id, spec_path, pane_target,
                                  state_data.get("workspace_root", ""),
                                  surface_type=surface_type, thread=None, store=store)
@@ -362,6 +354,14 @@ class DaemonServer:
                     acquired, existing_owner = acquire_pane_lock(pane_target, pane_owner)
                     if not acquired:
                         return {"ok": False, "error": f"pane {pane_target} locked by {existing_owner}"}
+                    if state.top_state == TopState.PAUSED_FOR_HUMAN:
+                        state.top_state = TopState.RUNNING
+                        store.append_session_event(
+                            run_id,
+                            "resume_requested",
+                            {"resumed_from": resumed_from},
+                        )
+                        store.save(state)
                     thread = threading.Thread(
                         target=self._run_worker, args=(entry, target_spec, state),
                         name=f"run-{run_id}", daemon=True,
@@ -386,6 +386,14 @@ class DaemonServer:
 
         with self._lock:
             active_entry = self._runs.get(run_id)
+            if active_entry and active_entry.thread and active_entry.thread.is_alive():
+                return {
+                    "ok": False,
+                    "error": (
+                        f"run {run_id} is currently active; "
+                        "stop it or wait for it to pause before acknowledging review"
+                    ),
+                }
 
         if active_entry is not None:
             store = active_entry.store
@@ -414,6 +422,16 @@ class DaemonServer:
         spec_path = state_data.get("spec_path", "")
         if not spec_path:
             return {"ok": False, "error": f"run {run_id} has no spec_path"}
+        current_spec_hash = StateStore._hash_spec(spec_path)
+        saved_spec_hash = state_data.get("spec_hash", "")
+        if current_spec_hash and saved_spec_hash and current_spec_hash != saved_spec_hash:
+            return {
+                "ok": False,
+                "error": (
+                    "spec was modified since the run was created. "
+                    "Revert the spec to acknowledge the review for this run."
+                ),
+            }
         try:
             spec = load_spec(spec_path)
         except Exception as e:
