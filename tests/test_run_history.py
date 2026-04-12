@@ -128,6 +128,40 @@ def _build_history_workspace(tmp_path: Path) -> tuple[Path, str]:
         ]) + "\n",
         encoding="utf-8",
     )
+    (shared / "friction_events.jsonl").write_text(
+        "\n".join([
+            json.dumps({
+                "event_id": "friction_1",
+                "timestamp": "2026-04-12T00:00:02Z",
+                "kind": "repeated_confirmation",
+                "message": "user approved but agent asked again",
+                "run_id": run_id,
+                "user_id": "default",
+                "signals": ["user_repeated_approval"],
+                "metadata": {},
+            }),
+            json.dumps({
+                "event_id": "friction_2",
+                "timestamp": "2026-04-12T00:00:03Z",
+                "kind": "unexpected_pause_confusion",
+                "message": "user did not realize run was paused",
+                "run_id": "other_run",
+                "user_id": "default",
+                "signals": ["silent_pause"],
+                "metadata": {},
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    (shared / "user_preferences.json").write_text(
+        json.dumps({
+            "default": {
+                "approval_style": "terse",
+                "clarify_tolerance": "low",
+            }
+        }, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     return tmp_path, run_id
 
 
@@ -145,6 +179,8 @@ def test_export_run_includes_state_logs_and_notes(tmp_path, monkeypatch):
     assert len(exported["decision_log"]) == 3
     assert len(exported["session_log"]) == 10
     assert len(exported["notes"]) == 2
+    assert len(exported["friction_events"]) == 1
+    assert exported["user_preferences"]["approval_style"] == "terse"
     assert "spec_snapshot" in exported
     assert exported["spec_snapshot"]["path"].endswith("demo.yaml")
     assert exported["spec_snapshot"]["hash"] == hashlib.sha256(
@@ -166,6 +202,8 @@ def test_summarize_run_reports_counts_and_oracle_links(tmp_path, monkeypatch):
     assert summary["counts"]["verifications_ok"] == 3
     assert summary["counts"]["routing_events"] == 1
     assert summary["counts"]["oracle_notes"] == 1
+    assert summary["counts"]["friction_events"] == 1
+    assert summary["friction_kinds"] == ["repeated_confirmation"]
     assert summary["oracle_consultation_ids"] == ["oracle_123"]
 
 
@@ -194,6 +232,8 @@ def test_render_postmortem_generates_markdown(tmp_path, monkeypatch):
     assert f"# Run Postmortem: {run_id}" in markdown
     assert "Top state: `COMPLETED`" in markdown
     assert "Oracle consultations: `oracle_123`" in markdown
+    assert "Friction events: 1" in markdown
+    assert "Friction kinds: `repeated_confirmation`" in markdown
     assert "Routing events: 1" in markdown
 
 

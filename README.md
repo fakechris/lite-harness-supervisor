@@ -254,6 +254,10 @@ thin-supervisor run summarize <run_id> [--json]
 thin-supervisor run replay <run_id> [--json]
 thin-supervisor run postmortem <run_id> [--output file]
 thin-supervisor spec approve --spec <spec> [--by human]
+thin-supervisor learn friction add --kind <kind> --message "..." [--run-id <run_id>] [--signal <signal>]
+thin-supervisor learn friction list [--run-id <run_id>] [--kind <kind>] [--json]
+thin-supervisor learn prefs set --key <key> --value <value>
+thin-supervisor learn prefs show [--json]
 
 thin-supervisor status                                     # Active runs in current worktree
 thin-supervisor list                                       # Detailed active-run view
@@ -318,6 +322,8 @@ Inspired by [Anthropic's Scaling Managed Agents](https://www.anthropic.com/engin
 3. **Harnesses change, primitives don't.** The current sidecar loop is one harness. The 6 first-class objects (WorkflowSpec, SessionRun, ExecutionSurface, CheckpointEvent, SupervisorDecision, HandoffInstruction) are the stable interface.
 
 4. **Verification is deterministic, not verbal.** "Done" means the verifier passed, not that the agent said so.
+
+5. **Skill evolution happens from structured hindsight, not ad-hoc prompt edits.** `friction_event`s and `user_preference_memory` give the system a durable learning substrate. The intended loop is: capture friction -> summarize/postmortem -> replay/eval candidate policy changes -> update skills/rules only when the offline signal says they are better.
 
 ## Skill Integration
 

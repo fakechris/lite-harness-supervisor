@@ -44,8 +44,9 @@ def test_terminal_adapter_raises_when_text_appears_stuck_in_tail(mock_run):
         adapter.inject("queued instruction")
 
 
+@patch("time.sleep", return_value=None)
 @patch("subprocess.run")
-def test_terminal_adapter_raises_when_wrapped_prompt_stays_visible(mock_run):
+def test_terminal_adapter_accepts_wrapped_prompt_when_working_started(mock_run, _sleep):
     instruction = (
         "Build the admin-side modules for templates, rules, permissions, "
         "statistics, and export workflows."
@@ -77,8 +78,57 @@ def test_terminal_adapter_raises_when_wrapped_prompt_stays_visible(mock_run):
 
     adapter = TerminalAdapter("%0")
     adapter.read()
-    with pytest.raises(InjectionConfirmationError):
-        adapter.inject(instruction)
+    adapter.inject(instruction)
+
+
+@patch("time.sleep", return_value=None)
+@patch("subprocess.run")
+def test_terminal_adapter_retries_enter_when_submit_is_not_confirmed(mock_run, _sleep):
+    instruction = (
+        "Implement notification orchestration, mock/dev DingTalk integrations, "
+        "AI service stubs or implementations, and local development flows."
+    )
+    stuck_snapshot = _mock_run(
+        stdout=(
+            "prior output\n"
+            "› Implement notification orchestration, mock/dev DingTalk integrations,\n"
+            "  AI service stubs or implementations, and local development flows.\n"
+            "\n"
+            "  gpt-5.4 high\n"
+        )
+    )
+    working_snapshot = _mock_run(
+        stdout=(
+            "prior output\n"
+            "› Implement notification orchestration, mock/dev DingTalk integrations,\n"
+            "  AI service stubs or implementations, and local development flows.\n"
+            "• Working (5s • esc to interrupt)\n"
+            "\n"
+            "  gpt-5.4 high\n"
+        )
+    )
+    snapshots = iter([
+        _mock_run(stdout="before\n"),
+        *([stuck_snapshot] * 10),
+        working_snapshot,
+    ])
+
+    def side_effect(cmd, **kwargs):
+        if "capture-pane" in cmd:
+            return next(snapshots, working_snapshot)
+        return _mock_run(stdout="")
+
+    mock_run.side_effect = side_effect
+
+    adapter = TerminalAdapter("%0")
+    adapter.read()
+    adapter.inject(instruction)
+
+    enter_calls = [
+        call for call in mock_run.call_args_list
+        if "send-keys" in call.args[0] and "Enter" in call.args[0]
+    ]
+    assert len(enter_calls) == 2
 
 
 class _FailingInjectTerminal:

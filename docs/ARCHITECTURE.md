@@ -139,6 +139,12 @@ Run events are appended to `session_log.jsonl` with run_id and sequence numbers 
 - gate-decision replay without live injection
 - markdown postmortems under `.supervisor/reports/`
 
+The first learning substrate now also lives beside those artifacts:
+- `.supervisor/runtime/shared/friction_events.jsonl` for append-only UX/behavior failures such as repeated confirmation or pause confusion
+- `.supervisor/runtime/shared/user_preferences.json` for durable per-user preference memory such as approval style or clarify tolerance
+
+These files are intentionally advisory. They are input to hindsight, replay, and future skill/policy tuning. They are not a second source of truth for run state.
+
 ---
 
 ## V1 / V2 Boundary
@@ -162,6 +168,7 @@ Run events are appended to `session_log.jsonl` with run_id and sequence numbers 
 - Stronger reviewer auto-routing
 - Limited worker switching
 - Browser/portal surface design validation
+- Offline skill/policy eval loop that consumes `friction_event`s and replay traces before changing shipped skill behavior
 
 ### Not planned
 
