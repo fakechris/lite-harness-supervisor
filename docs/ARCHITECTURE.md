@@ -7,7 +7,7 @@
 1. **Takeover layer, not replacement layer.** Users stay in Codex / Claude. Supervisor intervenes only in supervised mode.
 2. **Session-first.** The system's truth lives in `SessionRun`, not in any process or pane.
 3. **Acceptance-first.** `WorkflowSpec` defines how to do it. `AcceptanceContract` defines what counts as done.
-4. **Surface is a hand.** tmux, open-relay, future browsers — all just `ExecutionSurface` implementations. None is the system itself.
+4. **Surface is a hand.** tmux, open-relay, transcript-backed JSONL observation, and future browsers are all just `ExecutionSurface` implementations. None is the system itself.
 5. **Capability-aware.** Supervision intensity adapts to worker strength, risk, and failure history. A thin supervisor does NOT micromanage a strong worker.
 6. **Collaboration supplements, doesn't replace correctness.** Notes, observation, and cross-run coordination enhance the system but never substitute for checkpoint + verifier + acceptance.
 
@@ -21,7 +21,7 @@ What the system talks through. Who it talks to.
 
 | Object | Status | Purpose |
 |--------|--------|---------|
-| **ExecutionSurface** | ✅ Implemented | SessionAdapter protocol + tmux + open-relay adapters |
+| **ExecutionSurface** | ✅ Implemented | SessionAdapter protocol + tmux + open-relay adapters + JSONL observation surface |
 | **WorkerProfile** | ⚠️ Maturing | Dataclass exists, config wired, consumed by policy engine |
 
 ### Layer 2: Observation & Event Normalization
@@ -32,7 +32,7 @@ Converting raw terminal/transcript output into structured system events.
 |--------|--------|---------|
 | **CheckpointEvent** | ✅ Implemented | Typed dataclass with identity (run_id, seq, surface_id, checkpoint_id) |
 
-Terminal is currently the primary observation source. Multi-source observation (provider hooks, relay events) is designed but not implemented — see `docs/design/p3-observation-sources.md`.
+Terminal remains the primary interactive observation source, but transcript-backed JSONL observation is now implemented for Codex / Claude sessions that expose native transcript files. Broader multi-source observation (provider hooks, relay events) is still designed but not implemented — see `docs/design/p3-observation-sources.md`.
 
 ### Layer 3: SessionRun & Recovery
 
@@ -42,7 +42,7 @@ A run is a durable, addressable, auditable object.
 |--------|--------|---------|
 | **SessionRun** | ⚠️ Maturing | Wrapper exists with state + acceptance + worker + policy properties. Not yet the single entry point for all run operations. |
 
-Material: `state.json` snapshot, `session_log.jsonl` durable history, per-run runtime dirs, spec hash / surface / workspace resume validation.
+Material: `state.json` snapshot, `session_log.jsonl` durable history, per-run runtime dirs, completed review acknowledgements, and spec hash / surface / workspace resume validation.
 
 ### Layer 4: Acceptance & Verification
 
@@ -50,7 +50,7 @@ Defining "truly done" and proving it.
 
 | Object | Status | Purpose |
 |--------|--------|---------|
-| **AcceptanceContract** | ⚠️ Maturing | Dataclass with goal, required_evidence, forbidden_states, risk_class, must_review_by. FinishGate consumes it. Loader parses optional `acceptance:` YAML section. |
+| **AcceptanceContract** | ⚠️ Maturing | Dataclass with goal, required_evidence, forbidden_states, risk_class, must_review_by. FinishGate consumes it, and `run review --by ...` satisfies reviewer-gated completion. Loader parses optional `acceptance:` YAML section. |
 
 Supporting services: `VerifierSuite` (command / artifact / git / workflow), `FinishGate`.
 
@@ -80,7 +80,7 @@ Routing when supervisor can't resolve alone.
 
 Escalation paths:
 - **Human** — high risk, multi-failure, evidence gaps
-- **Stronger Reviewer** — planned (bounded review, not takeover)
+- **Stronger Reviewer** — reviewer-gated finish acknowledgement is implemented; broader bounded-review routing remains planned
 - **Alternate Executor** — planned (worker switching)
 
 Collaboration plane (`list`, `observe`, `note`) is implemented as CLI + daemon IPC.
@@ -135,13 +135,14 @@ All events are appended to `session_log.jsonl` with run_id and sequence numbers 
 ### V1 (current)
 
 - Native Codex / Claude UX preserved
-- Terminal/transcript as primary observation
+- Terminal plus transcript-backed JSONL observation
 - AcceptanceContract, WorkerProfile, SupervisionPolicy, RoutingDecision dataclasses
 - SupervisionPolicyEngine with 3 modes
 - FinishGate consuming AcceptanceContract
-- tmux + open-relay dual surface
+- tmux + open-relay + JSONL surfaces
 - Single daemon, multi-run
 - Collaboration plane: list / observe / note
+- Reviewer-gated completion with explicit human / stronger reviewer acknowledgement
 
 ### V2 (planned)
 

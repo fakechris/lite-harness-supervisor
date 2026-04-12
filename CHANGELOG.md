@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Observation & Session Binding
+
+- `session jsonl` now prefers the active Codex / Claude session ID before falling back to the newest transcript, which makes JSONL observation bind to the right workspace more reliably.
+- JSONL observation mode now keeps rolling transcript buffers aligned with checkpoint processing so multi-step runs do not silently stall or lose observation state.
+- Open-relay session reads now treat the startup cwd as advisory and fall back to the persisted workspace root during verification, avoiding false passes and false failures after runtime `cd` changes.
+
+### Finish Gate & Recovery
+
+- Reviewer-gated acceptance is now satisfiable: runs can pause for `must_review_by` and resume completion after `thin-supervisor run review <run_id> --by human|stronger_reviewer`.
+- Resume and review acknowledgement now reject spec drift instead of silently re-binding a run to a modified plan.
+- Resume now updates paused state only after the pane lock is acquired, preventing zombie `RUNNING` states when recovery fails.
+
+### Skills & Documentation
+
+- Claude Code and Codex skills now load the reference docs conditionally instead of pulling extra context on every supervised task.
+- Deep review findings for the 2026-04-11 stabilization pass are now recorded in `docs/reviews/2026-04-11-deep-code-review.md`.
+
 ## 0.2.0 (2026-04-10)
 
 ### Architecture
