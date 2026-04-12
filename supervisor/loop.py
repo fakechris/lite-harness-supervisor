@@ -19,6 +19,9 @@ from supervisor.adapters.transcript_adapter import TranscriptAdapter
 from supervisor.instructions.composer import InstructionComposer
 from supervisor.gates.supervision_policy import SupervisionPolicyEngine
 from supervisor.history import latest_oracle_consultation_id_for_run
+from supervisor.interventions import AutoInterventionManager
+from supervisor.notifications import NotificationEvent, NotificationManager
+from supervisor.pause_summary import latest_human_escalation, summarize_state
 from supervisor.progress import write_progress
 
 logger = logging.getLogger(__name__)
@@ -42,7 +45,9 @@ def build_context(spec, state) -> dict:
 class SupervisorLoop:
     def __init__(self, store, judge_model: str | None = None,
                  judge_temperature: float = 0.1, judge_max_tokens: int = 512,
-                 worker_profile: WorkerProfile | None = None):
+                 worker_profile: WorkerProfile | None = None,
+                 notification_manager: NotificationManager | None = None,
+                 auto_intervention_manager: AutoInterventionManager | None = None):
         self.store = store
         self.judge_client = JudgeClient(
             model=judge_model,
@@ -56,6 +61,8 @@ class SupervisorLoop:
         self.composer = InstructionComposer()
         self.policy_engine = SupervisionPolicyEngine()
         self.worker_profile = worker_profile or WorkerProfile()
+        self.notification_manager = notification_manager or NotificationManager()
+        self.auto_intervention_manager = auto_intervention_manager or AutoInterventionManager(mode="notify_only")
 
     def handle_event(self, state, event):
         state.last_event = event
@@ -142,7 +149,15 @@ class SupervisorLoop:
             state.retry_budget.used_global += 1
             if (state.current_attempt >= state.retry_budget.per_node
                     or state.retry_budget.used_global >= state.retry_budget.global_limit):
-                state.top_state = TopState.PAUSED_FOR_HUMAN
+                self._pause_for_human(state, {
+                    "reason": (
+                        f"retry budget exhausted for node {state.current_node_id} "
+                        f"(attempt {state.current_attempt}/{state.retry_budget.per_node}, "
+                        f"global {state.retry_budget.used_global}/{state.retry_budget.global_limit})"
+                    ),
+                    "node_id": state.current_node_id,
+                    "current_attempt": state.current_attempt,
+                })
             else:
                 state.top_state = TopState.RUNNING
             return
@@ -159,9 +174,9 @@ class SupervisorLoop:
             state.top_state = TopState.RUNNING
             return
         if kind == DecisionType.ESCALATE_TO_HUMAN.value:
-            state.top_state = TopState.PAUSED_FOR_HUMAN
-            state.human_escalations.append(
-                decision.to_dict() if hasattr(decision, "to_dict") else decision
+            self._pause_for_human(
+                state,
+                decision.to_dict() if hasattr(decision, "to_dict") else decision,
             )
             # Create RoutingDecision for audit trail
             decision_id = (
@@ -203,8 +218,7 @@ class SupervisorLoop:
                 if finish["ok"]:
                     state.top_state = TopState.COMPLETED
                 else:
-                    state.top_state = TopState.PAUSED_FOR_HUMAN
-                    state.human_escalations.append(finish)
+                    self._pause_for_human(state, finish)
             else:
                 state.current_node_id = next_id
                 state.current_attempt = 0
@@ -214,9 +228,73 @@ class SupervisorLoop:
         state.retry_budget.used_global += 1
         if (state.current_attempt >= state.retry_budget.per_node
                 or state.retry_budget.used_global >= state.retry_budget.global_limit):
-            state.top_state = TopState.PAUSED_FOR_HUMAN
+            self._pause_for_human(state, {
+                "reason": (
+                    f"verification retry budget exhausted for node {state.current_node_id} "
+                    f"(attempt {state.current_attempt}/{state.retry_budget.per_node}, "
+                    f"global {state.retry_budget.used_global}/{state.retry_budget.global_limit})"
+                ),
+                "node_id": state.current_node_id,
+                "verification": verification,
+            })
         else:
             state.top_state = TopState.RUNNING
+
+    def _pause_for_human(self, state, payload: dict | None = None) -> dict:
+        details = dict(payload or {})
+        state.top_state = TopState.PAUSED_FOR_HUMAN
+        state.human_escalations.append(details)
+        summary = summarize_state(state.to_dict())
+        event_payload = dict(details)
+        event_payload["pause_reason"] = summary.get("pause_reason", "")
+        event_payload["next_action"] = summary.get("next_action", "")
+        event_payload["is_waiting_for_review"] = summary.get("is_waiting_for_review", False)
+        self.store.append_session_event(state.run_id, "human_pause", event_payload)
+        self.notification_manager.notify(NotificationEvent(
+            event_type="human_pause",
+            run_id=state.run_id,
+            top_state=state.top_state.value,
+            reason=event_payload["pause_reason"],
+            next_action=event_payload["next_action"],
+            pane_target=state.pane_target,
+            spec_path=state.spec_path,
+            workspace_root=state.workspace_root,
+            surface_type=state.surface_type,
+        ))
+        return event_payload
+
+    def _attempt_auto_intervention(self, spec, state, terminal, payload: dict | None) -> bool:
+        plan = self.auto_intervention_manager.maybe_plan(spec, state, payload or {}, terminal)
+        if not plan:
+            return False
+        try:
+            terminal.inject(plan.instruction)
+        except Exception:
+            logger.exception("auto intervention injection failed")
+            return False
+
+        state.auto_intervention_count += 1
+        state.top_state = TopState.RUNNING
+        record = {
+            "reason": plan.reason,
+            "instruction": plan.instruction,
+            "count": state.auto_intervention_count,
+            "resumed_node": state.current_node_id,
+        }
+        self.store.append_session_event(state.run_id, "auto_intervention", record)
+        self.notification_manager.notify(NotificationEvent(
+            event_type="auto_intervention",
+            run_id=state.run_id,
+            top_state=state.top_state.value,
+            reason=plan.reason,
+            next_action=f"continue current_node {state.current_node_id}",
+            pane_target=state.pane_target,
+            spec_path=state.spec_path,
+            workspace_root=state.workspace_root,
+            surface_type=state.surface_type,
+        ))
+        self.store.save(state)
+        return True
 
     def is_final(self, state) -> bool:
         return state.top_state in FINAL_STATES
@@ -391,11 +469,11 @@ class SupervisorLoop:
                                 "checkpoint_node": checkpoint.current_node,
                                 "state_node": state.current_node_id,
                             }
-                            state.top_state = TopState.PAUSED_FOR_HUMAN
-                            state.human_escalations.append(payload)
                             self.store.append_session_event(
                                 state.run_id, "observation_delivery_stalled", payload
                             )
+                            pause_payload = self._pause_for_human(state, payload)
+                            self._attempt_auto_intervention(spec, state, terminal, pause_payload)
                             self.store.save(state)
                             return
                         logger.info(
@@ -414,12 +492,15 @@ class SupervisorLoop:
                              "count": node_mismatch_count},
                         )
                         if node_mismatch_count >= max_node_mismatch:
-                            state.top_state = TopState.PAUSED_FOR_HUMAN
-                            state.human_escalations.append({
+                            pause_payload = self._pause_for_human(state, {
                                 "reason": f"node mismatch persisted for {node_mismatch_count} checkpoints",
                                 "checkpoint_node": checkpoint.current_node,
                                 "state_node": state.current_node_id,
                             })
+                            if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
+                                node_mismatch_count = 0
+                                restart_loop = True
+                                break
                             self.store.save(state)
                             return
                         continue
@@ -448,6 +529,11 @@ class SupervisorLoop:
                     self.store.append_session_event(state.run_id, "gate_decision", decision.to_dict())
                     self.apply_decision(spec, state, decision)
                     logger.info("decision: %s (id=%s)", decision.decision, decision.decision_id)
+                    if state.top_state == TopState.PAUSED_FOR_HUMAN:
+                        pause_payload = latest_human_escalation(state.to_dict())
+                        if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
+                            restart_loop = True
+                            break
 
                 # 5. Verify
                 if state.top_state == TopState.VERIFYING:
@@ -461,6 +547,11 @@ class SupervisorLoop:
                     self.store.append_session_event(state.run_id, "verification", verification)
                     self.apply_verification(spec, state, verification, cwd=cwd)
                     logger.info("verification ok=%s, state=%s", verification.get("ok"), state.top_state.value)
+                    if state.top_state == TopState.PAUSED_FOR_HUMAN:
+                        pause_payload = latest_human_escalation(state.to_dict())
+                        if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
+                            restart_loop = True
+                            break
 
                 # 6. Inject — #11: save BEFORE inject
                 if state.top_state == TopState.RUNNING:
@@ -534,18 +625,18 @@ class SupervisorLoop:
         try:
             terminal.inject(instruction.content)
         except Exception as exc:
-            state.top_state = TopState.PAUSED_FOR_HUMAN
             payload = {
                 "instruction_id": instruction.instruction_id,
                 "node_id": state.current_node_id,
                 "error": str(exc),
             }
             self.store.append_session_event(state.run_id, "injection_failed", payload)
-            state.human_escalations.append({
+            pause_payload = self._pause_for_human(state, {
                 "reason": str(exc),
                 "node_id": state.current_node_id,
                 "instruction_id": instruction.instruction_id,
             })
+            self._attempt_auto_intervention(None, state, terminal, pause_payload)
             self.store.save(state)
             return False
 

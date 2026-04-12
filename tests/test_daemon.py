@@ -4,10 +4,12 @@ import os
 import socket
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
 from supervisor.daemon.server import DaemonServer
+from supervisor.daemon.server import RunEntry
 from supervisor.daemon.client import DaemonClient
 from supervisor.domain.enums import TopState
 from supervisor.plan.loader import load_spec
@@ -66,6 +68,57 @@ class TestDaemonStatus:
         result = client.status()
         assert result["ok"] is True
         assert result["runs"] == []
+
+    def test_status_includes_pause_reason_and_next_action(self, tmp_path):
+        spec_path = tmp_path / "test.yaml"
+        spec_path.write_text(
+            "kind: linear_plan\n"
+            "id: test\n"
+            "goal: test\n"
+            "steps:\n"
+            "  - id: s1\n"
+            "    type: task\n"
+            "    objective: do something\n"
+            "    verify:\n"
+            "      - type: command\n"
+            "        run: echo ok\n"
+            "        expect: pass\n"
+        )
+        spec = load_spec(str(spec_path))
+        run_dir = tmp_path / "runs" / "run_123"
+        store = StateStore(str(run_dir))
+        state = store.load_or_init(
+            spec,
+            spec_path=str(spec_path),
+            pane_target="%1",
+            workspace_root=str(tmp_path),
+        )
+        state.top_state = TopState.PAUSED_FOR_HUMAN
+        state.human_escalations = [{"reason": "node mismatch persisted for 5 checkpoints"}]
+        store.save(state)
+
+        class _AliveThread:
+            def is_alive(self) -> bool:
+                return True
+
+        server = DaemonServer(runs_dir=str(tmp_path / "runs"))
+        server._runs[state.run_id] = RunEntry(
+            state.run_id,
+            str(spec_path),
+            "%1",
+            str(tmp_path),
+            "tmux",
+            _AliveThread(),
+            store,
+        )
+
+        status = server._do_status()
+        listed = server._do_list_runs()
+
+        assert status["runs"][0]["pause_reason"] == "node mismatch persisted for 5 checkpoints"
+        assert "thin-supervisor run resume" in status["runs"][0]["next_action"]
+        assert listed["runs"][0]["pause_reason"] == "node mismatch persisted for 5 checkpoints"
+        assert "thin-supervisor run resume" in listed["runs"][0]["next_action"]
 
 
 class TestDaemonRegister:

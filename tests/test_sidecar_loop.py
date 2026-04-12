@@ -5,6 +5,8 @@ from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
 from supervisor.loop import SupervisorLoop
 from supervisor.domain.enums import TopState
+from supervisor.interventions import AutoInterventionManager
+from supervisor.notifications import NotificationManager
 
 
 class MockTerminal:
@@ -57,6 +59,14 @@ class ConsumeTrackingTerminal(MockTerminal):
 
     def consume_checkpoint(self) -> None:
         self.consume_calls += 1
+
+
+class RecordingChannel:
+    def __init__(self):
+        self.events = []
+
+    def notify(self, event) -> None:
+        self.events.append(event)
 
 
 def _make_checkpoint(status: str, node: str, summary: str) -> str:
@@ -112,7 +122,8 @@ def test_sidecar_escalation(tmp_path):
     spec = load_spec("specs/examples/linear_plan.example.yaml")
     store = StateStore(str(tmp_path / "runtime"))
     state = store.load_or_init(spec)
-    loop = SupervisorLoop(store)
+    channel = RecordingChannel()
+    loop = SupervisorLoop(store, notification_manager=NotificationManager([channel]))
 
     terminal = MockTerminal([
         (
@@ -136,6 +147,11 @@ def test_sidecar_escalation(tmp_path):
     assert final.top_state == TopState.PAUSED_FOR_HUMAN
     # No instruction should have been injected (escalated to human)
     assert len(terminal.injected) == 0
+    assert channel.events
+    assert channel.events[-1].reason == "checkpoint says blocked"
+
+    session_events = store.session_log_path.read_text().splitlines()
+    assert any('"event_type": "human_pause"' in line for line in session_events)
 
 
 def test_sidecar_skips_duplicate_checkpoints(tmp_path):
@@ -215,3 +231,66 @@ def test_sidecar_does_not_consume_checkpoint_buffer_when_followup_inject_fails(t
 
     assert final.top_state == TopState.PAUSED_FOR_HUMAN
     assert terminal.consume_calls == 0
+
+
+def test_sidecar_notifies_on_checkpoint_mismatch_pause(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(
+        spec,
+        spec_path="/tmp/plan.yaml",
+        pane_target="%0",
+        surface_type="tmux",
+    )
+    channel = RecordingChannel()
+    loop = SupervisorLoop(store, notification_manager=NotificationManager([channel]))
+
+    terminal = MockTerminal([
+        _make_checkpoint("step_done", "write_test", "wrote the test"),
+        _make_checkpoint("working", "final_verify", "mismatch one"),
+        _make_checkpoint("working", "final_verify", "mismatch two"),
+        _make_checkpoint("working", "final_verify", "mismatch three"),
+        _make_checkpoint("working", "final_verify", "mismatch four"),
+        _make_checkpoint("working", "final_verify", "mismatch five"),
+    ])
+
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+
+    assert final.top_state == TopState.PAUSED_FOR_HUMAN
+    assert channel.events
+    assert channel.events[-1].reason == "node mismatch persisted for 5 checkpoints"
+    assert "--pane" in channel.events[-1].next_action
+
+
+def test_sidecar_discards_stale_mismatch_batch_after_auto_intervention(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(
+        spec,
+        spec_path="/tmp/plan.yaml",
+        pane_target="%0",
+        surface_type="tmux",
+    )
+    loop = SupervisorLoop(
+        store,
+        auto_intervention_manager=AutoInterventionManager(
+            mode="notify_then_ai",
+            max_auto_interventions=1,
+        ),
+    )
+
+    stale_batch = "".join(
+        _make_checkpoint("working", "final_verify", f"stale mismatch {idx}")
+        for idx in range(10)
+    )
+    terminal = MockTerminal([
+        _make_checkpoint("step_done", "write_test", "wrote the test"),
+        stale_batch,
+        _make_checkpoint("step_done", "implement_feature", "feature done"),
+        _make_checkpoint("step_done", "final_verify", "all done"),
+    ])
+
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+
+    assert final.top_state == TopState.COMPLETED
+    assert final.auto_intervention_count == 1

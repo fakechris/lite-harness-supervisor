@@ -159,6 +159,37 @@ thin-supervisor run review <run_id> --by human
 thin-supervisor run review <run_id> --by stronger_reviewer
 ```
 
+When a run enters `PAUSED_FOR_HUMAN`, thin-supervisor now derives two user-facing fields:
+- `pause_reason` — why the supervisor stopped
+- `next_action` — the exact recovery command to run next
+
+By default the daemon also emits pause notifications through two built-in channels:
+- `tmux_display` — a `tmux display-message` alert on the supervised pane
+- `jsonl` — durable records in `.supervisor/runtime/notifications.jsonl`
+
+Pause handling is now also policy-driven:
+- `pause_handling_mode: notify_only` — notify and remain paused
+- `pause_handling_mode: notify_then_ai` — notify first, then let the agent attempt an automatic recovery for selected cases such as blocked checkpoints, repeated node mismatch, or retry-budget exhaustion
+
+The default is currently tuned for test periods:
+
+```yaml
+pause_handling_mode: notify_then_ai
+max_auto_interventions: 2
+```
+
+The default config now includes:
+
+```yaml
+notification_channels:
+  - kind: tmux_display
+  - kind: jsonl
+pause_handling_mode: notify_then_ai
+max_auto_interventions: 2
+```
+
+Future delivery targets such as Feishu or Telegram plug into the same channel interface in `supervisor/notifications.py`.
+
 ## Checkpoint Protocol
 
 Agents must emit structured checkpoints for the supervisor to parse:
@@ -234,6 +265,8 @@ thin-supervisor oracle consult --question "..." [--file path ...]
 thin-supervisor skill install                              # Install Codex / Claude skills
 thin-supervisor bridge <action> [args]                     # tmux bridge operations
 ```
+
+If a daemon-managed run pauses, `status` and `list` now show the human-readable reason and the suggested next command. For non-active persisted runs, the same hint appears under `Local state found:`.
 
 ### Bridge subcommands
 

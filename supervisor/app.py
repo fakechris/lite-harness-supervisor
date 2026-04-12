@@ -18,6 +18,9 @@ from supervisor.loop import SupervisorLoop
 from supervisor.config import RuntimeConfig
 from supervisor.adapters.transcript_adapter import TranscriptAdapter
 from supervisor.global_registry import find_pane_owner, list_daemons
+from supervisor.interventions import AutoInterventionManager
+from supervisor.notifications import NotificationManager
+from supervisor.pause_summary import summarize_state
 
 
 SUPERVISOR_DIR = ".supervisor"
@@ -302,6 +305,14 @@ def cmd_run_foreground(args):
         judge_temperature=config.judge_temperature,
         judge_max_tokens=config.judge_max_tokens,
         worker_profile=worker,
+        notification_manager=NotificationManager.from_config(
+            config,
+            runtime_root=store.runtime_root,
+        ),
+        auto_intervention_manager=AutoInterventionManager(
+            mode=config.pause_handling_mode,
+            max_auto_interventions=config.max_auto_interventions,
+        ),
     )
 
     print(f"Foreground sidecar: run={run_id} pane={pane_target} spec={spec.id}")
@@ -467,7 +478,7 @@ def _find_local_run_summaries() -> list[dict]:
     legacy_state = runtime_dir / "state.json"
     if legacy_state.exists():
         try:
-            summaries.append(json.loads(legacy_state.read_text()))
+            summaries.append(summarize_state(json.loads(legacy_state.read_text())))
         except json.JSONDecodeError:
             pass
 
@@ -478,7 +489,7 @@ def _find_local_run_summaries() -> list[dict]:
             if not state_path.exists():
                 continue
             try:
-                summaries.append(json.loads(state_path.read_text()))
+                summaries.append(summarize_state(json.loads(state_path.read_text())))
             except json.JSONDecodeError:
                 continue
 
@@ -499,6 +510,10 @@ def _print_local_state_hint() -> None:
             f"node={state.get('current_node_id', '') or '?'} "
             f"pane={state.get('pane_target', '?')}"
         )
+        if state.get("pause_reason"):
+            print(f"    reason: {state['pause_reason']}")
+        if state.get("next_action"):
+            print(f"    next:   {state['next_action']}")
     print("  These are persisted local state files, not daemon-managed active runs.")
 
 
@@ -526,6 +541,10 @@ def cmd_list(args):
     for r in runs:
         done = ", ".join(r.get("done_nodes", [])) or "(none)"
         print(f"{r['run_id']:<20} {r['pane_target']:<18} {r['top_state']:<15} {r.get('current_node', ''):<20} {done}")
+        if r.get("pause_reason"):
+            print(f"  reason: {r['pause_reason']}")
+        if r.get("next_action"):
+            print(f"  next:   {r['next_action']}")
     return 0
 
 
@@ -846,6 +865,10 @@ def cmd_status(args):
             print(f"{'RUN_ID':<20} {'PANE':<20} {'STATE':<18} {'NODE'}")
             for r in runs:
                 print(f"{r['run_id']:<20} {r['pane_target']:<20} {r['top_state']:<18} {r.get('current_node', '')}")
+                if r.get("pause_reason"):
+                    print(f"  reason: {r['pause_reason']}")
+                if r.get("next_action"):
+                    print(f"  next:   {r['next_action']}")
             return 0
 
     # Fallback: scan run directories
@@ -855,10 +878,14 @@ def cmd_status(args):
         state_path = Path(RUNTIME_DIR) / "state.json"
         if state_path.exists():
             try:
-                state = json.loads(state_path.read_text())
+                state = summarize_state(json.loads(state_path.read_text()))
                 print(f"Run:   {state.get('run_id', '?')}")
                 print(f"State: {state.get('top_state', '?')}")
                 print(f"Node:  {state.get('current_node_id', '?')}")
+                if state.get("pause_reason"):
+                    print(f"Reason: {state['pause_reason']}")
+                if state.get("next_action"):
+                    print(f"Next:   {state['next_action']}")
                 return 0
             except json.JSONDecodeError:
                 print("Error: state.json is corrupt.")
@@ -871,11 +898,15 @@ def cmd_status(args):
         state_path = run_dir / "state.json"
         if state_path.exists():
             try:
-                state = json.loads(state_path.read_text())
+                state = summarize_state(json.loads(state_path.read_text()))
                 if not found:
                     print(f"{'RUN_ID':<20} {'PANE':<20} {'STATE':<18} {'NODE'}")
                     found = True
                 print(f"{state.get('run_id', '?'):<20} {state.get('pane_target', '?'):<20} {state.get('top_state', '?'):<18} {state.get('current_node_id', '')}")
+                if state.get("pause_reason"):
+                    print(f"  reason: {state['pause_reason']}")
+                if state.get("next_action"):
+                    print(f"  next:   {state['next_action']}")
             except json.JSONDecodeError:
                 continue
 
