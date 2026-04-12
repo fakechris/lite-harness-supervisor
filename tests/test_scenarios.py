@@ -223,6 +223,48 @@ class TestScenarioJsonlObservationOnly:
         # Should have written instruction to file (observation-only inject)
         assert len(terminal.injected) >= 1
 
+    def test_observation_only_does_not_require_spec_node_ids(self, tmp_path):
+        spec = load_spec("specs/examples/linear_plan.example.yaml")
+        store = StateStore(str(tmp_path / "runtime"))
+        state = store.load_or_init(spec, workspace_root=str(tmp_path))
+        loop = SupervisorLoop(store)
+
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_example.py").write_text("pass")
+
+        terminal = MockObservationOnlySurface([
+            _make_checkpoint("step_done", "agent_step_a", "wrote tests"),
+            _make_checkpoint("step_done", "agent_step_b", "implemented"),
+            _make_checkpoint("step_done", "agent_step_c", "verified"),
+        ])
+
+        final = loop.run_sidecar(
+            spec, state, terminal, poll_interval=0, read_lines=50, stop_event=_make_stop_event()
+        )
+
+        assert final.top_state == TopState.COMPLETED
+
+    def test_stale_done_node_checkpoint_escalates_in_observation_only_mode(self, tmp_path):
+        spec = load_spec("specs/examples/linear_plan.example.yaml")
+        store = StateStore(str(tmp_path / "runtime"))
+        state = store.load_or_init(spec, workspace_root=str(tmp_path))
+        loop = SupervisorLoop(store)
+
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_example.py").write_text("pass")
+
+        terminal = MockObservationOnlySurface([
+            _make_checkpoint("step_done", "write_test", "wrote tests"),
+            _make_checkpoint("working", "write_test", "still on old node"),
+        ])
+
+        final = loop.run_sidecar(
+            spec, state, terminal, poll_interval=0, read_lines=50, stop_event=_make_stop_event()
+        )
+
+        assert final.top_state == TopState.PAUSED_FOR_HUMAN
+        assert any("observation-only" in e.get("reason", "") for e in final.human_escalations)
+
 
 # ---------------------------------------------------------------------------
 # Scenario 6: cwd fallback

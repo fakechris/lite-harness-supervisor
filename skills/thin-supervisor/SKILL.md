@@ -20,6 +20,16 @@ You focus on execution. It handles the orchestration.
 
 ---
 
+## Context Loading
+
+- When writing or revising a spec, read `references/spec-writing-guide.md`
+- When deciding supervision style or worker trust posture, read `references/supervision-modes.md`
+- When verification fails or a retry plan is needed, read `references/debugging-playbook.md`
+- When deciding whether to escalate or continue, read `references/escalation-rules.md`
+- When a supervised run completes, read `references/improve.md`
+
+---
+
 ## Stage 1: Clarify
 
 **Goal**: Eliminate ambiguity before planning. A vague plan wastes more

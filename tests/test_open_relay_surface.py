@@ -33,6 +33,18 @@ class TestOpenRelaySurfaceRead:
         assert "sess-123" in cmd
         assert "50" in cmd
 
+    @patch("subprocess.run")
+    def test_read_filters_recent_supervisor_echo(self, mock_run):
+        mock_run.side_effect = [
+            _mock_run(),  # inject
+            _mock_run(stdout="supervisor instruction\n<checkpoint>\nstatus: step_done\ncurrent_node: s1\nsummary: ok\n</checkpoint>\n"),
+        ]
+        surface = OpenRelaySurface("sess-123")
+        surface.inject("supervisor instruction")
+        text = surface.read(lines=50)
+        assert "supervisor instruction" not in text
+        assert "<checkpoint>" in text
+
 
 class TestOpenRelaySurfaceInject:
     @patch("subprocess.run")
@@ -47,20 +59,40 @@ class TestOpenRelaySurfaceInject:
         assert "hello world" in cmd
         assert "key:enter" in cmd
 
+    def test_inject_does_not_queue_echo_filter_when_send_fails(self):
+        surface = OpenRelaySurface("sess-123")
+
+        with patch.object(surface, "_oly", side_effect=OpenRelaySurfaceError("boom")):
+            with pytest.raises(OpenRelaySurfaceError, match="boom"):
+                surface.inject("hello world")
+
+        assert surface._pending_echo_filters == []
+
 
 class TestOpenRelaySurfaceCwd:
     @patch("subprocess.run")
-    def test_cwd_from_session_metadata(self, mock_run):
+    def test_cwd_returns_empty_when_only_startup_metadata_is_available(self, mock_run):
         sessions = [{"id": "sess-123", "cwd": "/home/user/project"}]
         mock_run.return_value = _mock_run(stdout=json.dumps(sessions))
         surface = OpenRelaySurface("sess-123")
-        assert surface.current_cwd() == "/home/user/project"
+        assert surface.current_cwd() == ""
 
     @patch("subprocess.run")
     def test_cwd_returns_empty_on_failure(self, mock_run):
         mock_run.side_effect = FileNotFoundError()
         surface = OpenRelaySurface("sess-123")
         assert surface.current_cwd() == ""
+
+
+class TestOpenRelaySurfaceEchoFiltering:
+    def test_strip_pending_echoes_only_removes_trailing_echo_line(self):
+        surface = OpenRelaySurface("sess-123")
+        surface._pending_echo_filters = ["hello world"]
+
+        content = "hello world from agent\nhello world\n"
+
+        assert surface._strip_pending_echoes(content) == "hello world from agent\n"
+        assert surface._pending_echo_filters == []
 
 
 class TestOpenRelaySurfaceDoctor:

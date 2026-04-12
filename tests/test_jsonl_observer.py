@@ -45,6 +45,30 @@ class TestJsonlObserverRead:
         obs = JsonlObserver(str(tmp_path / "nonexistent.jsonl"))
         assert obs.read() == ""
 
+    def test_consume_checkpoint_clears_processed_buffer(self, tmp_path):
+        jsonl = tmp_path / "test.jsonl"
+        checkpoint = (
+            "<checkpoint>\n"
+            "status: step_done\n"
+            "current_node: step1\n"
+            "summary: wrote tests\n"
+            "</checkpoint>"
+        )
+        jsonl.write_text(
+            json.dumps({"type": "event_msg", "payload": {"content": checkpoint}}) + "\n"
+        )
+        obs = JsonlObserver(str(jsonl))
+        first = obs.read()
+        assert "<checkpoint>" in first
+
+        obs.consume_checkpoint()
+        with jsonl.open("a") as f:
+            f.write(json.dumps({"type": "event_msg", "payload": {"content": "follow-up"}}) + "\n")
+
+        second = obs.read()
+        assert "follow-up" in second
+        assert "<checkpoint>" not in second
+
 
 class TestJsonlObserverCheckpoint:
     def test_checkpoint_in_tool_result(self, tmp_path):

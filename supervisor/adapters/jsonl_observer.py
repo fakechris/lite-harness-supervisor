@@ -128,6 +128,13 @@ class JsonlObserver:
             return self._detected_cwd
         return ""
 
+    def consume_checkpoint(self) -> None:
+        """Drop processed checkpoint text from the rolling buffer."""
+        end = self._text_buffer.rfind("</checkpoint>")
+        if end == -1:
+            return
+        self._text_buffer = self._text_buffer[end + len("</checkpoint>"):].lstrip("\n")
+
     def session_id(self) -> str:
         """Return session ID from filename or override."""
         if self._session_id_override:

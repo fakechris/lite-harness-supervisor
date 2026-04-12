@@ -278,6 +278,7 @@ class SupervisorState:
     verification: dict[str, Any] = field(default_factory=lambda: {"last_status": "pending"})
     last_event: dict[str, Any] = field(default_factory=dict)
     last_decision: dict[str, Any] = field(default_factory=dict)
+    completed_reviews: list[str] = field(default_factory=list)
     # P0-B: event-driven injection tracking
     last_injected_node_id: str | None = None
     last_injected_attempt: int = -1
@@ -317,6 +318,7 @@ class SupervisorState:
             verification=data.get("verification", {"last_status": "pending"}),
             last_event=data.get("last_event", {}),
             last_decision=data.get("last_decision", {}),
+            completed_reviews=data.get("completed_reviews", []),
             last_injected_node_id=data.get("last_injected_node_id"),
             last_injected_attempt=data.get("last_injected_attempt", -1),
             checkpoint_seq=data.get("checkpoint_seq", 0),

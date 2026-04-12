@@ -61,6 +61,14 @@ class DaemonClient:
             req["surface_type"] = surface_type
         return self._request(req)
 
+    def ack_review(self, run_id: str, *, reviewer: str) -> dict:
+        """Record reviewer acknowledgement for a run."""
+        return self._request({
+            "action": "ack_review",
+            "run_id": run_id,
+            "reviewer": reviewer,
+        })
+
     def list_runs(self) -> dict:
         """List all active runs with detailed state."""
         return self._request({"action": "list_runs"})
