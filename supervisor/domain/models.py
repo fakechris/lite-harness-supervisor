@@ -314,6 +314,7 @@ class SupervisorState:
     pane_target: str = ""
     surface_type: str = "tmux"
     workspace_root: str = ""
+    auto_intervention_count: int = 0
     schema_version: int = 1
 
     def to_dict(self) -> dict[str, Any]:
@@ -351,5 +352,6 @@ class SupervisorState:
             pane_target=data.get("pane_target", ""),
             surface_type=data.get("surface_type", "tmux"),
             workspace_root=data.get("workspace_root", ""),
+            auto_intervention_count=data.get("auto_intervention_count", 0),
             schema_version=data.get("schema_version", 1),
         )

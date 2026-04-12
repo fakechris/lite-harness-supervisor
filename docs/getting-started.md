@@ -143,6 +143,30 @@ If the spec requires reviewer sign-off (`acceptance.must_review_by`), the run pa
 thin-supervisor run review <run_id> --by human
 ```
 
+For all other `PAUSED_FOR_HUMAN` cases, the recovery command is usually:
+
+```bash
+thin-supervisor run resume --spec .supervisor/specs/<slug>.yaml --pane <target> [--surface ...]
+```
+
+Daemon mode has no standalone GUI, so pause visibility comes from:
+- the supervised pane itself via the default `tmux_display` notification channel
+- `thin-supervisor status` / `thin-supervisor list`, which now print `reason` and `next`
+- `.supervisor/runtime/notifications.jsonl` for durable notification audit logs
+
+The default notification config is:
+
+```yaml
+notification_channels:
+  - kind: tmux_display
+  - kind: jsonl
+pause_handling_mode: notify_then_ai
+max_auto_interventions: 2
+```
+
+Later channels such as Feishu or Telegram should implement the same interface used by `supervisor/notifications.py`.
+In `notify_then_ai` mode, thin-supervisor does not stop at the first human pause candidate. It first emits the notification, then lets the agent attempt a bounded automatic recovery for selected situations such as blocked checkpoints, repeated node mismatch, and retry-budget exhaustion. Reviewer-gated finish pauses still remain human-controlled.
+
 ### 8. Stop
 
 ```bash

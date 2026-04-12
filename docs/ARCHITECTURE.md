@@ -87,6 +87,8 @@ Escalation paths:
 
 Collaboration plane (`list`, `observe`, `note`) is implemented as CLI + daemon IPC.
 Advisory consultation is now available through `thin-supervisor oracle consult`; its outputs are intentionally non-authoritative and can be persisted into the collaboration plane as structured oracle notes. When a later escalation is informed by that note, the routing event can reference the consultation ID for auditability.
+Human-pause visibility now has a dedicated notification layer: the loop derives a stable pause summary (`pause_reason` + `next_action`), records a `human_pause` session event, and dispatches it through pluggable notification channels. Built-in channels today are `tmux_display` for pane-local alerts and `jsonl` for durable notification records; future Feishu/Telegram adapters plug into the same `NotificationChannel` interface in `supervisor/notifications.py`.
+Testing-oriented pause handling now sits above that layer: `pause_handling_mode=notify_then_ai` means “notify first, then let the agent attempt a bounded automatic recovery.” The current heuristic auto-intervention engine handles blocked checkpoints, repeated node mismatch, and retry-budget exhaustion, while reviewer-gated pauses remain human-owned.
 
 ---
 

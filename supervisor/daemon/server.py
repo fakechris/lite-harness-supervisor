@@ -28,6 +28,9 @@ from supervisor.global_registry import (
     unregister_daemon,
     update_daemon,
 )
+from supervisor.interventions import AutoInterventionManager
+from supervisor.notifications import NotificationManager
+from supervisor.pause_summary import summarize_state
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,7 @@ class RunEntry:
 
     def to_dict(self) -> dict:
         state = self._read_state()
+        summary = summarize_state(state or {}) if state else {}
         return {
             "run_id": self.run_id,
             "spec_path": self.spec_path,
@@ -62,6 +66,8 @@ class RunEntry:
             "alive": self.thread.is_alive() if self.thread else False,
             "top_state": state.get("top_state", "UNKNOWN") if state else "UNKNOWN",
             "current_node": state.get("current_node_id", "") if state else "",
+            "pause_reason": summary.get("pause_reason", ""),
+            "next_action": summary.get("next_action", ""),
         }
 
     def _read_state(self) -> dict | None:
@@ -253,6 +259,14 @@ class DaemonServer:
                 judge_temperature=self.config.judge_temperature,
                 judge_max_tokens=self.config.judge_max_tokens,
                 worker_profile=worker,
+                notification_manager=NotificationManager.from_config(
+                    self.config,
+                    runtime_root=entry.store.runtime_root,
+                ),
+                auto_intervention_manager=AutoInterventionManager(
+                    mode=self.config.pause_handling_mode,
+                    max_auto_interventions=self.config.max_auto_interventions,
+                ),
             )
             loop.run_sidecar(
                 spec, state, terminal,
@@ -466,6 +480,7 @@ class DaemonServer:
             runs = []
             for e in self._runs.values():
                 state = e._read_state() or {}
+                summary = summarize_state(state)
                 runs.append({
                     "run_id": e.run_id,
                     "spec_id": state.get("spec_id", ""),
@@ -477,6 +492,8 @@ class DaemonServer:
                     "current_node": state.get("current_node_id", ""),
                     "done_nodes": state.get("done_node_ids", []),
                     "current_attempt": state.get("current_attempt", 0),
+                    "pause_reason": summary.get("pause_reason", ""),
+                    "next_action": summary.get("next_action", ""),
                 })
         return {"ok": True, "runs": runs}
 

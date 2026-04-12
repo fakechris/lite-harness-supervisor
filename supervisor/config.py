@@ -1,7 +1,7 @@
 """Runtime configuration with file / env / defaults layering."""
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 import yaml
@@ -39,6 +39,14 @@ class RuntimeConfig:
     # -- Gate --
     branch_confidence_threshold: float = 0.75
     default_agent_timeout_sec: int = 300
+
+    # -- Notifications --
+    notification_channels: list[dict] = field(default_factory=lambda: [
+        {"kind": "tmux_display"},
+        {"kind": "jsonl"},
+    ])
+    pause_handling_mode: str = "notify_then_ai"  # notify_only | notify_then_ai
+    max_auto_interventions: int = 2
 
     # ------------------------------------------------------------------
     # Constructors
@@ -139,4 +147,16 @@ class RuntimeConfig:
             "\n"
             "# Runtime\n"
             f"runtime_dir: \"{self.runtime_dir}\"\n"
+            "\n"
+            "# Notification channels used when a run pauses for human.\n"
+            "# Built-ins today: tmux_display, jsonl\n"
+            "notification_channels:\n"
+            "  - kind: \"tmux_display\"\n"
+            "  - kind: \"jsonl\"\n"
+            "\n"
+            "# Pause handling strategy.\n"
+            "# notify_only: pause and wait\n"
+            "# notify_then_ai: notify, then let the agent try an automatic recovery first\n"
+            f"pause_handling_mode: \"{self.pause_handling_mode}\"\n"
+            f"max_auto_interventions: {self.max_auto_interventions}\n"
         )
