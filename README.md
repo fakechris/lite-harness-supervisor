@@ -258,6 +258,14 @@ thin-supervisor learn friction add --kind <kind> --message "..." [--run-id <run_
 thin-supervisor learn friction list [--run-id <run_id>] [--kind <kind>] [--json]
 thin-supervisor learn prefs set --key <key> --value <value>
 thin-supervisor learn prefs show [--json]
+thin-supervisor eval list
+thin-supervisor eval run [--suite approval-core] [--json]
+thin-supervisor eval replay --run-id <run_id> [--json]
+thin-supervisor eval compare --suite approval-core --candidate-policy <policy> [--json]
+thin-supervisor eval expand --suite approval-core --output <path> [--variants-per-case 2]
+thin-supervisor eval propose --suite approval-core --objective <goal> [--json]
+
+Add `--save-report` to `run`, `replay`, `compare`, or `propose` to persist a JSON report under `.supervisor/evals/reports/`.
 
 thin-supervisor status                                     # Active runs in current worktree
 thin-supervisor list                                       # Detailed active-run view
@@ -279,6 +287,32 @@ thin-supervisor bridge <action> [args]                     # tmux bridge operati
 ```
 
 If a daemon-managed run pauses, `status` and `list` now show the human-readable reason and the suggested next command. For non-active persisted runs, the same hint appears under `Local state found:`.
+
+`thin-supervisor eval` is the first offline evaluation surface for the new skill-evolution work. The initial bundled suite is `approval-core`, which deterministically checks explicit-approval vs re-ask behavior. `thin-supervisor eval replay --run-id ...` wraps the existing history replay path into the same evaluation surface so policy candidates can be checked against real historical traces. `thin-supervisor eval compare ...` adds a blind `A/B`-style comparator over deterministic suite results so baseline and candidate policies can be compared without hard-coding one output format into the report consumer. `thin-supervisor eval expand ...` generates provenance-tagged synthetic variants from the golden suite so coverage can grow without mutating the original contract set. `thin-supervisor eval propose ...` is the first constrained candidate-generator surface: it summarizes failure cases, consults the advisory/self-review layer, and recommends a policy candidate for a stated objective without automatically changing shipped defaults.
+
+### Real Canary Loop
+
+Yes, you should run real canaries. A safe sequence is:
+
+1. Offline gate
+   Run `eval run`, `eval replay`, `eval compare`, and optionally `eval propose`, all with `--save-report`.
+2. Shadow canary
+   Pick 3-5 real tasks and keep the baseline behavior in charge. Record each finished run with:
+   `thin-supervisor run summarize <run_id>`
+   `thin-supervisor run postmortem <run_id>`
+   `thin-supervisor eval replay --run-id <run_id> --save-report`
+3. Limited rollout
+   If shadow canary stays clean, run 10-20 real tasks with the candidate under close observation.
+
+For each real canary, log friction explicitly when needed:
+
+```bash
+thin-supervisor learn friction add \
+  --kind repeated_confirmation \
+  --message "user had to approve twice" \
+  --run-id <run_id> \
+  --signal user_repeated_approval
+```
 
 ### Bridge subcommands
 
