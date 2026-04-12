@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 
 def _shared_dir(runtime_dir: str | Path = ".supervisor/runtime") -> Path:
@@ -18,6 +21,33 @@ def _friction_path(runtime_dir: str | Path = ".supervisor/runtime") -> Path:
 
 def _prefs_path(runtime_dir: str | Path = ".supervisor/runtime") -> Path:
     return _shared_dir(runtime_dir) / "user_preferences.json"
+
+
+def _prefs_lock_path(runtime_dir: str | Path = ".supervisor/runtime") -> Path:
+    return _shared_dir(runtime_dir) / "user_preferences.lock"
+
+
+def _quarantine_corrupt_prefs(path: Path) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    quarantined = path.with_name(f"{path.name}.corrupt-{timestamp}")
+    path.replace(quarantined)
+    return quarantined
+
+
+def _load_all_preferences(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        quarantined = _quarantine_corrupt_prefs(path)
+        raise ValueError(f"corrupt user preferences store quarantined at {quarantined}") from exc
+    except OSError as exc:
+        raise ValueError(f"failed to read user preferences store: {path}") from exc
+    if not isinstance(data, dict):
+        quarantined = _quarantine_corrupt_prefs(path)
+        raise ValueError(f"corrupt user preferences store quarantined at {quarantined}")
+    return data
 
 
 def append_friction_event(
@@ -77,16 +107,11 @@ def list_friction_events(
 
 def load_user_preferences(runtime_dir: str | Path, *, user_id: str = "default") -> dict:
     path = _prefs_path(runtime_dir)
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
+    data = _load_all_preferences(path)
     prefs = data.get(user_id, {})
-    return prefs if isinstance(prefs, dict) else {}
+    if not isinstance(prefs, dict):
+        raise ValueError(f"user preferences entry for {user_id!r} must be a mapping")
+    return prefs
 
 
 def save_user_preferences(
@@ -95,18 +120,34 @@ def save_user_preferences(
     *,
     user_id: str = "default",
 ) -> dict:
+    if not isinstance(updates, dict):
+        raise ValueError("updates must be a mapping")
     path = _prefs_path(runtime_dir)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    except (OSError, json.JSONDecodeError):
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = _prefs_lock_path(runtime_dir)
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            data = _load_all_preferences(path)
+            current = data.get(user_id, {})
+            if not isinstance(current, dict):
+                raise ValueError(f"user preferences entry for {user_id!r} must be a mapping")
+            merged = dict(current)
+            merged.update(updates)
+            data[user_id] = merged
 
-    current = data.get(user_id, {})
-    if not isinstance(current, dict):
-        current = {}
-    current.update(updates)
-    data[user_id] = current
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return current
+            with NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=str(path.parent),
+                prefix=f"{path.name}.tmp-",
+                delete=False,
+            ) as tmp_handle:
+                tmp_handle.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+                tmp_handle.flush()
+                os.fsync(tmp_handle.fileno())
+                tmp_name = tmp_handle.name
+            os.replace(tmp_name, path)
+            return merged
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)

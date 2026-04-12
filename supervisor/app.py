@@ -797,14 +797,18 @@ def cmd_learn(args):
 
     if args.learn_action == "friction":
         if args.friction_action == "add":
-            event = append_friction_event(
-                runtime_dir,
-                kind=args.kind,
-                message=args.message,
-                run_id=args.run_id or "",
-                user_id=args.user_id or "default",
-                signals=list(getattr(args, "signal", []) or []),
-            )
+            try:
+                event = append_friction_event(
+                    runtime_dir,
+                    kind=args.kind,
+                    message=args.message,
+                    run_id=args.run_id or "",
+                    user_id=args.user_id or "default",
+                    signals=list(getattr(args, "signal", []) or []),
+                )
+            except Exception as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
             if getattr(args, "json", False):
                 print(json.dumps(event, ensure_ascii=False))
             else:
@@ -814,12 +818,16 @@ def cmd_learn(args):
             return 0
 
         if args.friction_action == "list":
-            events = list_friction_events(
-                runtime_dir,
-                run_id=args.run_id or "",
-                kind=args.kind or "",
-                user_id=args.user_id or "",
-            )
+            try:
+                events = list_friction_events(
+                    runtime_dir,
+                    run_id=args.run_id or "",
+                    kind=args.kind or "",
+                    user_id=args.user_id or "",
+                )
+            except Exception as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
             if getattr(args, "json", False):
                 print(json.dumps(events, ensure_ascii=False))
             else:
@@ -829,11 +837,15 @@ def cmd_learn(args):
 
     if args.learn_action == "prefs":
         if args.prefs_action == "set":
-            prefs = save_user_preferences(
-                runtime_dir,
-                {args.key: args.value},
-                user_id=args.user_id or "default",
-            )
+            try:
+                prefs = save_user_preferences(
+                    runtime_dir,
+                    {args.key: args.value},
+                    user_id=args.user_id or "default",
+                )
+            except Exception as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
             if getattr(args, "json", False):
                 print(json.dumps(prefs, ensure_ascii=False))
             else:
@@ -841,7 +853,11 @@ def cmd_learn(args):
             return 0
 
         if args.prefs_action == "show":
-            prefs = load_user_preferences(runtime_dir, user_id=args.user_id or "default")
+            try:
+                prefs = load_user_preferences(runtime_dir, user_id=args.user_id or "default")
+            except Exception as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
             if getattr(args, "json", False):
                 print(json.dumps(prefs, ensure_ascii=False))
             else:

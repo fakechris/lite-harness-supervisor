@@ -30,12 +30,12 @@ def is_waiting_for_review(state: dict[str, Any]) -> bool:
 def status_reason(state: dict[str, Any]) -> str:
     top_state = state.get("top_state", "")
     if top_state == "PAUSED_FOR_HUMAN":
-        return pause_reason(state)
+        return ""
     if top_state == "COMPLETED":
-        return "workflow completed"
+        return "workflow_done"
     current_node = str(state.get("current_node_id", "")).strip()
     if top_state == "RUNNING" and current_node:
-        return f"running {current_node}"
+        return f"working {current_node}"
     return ""
 
 

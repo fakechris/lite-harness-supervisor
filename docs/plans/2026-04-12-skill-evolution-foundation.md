@@ -93,7 +93,7 @@ Expected: FAIL because history export ignores learning artifacts.
 
 **Step 3: Write minimal implementation**
 
-Thread related friction events into:
+Thread run-related friction events into:
 - `export_run()`
 - `summarize_run()`
 - `render_postmortem()`

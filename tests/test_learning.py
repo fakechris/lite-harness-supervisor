@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+import pytest
+
 from supervisor.learning import (
+    _prefs_path,
     append_friction_event,
     list_friction_events,
     load_user_preferences,
@@ -52,3 +58,54 @@ def test_user_preferences_merge_updates(tmp_path):
 
     assert prefs["approval_style"] == "terse"
     assert prefs["clarify_tolerance"] == "low"
+
+
+def test_load_user_preferences_quarantines_corrupt_store(tmp_path):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    path = _prefs_path(runtime_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not-json\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="corrupt user preferences store"):
+        load_user_preferences(runtime_dir)
+
+    quarantined = list(path.parent.glob("user_preferences.json.corrupt-*"))
+    assert len(quarantined) == 1
+    assert not path.exists()
+
+
+def test_save_user_preferences_rejects_corrupt_store_without_overwriting(tmp_path):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    path = _prefs_path(runtime_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not-json\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="corrupt user preferences store"):
+        save_user_preferences(runtime_dir, {"approval_style": "terse"})
+
+    quarantined = list(path.parent.glob("user_preferences.json.corrupt-*"))
+    assert len(quarantined) == 1
+    assert not path.exists()
+
+
+def test_save_user_preferences_preserves_other_users(tmp_path):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    path = _prefs_path(runtime_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "default": {"approval_style": "terse"},
+                "alice": {"clarify_tolerance": "low"},
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+    updated = save_user_preferences(runtime_dir, {"approval_style": "verbose"}, user_id="default")
+
+    assert updated["approval_style"] == "verbose"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["alice"]["clarify_tolerance"] == "low"
