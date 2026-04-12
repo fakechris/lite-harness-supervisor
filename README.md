@@ -5,6 +5,16 @@
 thin-supervisor fixes this. It's an acceptance-centered run supervisor that sits alongside your existing coding agent (Claude Code, Codex, or any CLI agent), watches what the agent does, and makes structured decisions: continue, verify, retry, branch, escalate, or finish. "Done" means the verifier passed and the acceptance contract is satisfied — not that the agent said so. You stay in your familiar agent UI. The supervisor handles the rest.
 
 > **Architecture deep-dive**: See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the six-layer architecture, first-class objects, and design principles.
+>
+> **Docs hub**:
+> - [docs/getting-started.md](docs/getting-started.md) — install and run tmux, open-relay, and JSONL workflows
+> - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — object model, layers, and current implementation status
+> - [CHANGELOG.md](CHANGELOG.md) — release notes and unreleased changes
+> - [docs/design/p2-external-surfaces.md](docs/design/p2-external-surfaces.md) — surface abstraction and roadmap
+> - [docs/design/p3-observation-sources.md](docs/design/p3-observation-sources.md) — observation sources and normalization
+> - [docs/design/p4-jsonl-observation.md](docs/design/p4-jsonl-observation.md) — transcript-backed observation mode
+> - [docs/reviews/2026-04-11-deep-code-review.md](docs/reviews/2026-04-11-deep-code-review.md) — latest deep code review log and remaining-risk audit
+> - [docs/reviews/2026-04-12-amp-supervisor-capability-review.md](docs/reviews/2026-04-12-amp-supervisor-capability-review.md) — Amp-vs-thin-supervisor capability review and oracle-layer roadmap
 
 ```text
 ┌────────────────────────────┐  ┌──────────────────────────┐
@@ -39,7 +49,7 @@ thin-supervisor fixes this. It's an acceptance-centered run supervisor that sits
 | **CheckpointEvent** | What did the agent just report? | Structured status with seq tracking, evidence, and needs |
 | **SupervisorDecision** | What does the control plane think? | Typed gate decision with confidence, reasoning, and causality link |
 | **HandoffInstruction** | What should the agent do next? | Composed instruction with full traceability to the triggering decision |
-| **ExecutionSurface** | How do we talk to the agent? | Protocol for read/inject/cwd — tmux and open-relay implementations |
+| **ExecutionSurface** | How do we talk to the agent? | Protocol for read/inject/cwd — tmux, open-relay, and JSONL observation surfaces |
 | **SessionRun** | Who is this run? | Identity + durable event history — survives crashes, enables recovery |
 
 ### Emerging Architecture (implemented, maturing)
@@ -59,15 +69,20 @@ CheckpointEvent(seq=3) → SupervisorDecision(triggered_by_seq=3) → HandoffIns
 
 ## Quick Start
 
-> **Full guide**: See [docs/getting-started.md](docs/getting-started.md) for step-by-step instructions covering tmux/open-relay + Codex/Claude/OpenCode/Droid.
+> **Full guide**: See [docs/getting-started.md](docs/getting-started.md) for step-by-step instructions covering tmux, open-relay, JSONL observation, and Codex/Claude/OpenCode/Droid workflows.
 
 ```bash
 # Install
 pip install thin-supervisor
 
+# Install the Codex / Claude skills automatically when supported
+thin-supervisor skill install
+
 # Initialize in your project
 cd your-project
 thin-supervisor init
+# If .supervisor/ exists but is missing config, repair the scaffold in place
+thin-supervisor init --repair
 
 # Write a spec (or let the Skill generate one)
 cat > .supervisor/specs/my-plan.yaml << 'EOF'
@@ -121,9 +136,28 @@ scripts/thin-supervisor-attach.sh my-plan
    - **Retry** — verification failed, inject retry instruction with failure details
    - **Branch** — decision node in workflow, select a path
    - **Escalate** — missing credentials, dangerous action, or low confidence — pause for human
-   - **Finish** — all steps done, all verifiers pass, finish policy satisfied
+   - **Finish** — all steps done, all verifiers pass, finish policy and review requirements satisfied
 4. If continuing or retrying, supervisor injects the next instruction into the pane
-5. Everything is logged to `session_log.jsonl` — append-only, durable, recoverable
+5. Run-level decisions are logged to `session_log.jsonl`; project-level bootstrap and repair incidents are logged to `.supervisor/runtime/ops_log.jsonl`
+
+Historical runs can now be turned into stable artifacts and reports:
+
+```bash
+thin-supervisor run export <run_id> > run.json
+thin-supervisor run summarize <run_id> --json
+thin-supervisor run replay <run_id> --json
+thin-supervisor run postmortem <run_id>
+```
+
+`run replay` re-evaluates historical checkpoints with the current gate logic but does not inject or verify against live surfaces. `run postmortem` writes a markdown report under `.supervisor/reports/` by default.
+
+If your spec sets `acceptance.must_review_by`, the run pauses at the finish gate until someone acknowledges review:
+
+```bash
+thin-supervisor run review <run_id> --by human
+# or
+thin-supervisor run review <run_id> --by stronger_reviewer
+```
 
 ## Checkpoint Protocol
 
@@ -165,15 +199,40 @@ All verifiers run in the agent's working directory (pane cwd), not the superviso
 ## CLI
 
 ```bash
-thin-supervisor init [--force]          # Create .supervisor/ directory
-thin-supervisor run register --spec <spec> --pane <target>   # Start daemon-managed run
-thin-supervisor run foreground --spec <spec> --pane <target> # Start foreground sidecar
-thin-supervisor stop                    # Stop daemon
-thin-supervisor ps                      # Show all registered daemons
-thin-supervisor pane-owner <pane>      # Show which run owns a pane
-thin-supervisor status                  # Show current run state
-thin-supervisor deinit [--force]        # Remove .supervisor/
-thin-supervisor bridge <action> [args]  # Tmux pane operations
+thin-supervisor init [--force|--repair]                   # Create or repair .supervisor/ directory
+thin-supervisor deinit [--force]                           # Remove .supervisor/
+
+thin-supervisor daemon start [--config <path>]             # Start background daemon
+thin-supervisor daemon stop                                # Stop daemon
+thin-supervisor stop                                       # Legacy alias for daemon stop
+
+thin-supervisor run register --spec <spec> --pane <target> [--surface tmux|open_relay|jsonl]
+thin-supervisor run foreground --spec <spec> --pane <target> [--surface ...]
+thin-supervisor run stop <run_id>
+thin-supervisor run resume --spec <spec> --pane <target> [--surface ...]
+thin-supervisor run review <run_id> --by human|stronger_reviewer
+thin-supervisor run export <run_id> [--output file]
+thin-supervisor run summarize <run_id> [--json]
+thin-supervisor run replay <run_id> [--json]
+thin-supervisor run postmortem <run_id> [--output file]
+
+thin-supervisor status                                     # Active runs in current worktree
+thin-supervisor list                                       # Detailed active-run view
+thin-supervisor ps                                         # Registered daemons across worktrees
+thin-supervisor pane-owner <pane>                          # Show which run owns a pane
+thin-supervisor observe <run_id>                           # Read-only observation snapshot
+thin-supervisor note add <text> [--type ...] [--run ...]  # Shared notes for coordination
+thin-supervisor note list [--type ...] [--run ...]
+
+thin-supervisor session detect                             # Detect current agent session ID
+thin-supervisor session jsonl                              # Resolve current transcript path
+thin-supervisor session list                               # List recent sessions and cwd
+
+thin-supervisor oracle consult --question "..." [--file path ...]
+                                                            # Advisory second opinion (external or fallback)
+
+thin-supervisor skill install                              # Install Codex / Claude skills
+thin-supervisor bridge <action> [args]                     # tmux bridge operations
 ```
 
 ### Bridge subcommands
@@ -192,9 +251,10 @@ thin-supervisor bridge doctor                 # Check tmux connectivity
 `.supervisor/config.yaml`:
 
 ```yaml
-pane_target: "agent"              # tmux pane label or %id
-poll_interval_sec: 2.0            # seconds between pane reads
-read_lines: 100                   # terminal lines to capture
+surface_type: "tmux"              # tmux | open_relay | jsonl
+surface_target: "agent"           # pane label / oly session ID / transcript path
+poll_interval_sec: 2.0            # seconds between reads
+read_lines: 100                   # lines captured per read
 
 # LLM judge (null = offline stub mode, rules-only)
 judge_model: null                 # e.g., anthropic/claude-haiku-4-5-20251001
@@ -202,7 +262,9 @@ judge_temperature: 0.1
 judge_max_tokens: 512
 ```
 
-Override with environment variables: `SUPERVISOR_PANE_TARGET`, `SUPERVISOR_JUDGE_MODEL`, etc.
+`jsonl` is observation-only: the supervisor can watch checkpoints from a transcript file, but instruction delivery still depends on the agent skill / hook path.
+
+Override with environment variables: `SUPERVISOR_SURFACE_TYPE`, `SUPERVISOR_SURFACE_TARGET`, `SUPERVISOR_PANE_TARGET`, `SUPERVISOR_JUDGE_MODEL`, etc.
 
 ## Design Philosophy
 
@@ -210,7 +272,7 @@ Inspired by [Anthropic's Scaling Managed Agents](https://www.anthropic.com/engin
 
 1. **The system's memory lives in SessionRun, not in the model's context.** Crashes don't lose history. Everything is in `session_log.jsonl`.
 
-2. **The execution surface is just a "hand", not the system.** Today it's tmux. Tomorrow it could be a PTY wrapper or a remote session. The `SessionAdapter` protocol keeps the supervisor decoupled.
+2. **The execution surface is just a "hand", not the system.** Today that includes tmux, open-relay, and transcript-backed JSONL observation. Tomorrow it could be a PTY wrapper or a remote session. The `SessionAdapter` protocol keeps the supervisor decoupled.
 
 3. **Harnesses change, primitives don't.** The current sidecar loop is one harness. The 6 first-class objects (WorkflowSpec, SessionRun, ExecutionSurface, CheckpointEvent, SupervisorDecision, HandoffInstruction) are the stable interface.
 
@@ -230,6 +292,20 @@ cp -r skills/thin-supervisor-codex ~/.codex/skills/thin-supervisor
 
 Invoke with `/thin-supervisor` to auto-generate a spec and start supervised execution.
 
+## Oracle Consultation
+
+If you want an Amp-style "oracle" second opinion without giving up supervisor control, use:
+
+```bash
+thin-supervisor oracle consult \
+  --mode review \
+  --question "Review the retry policy design" \
+  --file supervisor/loop.py \
+  --file supervisor/gates/supervision_policy.py
+```
+
+When an external provider key is configured, thin-supervisor calls that provider as a read-only advisor. Without an external key, it falls back to a self-adversarial review scaffold instead of failing hard. Add `--run <run_id>` to persist the consultation into the shared notes plane for the active supervised run.
+
 ## Development
 
 ```bash
@@ -238,6 +314,8 @@ cd thin-supervisor
 pip install -e ".[dev]"
 pytest -q
 ```
+
+For repo-specific setup and examples, start with [docs/getting-started.md](docs/getting-started.md).
 
 ## License
 

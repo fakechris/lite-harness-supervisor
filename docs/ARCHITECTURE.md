@@ -7,7 +7,7 @@
 1. **Takeover layer, not replacement layer.** Users stay in Codex / Claude. Supervisor intervenes only in supervised mode.
 2. **Session-first.** The system's truth lives in `SessionRun`, not in any process or pane.
 3. **Acceptance-first.** `WorkflowSpec` defines how to do it. `AcceptanceContract` defines what counts as done.
-4. **Surface is a hand.** tmux, open-relay, future browsers — all just `ExecutionSurface` implementations. None is the system itself.
+4. **Surface is a hand.** tmux, open-relay, transcript-backed JSONL observation, and future browsers are all just `ExecutionSurface` implementations. None is the system itself.
 5. **Capability-aware.** Supervision intensity adapts to worker strength, risk, and failure history. A thin supervisor does NOT micromanage a strong worker.
 6. **Collaboration supplements, doesn't replace correctness.** Notes, observation, and cross-run coordination enhance the system but never substitute for checkpoint + verifier + acceptance.
 
@@ -21,8 +21,9 @@ What the system talks through. Who it talks to.
 
 | Object | Status | Purpose |
 |--------|--------|---------|
-| **ExecutionSurface** | ✅ Implemented | SessionAdapter protocol + tmux + open-relay adapters |
+| **ExecutionSurface** | ✅ Implemented | SessionAdapter protocol + tmux + open-relay adapters + JSONL observation surface |
 | **WorkerProfile** | ⚠️ Maturing | Dataclass exists, config wired, consumed by policy engine |
+| **OracleOpinion** | ✅ Implemented | Read-only advisory consultation result from an external or fallback oracle |
 
 ### Layer 2: Observation & Event Normalization
 
@@ -32,7 +33,7 @@ Converting raw terminal/transcript output into structured system events.
 |--------|--------|---------|
 | **CheckpointEvent** | ✅ Implemented | Typed dataclass with identity (run_id, seq, surface_id, checkpoint_id) |
 
-Terminal is currently the primary observation source. Multi-source observation (provider hooks, relay events) is designed but not implemented — see `docs/design/p3-observation-sources.md`.
+Terminal remains the primary interactive observation source, but transcript-backed JSONL observation is now implemented for Codex / Claude sessions that expose native transcript files. Broader multi-source observation (provider hooks, relay events) is still designed but not implemented — see `docs/design/p3-observation-sources.md`.
 
 ### Layer 3: SessionRun & Recovery
 
@@ -42,7 +43,8 @@ A run is a durable, addressable, auditable object.
 |--------|--------|---------|
 | **SessionRun** | ⚠️ Maturing | Wrapper exists with state + acceptance + worker + policy properties. Not yet the single entry point for all run operations. |
 
-Material: `state.json` snapshot, `session_log.jsonl` durable history, per-run runtime dirs, spec hash / surface / workspace resume validation.
+Material: `state.json` snapshot, `session_log.jsonl` durable history, per-run runtime dirs, completed review acknowledgements, and spec hash / surface / workspace resume validation.
+Historical analysis now has a first-class read path through `supervisor.history`: stable export, derived summary, decision replay, and markdown postmortem generation.
 
 ### Layer 4: Acceptance & Verification
 
@@ -50,7 +52,7 @@ Defining "truly done" and proving it.
 
 | Object | Status | Purpose |
 |--------|--------|---------|
-| **AcceptanceContract** | ⚠️ Maturing | Dataclass with goal, required_evidence, forbidden_states, risk_class, must_review_by. FinishGate consumes it. Loader parses optional `acceptance:` YAML section. |
+| **AcceptanceContract** | ⚠️ Maturing | Dataclass with goal, required_evidence, forbidden_states, risk_class, must_review_by. FinishGate consumes it, and `run review --by ...` satisfies reviewer-gated completion. Loader parses optional `acceptance:` YAML section. |
 
 Supporting services: `VerifierSuite` (command / artifact / git / workflow), `FinishGate`.
 
@@ -76,14 +78,15 @@ Routing when supervisor can't resolve alone.
 
 | Object | Status | Purpose |
 |--------|--------|---------|
-| **RoutingDecision** | ⚠️ Maturing | Created on ESCALATE_TO_HUMAN, logged to session_log. Stronger reviewer and worker switching are planned but not implemented. |
+| **RoutingDecision** | ⚠️ Maturing | Created on ESCALATE_TO_HUMAN, logged to session_log, and can carry an advisory `consultation_id` back to a prior oracle note. Stronger reviewer and worker switching are planned but not implemented. |
 
 Escalation paths:
 - **Human** — high risk, multi-failure, evidence gaps
-- **Stronger Reviewer** — planned (bounded review, not takeover)
+- **Stronger Reviewer** — reviewer-gated finish acknowledgement is implemented; broader bounded-review routing remains planned
 - **Alternate Executor** — planned (worker switching)
 
 Collaboration plane (`list`, `observe`, `note`) is implemented as CLI + daemon IPC.
+Advisory consultation is now available through `thin-supervisor oracle consult`; its outputs are intentionally non-authoritative and can be persisted into the collaboration plane as structured oracle notes. When a later escalation is informed by that note, the routing event can reference the consultation ID for auditability.
 
 ---
 
@@ -105,9 +108,11 @@ Collaboration plane (`list`, `observe`, `note`) is implemented as CLI + daemon I
 | AcceptanceContract | `domain/models.py` | goal, required_evidence, forbidden_states, risk_class, must_review_by |
 | WorkerProfile | `domain/models.py` | worker_id, provider, model_name, role, trust_level |
 | SupervisionPolicy | `domain/models.py` | mode, reason, risk_class, failure_threshold |
-| RoutingDecision | `domain/models.py` | routing_id, target_type, scope, reason, triggered_by_decision_id |
+| RoutingDecision | `domain/models.py` | routing_id, target_type, scope, reason, triggered_by_decision_id, consultation_id |
+| OracleOpinion | `domain/models.py` | provider, model_name, mode, question, files, response_text, source |
 | SessionRun | `domain/session.py` | state + acceptance_contract + worker_profile + supervision_policy + routing_history |
 | ExecutionSurface | `adapters/session_adapter.py` | read, inject, current_cwd, session_id, doctor |
+| RunHistory Export | `history.py` | schema_version, state, decision_log, session_log, notes |
 
 ### Planned (design docs exist, not implemented)
 
@@ -126,7 +131,11 @@ Every instruction traces back through decision to the checkpoint that triggered 
 Checkpoint(seq=N) → SupervisorDecision(triggered_by_seq=N) → HandoffInstruction(triggered_by_decision_id=X)
 ```
 
-All events are appended to `session_log.jsonl` with run_id and sequence numbers for durable audit.
+Run events are appended to `session_log.jsonl` with run_id and sequence numbers for durable audit. Project-level bootstrap and scaffold repairs are appended to `.supervisor/runtime/ops_log.jsonl` so pre-run operational incidents are preserved too. Historical analysis reads those append-only artifacts and produces:
+- stable JSON exports
+- derived run summaries
+- gate-decision replay without live injection
+- markdown postmortems under `.supervisor/reports/`
 
 ---
 
@@ -135,13 +144,15 @@ All events are appended to `session_log.jsonl` with run_id and sequence numbers 
 ### V1 (current)
 
 - Native Codex / Claude UX preserved
-- Terminal/transcript as primary observation
+- Terminal plus transcript-backed JSONL observation
 - AcceptanceContract, WorkerProfile, SupervisionPolicy, RoutingDecision dataclasses
 - SupervisionPolicyEngine with 3 modes
 - FinishGate consuming AcceptanceContract
-- tmux + open-relay dual surface
+- tmux + open-relay + JSONL surfaces
 - Single daemon, multi-run
 - Collaboration plane: list / observe / note
+- Advisory oracle consultation plane (`thin-supervisor oracle consult`)
+- Reviewer-gated completion with explicit human / stronger reviewer acknowledgement
 
 ### V2 (planned)
 

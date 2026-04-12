@@ -78,7 +78,8 @@ class DaemonClient:
         return self._request({"action": "observe", "run_id": run_id})
 
     def note_add(self, content: str, *, note_type: str = "context",
-                 author_run_id: str = "human", title: str = "") -> dict:
+                 author_run_id: str = "human", title: str = "",
+                 metadata: dict | None = None) -> dict:
         """Add a shared note."""
         return self._request({
             "action": "note_add",
@@ -86,6 +87,7 @@ class DaemonClient:
             "note_type": note_type,
             "author_run_id": author_run_id,
             "title": title,
+            "metadata": metadata or {},
         })
 
     def note_list(self, *, note_type: str = "", run_id: str = "",

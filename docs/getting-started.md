@@ -2,7 +2,7 @@
 
 This guide walks you through setting up thin-supervisor from scratch. Pick the combination that matches your setup:
 
-- **Execution Surface**: tmux (default) or open-relay
+- **Execution Surface**: tmux (default), open-relay, or JSONL observation mode
 - **AI Agent**: Codex, Claude Code, OpenCode, Droid, or any CLI agent
 
 ---
@@ -16,7 +16,7 @@ pip install thin-supervisor
 thin-supervisor --help
 ```
 
-You should see: `{init,deinit,daemon,run,stop,status,bridge}`
+You should see top-level commands including `init`, `daemon`, `run`, `status`, `list`, `observe`, `note`, `session`, and `bridge`.
 
 ---
 
@@ -47,6 +47,7 @@ thin-supervisor init
 ```
 
 This creates `.supervisor/` with config, specs, and runtime directories.
+If the directory already exists but is missing `config.yaml`, run `thin-supervisor init --repair` to restore the scaffold without overwriting the current config.
 
 ### 4. Start the supervisor daemon
 
@@ -91,8 +92,24 @@ thin-supervisor status
 # See every registered daemon across worktrees
 thin-supervisor ps
 
+# Detailed active-run view
+thin-supervisor list
+
 # See who owns a specific pane
 thin-supervisor pane-owner %0
+
+# Observe a specific run without attaching to the pane
+thin-supervisor observe <run_id>
+
+# Shared collaboration notes
+thin-supervisor note add "handoff: waiting on staging token" --type handoff
+thin-supervisor note list
+
+# Export or analyze a completed run
+thin-supervisor run export <run_id>
+thin-supervisor run summarize <run_id>
+thin-supervisor run replay <run_id>
+thin-supervisor run postmortem <run_id>
 
 # Watch the daemon log
 tail -f .supervisor/runtime/daemon.log
@@ -118,6 +135,13 @@ Agent receives instruction, starts step 2
 
 If verification fails, supervisor injects a retry instruction with failure details.
 If agent is blocked, supervisor escalates to you (pauses and waits).
+If you want to improve the system from past runs instead of only watching the live pane, use `run export`, `run summarize`, `run replay`, and `run postmortem` against the finished `run_id`.
+
+If the spec requires reviewer sign-off (`acceptance.must_review_by`), the run pauses at the finish gate until you acknowledge it:
+
+```bash
+thin-supervisor run review <run_id> --by human
+```
 
 ### 8. Stop
 
@@ -212,7 +236,8 @@ thin-supervisor daemon start
 # Register with the oly session ID
 thin-supervisor run register \
   --spec .supervisor/specs/my-plan.yaml \
-  --pane abc123
+  --pane abc123 \
+  --surface open_relay
 ```
 
 (Here `--pane` is the session target — for open-relay it's the oly session ID.)
@@ -225,8 +250,8 @@ thin-supervisor status
 # Read oly session output directly
 oly logs abc123 --tail 50
 
-# Or through supervisor bridge
-thin-supervisor bridge read abc123 50
+# Or inspect the supervisor's normalized run view
+thin-supervisor observe <run_id>
 ```
 
 ### 6. Attach to watch
@@ -238,7 +263,55 @@ oly attach abc123
 
 ---
 
-## Part D: Any CLI Agent (OpenCode, Droid, Amp, etc.)
+## Part D: JSONL Observation Mode
+
+Use this when the agent already writes a native transcript file and you want the supervisor to observe checkpoints without controlling the terminal surface directly.
+
+### What JSONL mode is good for
+
+- Codex or Claude sessions where transcript files already exist
+- Read-only monitoring of a session running somewhere else
+- Debugging checkpoint emission without depending on tmux capture
+
+### Important limitation
+
+JSONL mode is currently **observation-only**. The supervisor can persist next-step instructions to `.supervisor/runtime/instructions/<session>.txt`, but delivery depends on the agent-side skill or hook path checking that file. Do not treat JSONL mode as a full replacement for tmux or open-relay interactive delivery.
+
+### 1. Resolve the current transcript
+
+Inside the agent session:
+
+```bash
+thin-supervisor session detect
+thin-supervisor session jsonl
+thin-supervisor session list
+```
+
+`session jsonl` now prefers the active session ID when available and only falls back to the newest transcript if it cannot identify the live session.
+
+### 2. Register a run against the transcript
+
+```bash
+thin-supervisor daemon start
+thin-supervisor run register \
+  --spec .supervisor/specs/my-plan.yaml \
+  --pane "$(thin-supervisor session jsonl)" \
+  --surface jsonl
+```
+
+### 3. Observe progress
+
+```bash
+thin-supervisor status
+thin-supervisor observe <run_id>
+tail -f "$(thin-supervisor session jsonl)"
+```
+
+If the agent keeps reporting a completed node after the supervisor advances, the run now pauses with a human escalation instead of hanging silently.
+
+---
+
+## Part E: Any CLI Agent (OpenCode, Droid, Amp, etc.)
 
 thin-supervisor works with **any CLI agent** that runs in a terminal. The agent just needs to follow the checkpoint protocol.
 
@@ -425,3 +498,22 @@ oly ls
 # Check daemon
 oly daemon start --detach
 ```
+
+### JSONL mode attached to the wrong transcript
+
+```bash
+thin-supervisor session detect
+thin-supervisor session jsonl
+thin-supervisor session list
+```
+
+If `session detect` is empty, confirm the agent exports a session ID or pass the explicit transcript path to `--pane`.
+
+### Run is paused waiting for review
+
+```bash
+thin-supervisor status
+thin-supervisor run review <run_id> --by human
+```
+
+Use `--by stronger_reviewer` if the spec explicitly requires that reviewer tier.

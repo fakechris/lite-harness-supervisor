@@ -136,11 +136,35 @@ class RoutingDecision:
     scope: str = ""                       # bounded_review | full_takeover | single_question
     reason: str = ""
     triggered_by_decision_id: str = ""
+    consultation_id: str = ""
     timestamp: str = ""
 
     def __post_init__(self):
         if not self.routing_id:
             self.routing_id = f"rt_{uuid.uuid4().hex[:12]}"
+        if not self.timestamp:
+            self.timestamp = datetime.now(timezone.utc).isoformat()
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class OracleOpinion:
+    """Advisory second opinion from an external or fallback oracle."""
+    provider: str
+    model_name: str
+    mode: str
+    question: str
+    files: list[str] = field(default_factory=list)
+    response_text: str = ""
+    source: str = "external"            # external | fallback
+    consultation_id: str = ""
+    timestamp: str = ""
+
+    def __post_init__(self):
+        if not self.consultation_id:
+            self.consultation_id = f"oracle_{uuid.uuid4().hex[:12]}"
         if not self.timestamp:
             self.timestamp = datetime.now(timezone.utc).isoformat()
 

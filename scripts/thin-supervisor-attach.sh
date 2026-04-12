@@ -20,7 +20,7 @@ fi
 
 mkdir -p .supervisor/runtime .supervisor/specs .supervisor/clarify .supervisor/plans
 if [[ ! -f .supervisor/config.yaml ]]; then
-  thin-supervisor init
+  thin-supervisor init --repair
 fi
 
 # Read surface_type from config (default: tmux)

@@ -89,10 +89,12 @@ class TestRoutingDecision:
             scope="bounded_review",
             reason="complex branch",
             triggered_by_decision_id="dec_xyz",
+            consultation_id="oracle_123",
         )
         d = rd.to_dict()
         assert d["target_type"] == "reviewer"
         assert d["triggered_by_decision_id"] == "dec_xyz"
+        assert d["consultation_id"] == "oracle_123"
 
 
 class TestPolicyInComposer:

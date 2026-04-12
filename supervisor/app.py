@@ -9,6 +9,7 @@ import shutil
 import signal
 import sys
 import time as _time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from supervisor.plan.loader import load_spec
@@ -23,6 +24,7 @@ SUPERVISOR_DIR = ".supervisor"
 CONFIG_FILE = ".supervisor/config.yaml"
 RUNTIME_DIR = ".supervisor/runtime"
 SPECS_DIR = ".supervisor/specs"
+OPS_LOG_FILE = ".supervisor/runtime/ops_log.jsonl"
 
 
 # ------------------------------------------------------------------
@@ -33,10 +35,12 @@ SPECS_DIR = ".supervisor/specs"
 def cmd_init(args):
     """Create .supervisor/ directory with default config."""
     base = Path(SUPERVISOR_DIR)
-    if base.exists() and not args.force:
+    repair = getattr(args, "repair", False)
+    if base.exists() and not args.force and not repair:
         print(f"{SUPERVISOR_DIR}/ already exists. Use --force to overwrite.")
         return 1
 
+    base_preexisted = base.exists()
     base.mkdir(parents=True, exist_ok=True)
     Path(RUNTIME_DIR).mkdir(parents=True, exist_ok=True)
     Path(SPECS_DIR).mkdir(parents=True, exist_ok=True)
@@ -44,7 +48,11 @@ def cmd_init(args):
     Path(f"{SUPERVISOR_DIR}/plans").mkdir(parents=True, exist_ok=True)
 
     config = RuntimeConfig()
-    Path(CONFIG_FILE).write_text(config.default_config_yaml(), encoding="utf-8")
+    config_path = Path(CONFIG_FILE)
+    created_config = False
+    if args.force or not config_path.exists():
+        config_path.write_text(config.default_config_yaml(), encoding="utf-8")
+        created_config = True
 
     gitignore = Path(".gitignore")
     if gitignore.exists():
@@ -53,8 +61,31 @@ def cmd_init(args):
             with gitignore.open("a") as f:
                 f.write(f"\n{RUNTIME_DIR}/\n")
 
-    print(f"Initialized {SUPERVISOR_DIR}/")
+    if repair:
+        _append_ops_event(
+            "init_repair",
+            {
+                "supervisor_dir_preexisted": base_preexisted,
+                "created_config": created_config,
+                "config_path": CONFIG_FILE,
+            },
+        )
+        print(f"Repaired {SUPERVISOR_DIR}/")
+    else:
+        print(f"Initialized {SUPERVISOR_DIR}/")
     return 0
+
+
+def _append_ops_event(event_type: str, payload: dict) -> None:
+    ops_log_path = Path(OPS_LOG_FILE)
+    ops_log_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "event_type": event_type,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "payload": payload,
+    }
+    with ops_log_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def cmd_deinit(args):
@@ -327,6 +358,84 @@ def cmd_run_review(args):
     return 0
 
 
+def cmd_run_export(args):
+    """Export a run's durable history as stable JSON."""
+    from supervisor.history import export_run
+
+    runtime_dir = RuntimeConfig.load(getattr(args, "config", None) or CONFIG_FILE).runtime_dir
+    try:
+        payload = export_run(args.run_id, runtime_dir=runtime_dir)
+    except Exception as exc:
+        print(f"Error: {exc}")
+        return 1
+    if args.output:
+        target = Path(args.output)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(str(target))
+        return 0
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_run_summarize(args):
+    """Summarize a historical run."""
+    from supervisor.history import export_run, summarize_run
+
+    runtime_dir = RuntimeConfig.load(getattr(args, "config", None) or CONFIG_FILE).runtime_dir
+    try:
+        payload = summarize_run(export_run(args.run_id, runtime_dir=runtime_dir))
+    except Exception as exc:
+        print(f"Error: {exc}")
+        return 1
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    print(f"Run: {payload['run_id']}")
+    print(f"State: {payload['top_state']}")
+    print(f"Checkpoints: {payload['counts']['checkpoints']}")
+    print(f"Verifications ok: {payload['counts']['verifications_ok']}")
+    print(f"Routing events: {payload['counts']['routing_events']}")
+    print(f"Oracle consultations: {', '.join(payload['oracle_consultation_ids']) or '(none)'}")
+    return 0
+
+
+def cmd_run_replay(args):
+    """Replay historical gate decisions without execution."""
+    from supervisor.history import export_run, replay_run
+
+    runtime_dir = RuntimeConfig.load(getattr(args, "config", None) or CONFIG_FILE).runtime_dir
+    try:
+        payload = replay_run(export_run(args.run_id, runtime_dir=runtime_dir))
+    except Exception as exc:
+        print(f"Error: {exc}")
+        return 1
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    print(f"Run: {payload['run_id']}")
+    print(f"Matched decisions: {payload['matched_count']}/{payload['decision_count']}")
+    print(f"Mismatches: {len(payload['mismatches'])}")
+    return 0
+
+
+def cmd_run_postmortem(args):
+    """Write a markdown postmortem for a historical run."""
+    from supervisor.history import export_run, render_postmortem
+
+    runtime_dir = RuntimeConfig.load(getattr(args, "config", None) or CONFIG_FILE).runtime_dir
+    try:
+        markdown = render_postmortem(export_run(args.run_id, runtime_dir=runtime_dir))
+    except Exception as exc:
+        print(f"Error: {exc}")
+        return 1
+    target = Path(args.output) if args.output else Path(".supervisor") / "reports" / f"{args.run_id}.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(markdown, encoding="utf-8")
+    print(str(target))
+    return 0
+
+
 def cmd_run_stop(args):
     """Stop a specific run."""
     from supervisor.daemon.client import DaemonClient
@@ -513,6 +622,7 @@ def cmd_note(args):
             content,
             note_type=args.type or "context",
             author_run_id=args.run or "human",
+            metadata={},
         )
         if result.get("ok"):
             print(f"Note added: {result['note_id']}")
@@ -538,6 +648,83 @@ def cmd_note(args):
             print(f"  {n['content'][:120]}")
             print()
 
+    return 0
+
+
+# ------------------------------------------------------------------
+# oracle
+# ------------------------------------------------------------------
+
+
+def cmd_oracle(args):
+    """Consult an external or fallback oracle for a second opinion."""
+    from supervisor.oracle.client import OracleClient
+
+    if args.oracle_action != "consult":
+        print("Usage: thin-supervisor oracle consult --question <text> [--file path ...]")
+        return 1
+    if not args.question:
+        print("Error: --question is required.")
+        return 1
+
+    client = OracleClient()
+    try:
+        opinion = client.consult(
+            question=args.question,
+            file_paths=args.file or [],
+            mode=args.mode,
+            provider=args.provider,
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).exception("oracle consultation failed")
+        print(f"Error: oracle consultation failed: {exc}")
+        return 1
+    if hasattr(opinion, "to_dict"):
+        payload = opinion.to_dict()
+    else:
+        payload = opinion
+
+    if args.run:
+        from supervisor.daemon.client import DaemonClient
+
+        daemon = DaemonClient()
+        if not daemon.is_running():
+            print("Daemon not running. Start it before saving oracle notes to a run.")
+            return 1
+        note_lines = [
+            f"Oracle consultation: {payload.get('consultation_id', '?')}",
+            f"provider: {payload.get('provider', '?')}/{payload.get('model_name', '?')}",
+            f"mode: {payload.get('mode', '?')}",
+            f"question: {payload.get('question', '')}",
+            "",
+            payload.get("response_text", ""),
+        ]
+        try:
+            result = daemon.note_add(
+                "\n".join(note_lines).strip(),
+                note_type="oracle",
+                author_run_id=args.run,
+                title=f"oracle: {payload.get('question', '')[:60]}",
+                metadata=payload,
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).exception("failed to persist oracle note")
+            print(f"Error: failed to persist oracle note: {exc}")
+            return 1
+        if not result.get("ok"):
+            print(f"Error: {result.get('error', 'unknown')}")
+            return 1
+
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"Consultation: {payload.get('consultation_id', '?')}")
+        print(f"Provider:     {payload.get('provider', '?')}/{payload.get('model_name', '?')}")
+        print(f"Mode:         {payload.get('mode', '?')}")
+        print(f"Files:        {', '.join(payload.get('files', [])) or '(none)'}")
+        print(f"Question:     {payload.get('question', '')}")
+        print("\nResponse:\n")
+        print(payload.get("response_text", ""))
     return 0
 
 
@@ -839,6 +1026,7 @@ def main():
     # init
     p_init = sub.add_parser("init", help="Initialize .supervisor/ in current project")
     p_init.add_argument("--force", action="store_true")
+    p_init.add_argument("--repair", action="store_true", help="Repair a partial .supervisor/ scaffold without overwriting config")
 
     # deinit
     p_deinit = sub.add_parser("deinit", help="Remove .supervisor/ directory")
@@ -883,6 +1071,27 @@ def main():
     p_review.add_argument("run_id", help="Run ID to mark as reviewed")
     p_review.add_argument("--by", required=True, choices=["human", "stronger_reviewer"])
 
+    p_export = run_sub.add_parser("export", help="Export a run's durable history as JSON")
+    p_export.add_argument("run_id", help="Run ID to export")
+    p_export.add_argument("--output", default="", help="Optional file path for exported JSON")
+    p_export.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    p_export.add_argument("--config", default=None, help="Optional config file")
+
+    p_summarize = run_sub.add_parser("summarize", help="Summarize a historical run")
+    p_summarize.add_argument("run_id", help="Run ID to summarize")
+    p_summarize.add_argument("--json", action="store_true", help="Print JSON output")
+    p_summarize.add_argument("--config", default=None, help="Optional config file")
+
+    p_replay = run_sub.add_parser("replay", help="Replay historical gate decisions without execution")
+    p_replay.add_argument("run_id", help="Run ID to replay")
+    p_replay.add_argument("--json", action="store_true", help="Print JSON output")
+    p_replay.add_argument("--config", default=None, help="Optional config file")
+
+    p_postmortem = run_sub.add_parser("postmortem", help="Write a markdown postmortem for a run")
+    p_postmortem.add_argument("run_id", help="Run ID to analyze")
+    p_postmortem.add_argument("--output", default="", help="Optional markdown output path")
+    p_postmortem.add_argument("--config", default=None, help="Optional config file")
+
     # Removed legacy syntax is still parsed so we can print a migration error.
     p_run.add_argument("spec_path", nargs="?", default=None, help=argparse.SUPPRESS)
     p_run.add_argument("--pane", default=None, help=argparse.SUPPRESS)
@@ -915,6 +1124,17 @@ def main():
     p_note_list = note_sub.add_parser("list", help="List notes")
     p_note_list.add_argument("--type", default="", help="Filter by type")
     p_note_list.add_argument("--run", default="", help="Filter by author run ID")
+
+    # oracle
+    p_oracle = sub.add_parser("oracle", help="Consult an external or fallback oracle")
+    oracle_sub = p_oracle.add_subparsers(dest="oracle_action")
+    p_oracle_consult = oracle_sub.add_parser("consult", help="Get an advisory second opinion")
+    p_oracle_consult.add_argument("--question", required=True, help="Question for the oracle")
+    p_oracle_consult.add_argument("--file", action="append", default=[], help="Relevant file path (repeatable)")
+    p_oracle_consult.add_argument("--mode", default="review", choices=["review", "plan", "debug"])
+    p_oracle_consult.add_argument("--provider", default="auto", choices=["auto", "openai", "deepseek", "anthropic"])
+    p_oracle_consult.add_argument("--run", default="", help="Optional run ID to persist as a shared oracle note")
+    p_oracle_consult.add_argument("--json", action="store_true", help="Print JSON output")
 
     # skill
     p_skill = sub.add_parser("skill", help="Skill management")
@@ -971,11 +1191,19 @@ def main():
             sys.exit(cmd_run_resume(args))
         elif args.run_action == "review":
             sys.exit(cmd_run_review(args))
+        elif args.run_action == "export":
+            sys.exit(cmd_run_export(args))
+        elif args.run_action == "summarize":
+            sys.exit(cmd_run_summarize(args))
+        elif args.run_action == "replay":
+            sys.exit(cmd_run_replay(args))
+        elif args.run_action == "postmortem":
+            sys.exit(cmd_run_postmortem(args))
         elif args.spec_path:
             # Legacy mode
             sys.exit(cmd_run_legacy(args))
         else:
-            print("Usage: thin-supervisor run {register|foreground|stop}")
+            print("Usage: thin-supervisor run {register|foreground|stop|resume|review|export|summarize|replay|postmortem}")
             sys.exit(1)
     elif args.command == "stop":
         sys.exit(cmd_daemon_stop(args))
@@ -992,6 +1220,12 @@ def main():
             sys.exit(cmd_note(args))
         else:
             print("Usage: thin-supervisor note {add|list}")
+            sys.exit(1)
+    elif args.command == "oracle":
+        if args.oracle_action == "consult":
+            sys.exit(cmd_oracle(args))
+        else:
+            print("Usage: thin-supervisor oracle consult --question <text>")
             sys.exit(1)
     elif args.command == "skill":
         if args.skill_action == "install":
