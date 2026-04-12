@@ -112,6 +112,20 @@ User chooses: Approve / Adjust / Reject.
 Do **not** attach or begin implementation until the user explicitly
 approves the spec.
 
+The following count as **explicit approval** and must NOT trigger a second
+confirmation question:
+- "可以"
+- "同意"
+- "开始吧"
+- "按这个来"
+- "就这么做"
+- "approve"
+- "approved"
+- any clear equivalent that means "yes, start with this spec"
+
+Once the user has already approved in the conversation, do not ask again.
+Immediately mark the spec approved and continue to attach.
+
 As soon as the user approves, mark the spec approved and then attach the
 supervisor BEFORE any implementation work:
 
