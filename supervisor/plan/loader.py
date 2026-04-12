@@ -90,6 +90,8 @@ def load_spec(path: str) -> WorkflowSpec:
     if not isinstance(approval_data, dict):
         raise SpecValidationError("approval must be a YAML mapping")
     approval_required = approval_data.get("required", False)
+    if not isinstance(approval_required, bool):
+        raise SpecValidationError("approval.required must be a boolean")
     approval = SpecApproval(
         required=approval_required,
         status=approval_data.get("status", "draft" if approval_required else "approved"),

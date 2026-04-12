@@ -44,6 +44,43 @@ def test_terminal_adapter_raises_when_text_appears_stuck_in_tail(mock_run):
         adapter.inject("queued instruction")
 
 
+@patch("subprocess.run")
+def test_terminal_adapter_raises_when_wrapped_prompt_stays_visible(mock_run):
+    instruction = (
+        "Build the admin-side modules for templates, rules, permissions, "
+        "statistics, and export workflows."
+    )
+    snapshots = [
+        _mock_run(stdout="before\n"),
+        _mock_run(stdout="before\n"),
+        _mock_run(
+            stdout=(
+                "prior output\n"
+                "› Build the admin-side modules for templates, rules,\n"
+                "  permissions, statistics, and export workflows.\n"
+                "• Working (12s • esc to interrupt)\n"
+                "\n"
+                "  gpt-5.4 high\n"
+            )
+        ),
+    ]
+    mock_run.side_effect = lambda *args, **kwargs: snapshots.pop(0) if snapshots else _mock_run(
+        stdout=(
+            "prior output\n"
+            "› Build the admin-side modules for templates, rules,\n"
+            "  permissions, statistics, and export workflows.\n"
+            "• Working (12s • esc to interrupt)\n"
+            "\n"
+            "  gpt-5.4 high\n"
+        )
+    )
+
+    adapter = TerminalAdapter("%0")
+    adapter.read()
+    with pytest.raises(InjectionConfirmationError):
+        adapter.inject(instruction)
+
+
 class _FailingInjectTerminal:
     def __init__(self):
         self._read_done = False

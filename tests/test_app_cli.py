@@ -311,6 +311,28 @@ def test_run_foreground_rejects_draft_spec(tmp_path, monkeypatch, capsys):
     assert "requires user approval" in out
 
 
+def test_run_resume_rejects_draft_spec_before_starting_daemon(
+    tmp_path, monkeypatch, capsys,
+):
+    spec_path = tmp_path / "draft.yaml"
+    _write_draft_spec(spec_path)
+    monkeypatch.setattr(app.RuntimeConfig, "load", lambda path: RuntimeConfig())
+    monkeypatch.setattr(app, "_ensure_daemon", lambda *_: (_ for _ in ()).throw(AssertionError("daemon should not start")))
+
+    result = app.cmd_run_resume(argparse.Namespace(
+        spec=str(spec_path),
+        pane="%1",
+        target=None,
+        surface="tmux",
+        config=None,
+    ))
+
+    assert result == 1
+    out = capsys.readouterr().out
+    assert "requires user approval" in out
+    assert "thin-supervisor spec approve --spec" in out
+
+
 def test_spec_approve_updates_yaml_status(tmp_path, capsys):
     spec_path = tmp_path / "draft.yaml"
     _write_draft_spec(spec_path)
@@ -328,6 +350,34 @@ def test_spec_approve_updates_yaml_status(tmp_path, capsys):
     assert data["approval"]["approved_at"]
     out = capsys.readouterr().out
     assert "Spec approved" in out
+
+
+def test_spec_approve_rejects_non_mapping_approval(tmp_path, capsys):
+    spec_path = tmp_path / "draft.yaml"
+    spec_path.write_text(
+        "kind: linear_plan\n"
+        "id: bad_approval\n"
+        "goal: invalid approval shape\n"
+        "approval: []\n"
+        "steps:\n"
+        "  - id: s1\n"
+        "    type: task\n"
+        "    objective: do something\n"
+        "    verify:\n"
+        "      - type: command\n"
+        "        run: echo ok\n"
+        "        expect: pass\n"
+    )
+
+    result = app.cmd_spec(argparse.Namespace(
+        spec_action="approve",
+        spec=str(spec_path),
+        by="human",
+    ))
+
+    assert result == 1
+    out = capsys.readouterr().out
+    assert "approval must be a YAML mapping" in out
 
 
 def test_oracle_consult_json_output(tmp_path, monkeypatch, capsys):

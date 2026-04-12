@@ -37,7 +37,9 @@ def approve_spec(path: str, *, approved_by: str = "human") -> dict:
     data = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("spec must be a YAML mapping")
-    approval = data.get("approval") or {}
+    approval = data.get("approval")
+    if approval is None:
+        approval = {}
     if not isinstance(approval, dict):
         raise ValueError("approval must be a YAML mapping")
     approval["required"] = approval.get("required", True)

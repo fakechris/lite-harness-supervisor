@@ -270,8 +270,9 @@ def cmd_run_register(args):
 
 def cmd_run_foreground(args):
     """Run a single sidecar in foreground (no daemon needed)."""
+    spec_path = os.path.abspath(args.spec)
     try:
-        spec = load_runnable_spec(args.spec)
+        spec = load_runnable_spec(spec_path)
     except Exception as exc:
         print(f"Error: {exc}")
         return 1
