@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 
 from supervisor.domain.enums import TopState
+from supervisor.domain.models import SupervisorState
 from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
 from supervisor.gates.finish_gate import FinishGate
@@ -42,6 +43,11 @@ DEFAULT_PID_PATH = ".supervisor/daemon.pid"
 DEFAULT_RUNS_DIR = ".supervisor/runtime/runs"
 
 MAX_REQUEST_SIZE = 64 * 1024  # 64KB max request
+RECOVERABLE_ORPHANED_STATES = {
+    TopState.RUNNING,
+    TopState.GATING,
+    TopState.VERIFYING,
+}
 
 
 class RunEntry:
@@ -109,6 +115,9 @@ class DaemonServer:
         Path(self.pid_path).parent.mkdir(parents=True, exist_ok=True)
         Path(self.pid_path).write_text(str(os.getpid()))
         register_daemon(self._daemon_metadata())
+        recovered = self._recover_orphaned_runs()
+        if recovered:
+            logger.warning("recovered %d orphaned persisted run(s) into PAUSED_FOR_HUMAN", recovered)
 
         try:
             signal.signal(signal.SIGTERM, self._handle_sigterm)
@@ -121,6 +130,52 @@ class DaemonServer:
             self._accept_loop()
         finally:
             self._cleanup()
+
+    def _recover_orphaned_runs(self) -> int:
+        runs_dir = Path(self.runs_dir)
+        if not runs_dir.exists():
+            return 0
+
+        recovered = 0
+        for run_dir in sorted(runs_dir.iterdir()):
+            state_path = run_dir / "state.json"
+            if not state_path.exists():
+                continue
+            try:
+                state_data = json.loads(state_path.read_text())
+                state = SupervisorState.from_dict(state_data)
+            except (OSError, json.JSONDecodeError, KeyError, ValueError):
+                continue
+
+            if state.top_state not in RECOVERABLE_ORPHANED_STATES:
+                continue
+            if getattr(state, "controller_mode", "daemon") == "foreground":
+                continue
+
+            previous_top_state = state_data.get("top_state", state.top_state.value)
+            transition_top_state(state, TopState.PAUSED_FOR_HUMAN, reason="daemon startup orphan recovery")
+            state.human_escalations.append({
+                "reason": (
+                    f"daemon restarted while the run was in progress "
+                    f"({previous_top_state}); "
+                    "explicit resume is required"
+                ),
+                "orphaned_from": previous_top_state,
+            })
+            store = StateStore(str(run_dir))
+            store._session_seq = store._read_last_seq()
+            store.append_session_event(
+                state.run_id,
+                "orphaned_run_recovered",
+                {
+                    "previous_top_state": previous_top_state,
+                    "reason": state.human_escalations[-1]["reason"],
+                },
+            )
+            store.save(state)
+            recovered += 1
+
+        return recovered
 
     def _accept_loop(self) -> None:
         while not self._shutdown.is_set():
@@ -208,6 +263,7 @@ class DaemonServer:
             spec, spec_path=spec_path, pane_target=pane_target,
             surface_type=surface_type,
             workspace_root=workspace_root,
+            controller_mode="daemon",
         )
 
         if state.run_id != run_id:
@@ -371,6 +427,7 @@ class DaemonServer:
                     target_spec, spec_path=spec_path, pane_target=pane_target,
                     surface_type=surface_type,
                     workspace_root=state_data.get("workspace_root", os.getcwd()),
+                    controller_mode="daemon",
                 )
                 resumed_from = state.top_state.value
                 entry = RunEntry(run_id, spec_path, pane_target,
@@ -481,6 +538,7 @@ class DaemonServer:
                 pane_target=state_data.get("pane_target", ""),
                 surface_type=state_data.get("surface_type", "tmux"),
                 workspace_root=state_data.get("workspace_root", os.getcwd()),
+                controller_mode="daemon",
             )
             completed_reviews = set(getattr(state, "completed_reviews", []) or [])
             completed_reviews.add(reviewer)

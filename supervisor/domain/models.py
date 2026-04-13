@@ -328,6 +328,7 @@ class SupervisorState:
     pane_target: str = ""
     surface_type: str = "tmux"
     workspace_root: str = ""
+    controller_mode: str = "daemon"
     auto_intervention_count: int = 0
     node_mismatch_count: int = 0
     last_mismatch_node_id: str = ""
@@ -367,6 +368,7 @@ class SupervisorState:
             pane_target=data.get("pane_target", ""),
             surface_type=data.get("surface_type", "tmux"),
             workspace_root=data.get("workspace_root", ""),
+            controller_mode=data.get("controller_mode", "daemon"),
             auto_intervention_count=data.get("auto_intervention_count", 0),
             node_mismatch_count=data.get("node_mismatch_count", 0),
             last_mismatch_node_id=data.get("last_mismatch_node_id", ""),

@@ -301,6 +301,7 @@ def cmd_run_foreground(args):
         pane_target=pane_target,
         surface_type=surface_type,
         workspace_root=os.getcwd(),
+        controller_mode="foreground",
     )
 
     from supervisor.adapters.surface_factory import create_surface
@@ -500,12 +501,12 @@ def cmd_run_stop(args):
 def _find_local_run_summaries() -> list[dict]:
     """Read persisted local run state outside the daemon's active registry."""
     runtime_dir = Path(RUNTIME_DIR)
-    summaries: list[dict] = []
+    states: list[dict] = []
 
     legacy_state = runtime_dir / "state.json"
     if legacy_state.exists():
         try:
-            summaries.append(summarize_state(json.loads(legacy_state.read_text())))
+            states.append(json.loads(legacy_state.read_text()))
         except json.JSONDecodeError:
             pass
 
@@ -516,11 +517,29 @@ def _find_local_run_summaries() -> list[dict]:
             if not state_path.exists():
                 continue
             try:
-                summaries.append(summarize_state(json.loads(state_path.read_text())))
+                states.append(json.loads(state_path.read_text()))
             except json.JSONDecodeError:
                 continue
 
-    return summaries
+    return states
+
+
+def _summarize_local_state_for_hint(state: dict) -> dict:
+    summary = summarize_state(state)
+    if (
+        summary.get("top_state") in {"RUNNING", "GATING", "VERIFYING"}
+        and state.get("controller_mode", "daemon") != "foreground"
+    ):
+        orphaned_reason = "persisted run was left in progress without an active daemon worker"
+        paused_view = dict(state)
+        paused_view["top_state"] = "PAUSED_FOR_HUMAN"
+        paused_view["human_escalations"] = list(paused_view.get("human_escalations", [])) + [
+            {"reason": orphaned_reason}
+        ]
+        summary = summarize_state(paused_view)
+        summary["orphaned_local_state"] = True
+        summary["orphaned_from"] = state.get("top_state", "")
+    return summary
 
 
 def _print_local_state_hint() -> None:
@@ -530,19 +549,20 @@ def _print_local_state_hint() -> None:
 
     print("Local state found:")
     for state in summaries:
+        display = _summarize_local_state_for_hint(state)
         print(
             "  "
-            f"{state.get('run_id', '?')} "
-            f"{state.get('top_state', '?')} "
-            f"node={state.get('current_node_id', '') or '?'} "
-            f"pane={state.get('pane_target', '?')}"
+            f"{display.get('run_id', '?')} "
+            f"{display.get('top_state', '?')} "
+            f"node={display.get('current_node_id', '') or '?'} "
+            f"pane={display.get('pane_target', '?')}"
         )
-        if state.get("status_reason"):
-            print(f"    status: {state['status_reason']}")
-        if state.get("pause_reason"):
-            print(f"    reason: {state['pause_reason']}")
-        if state.get("next_action"):
-            print(f"    next:   {state['next_action']}")
+        if display.get("status_reason"):
+            print(f"    status: {display['status_reason']}")
+        if display.get("pause_reason"):
+            print(f"    reason: {display['pause_reason']}")
+        if display.get("next_action"):
+            print(f"    next:   {display['next_action']}")
     print("  These are persisted local state files, not daemon-managed active runs.")
 
 
@@ -1435,7 +1455,7 @@ def cmd_status(args):
         state_path = Path(RUNTIME_DIR) / "state.json"
         if state_path.exists():
             try:
-                state = summarize_state(json.loads(state_path.read_text()))
+                state = _summarize_local_state_for_hint(json.loads(state_path.read_text()))
                 print(f"Run:   {state.get('run_id', '?')}")
                 print(f"State: {state.get('top_state', '?')}")
                 print(f"Node:  {state.get('current_node_id', '?')}")
@@ -1457,7 +1477,7 @@ def cmd_status(args):
         state_path = run_dir / "state.json"
         if state_path.exists():
             try:
-                state = summarize_state(json.loads(state_path.read_text()))
+                state = _summarize_local_state_for_hint(json.loads(state_path.read_text()))
                 if not found:
                     print(f"{'RUN_ID':<20} {'PANE':<20} {'STATE':<18} {'NODE'}")
                     found = True
