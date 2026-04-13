@@ -956,6 +956,48 @@ def test_eval_review_candidate_json_output(tmp_path, monkeypatch, capsys):
     assert payload["next_action"].startswith("thin-supervisor eval compare")
 
 
+def test_eval_candidate_status_json_output(tmp_path, monkeypatch, capsys):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    candidates_dir = tmp_path / ".supervisor" / "evals" / "candidates"
+    candidates_dir.mkdir(parents=True)
+    (candidates_dir / "candidate_demo.json").write_text(json.dumps({
+        "candidate_id": "candidate_demo",
+        "proposal": {
+            "suite": "approval-core",
+            "objective": "reduce_false_approval",
+            "baseline_policy": "builtin-approval-v1",
+            "recommended_candidate_policy": "builtin-approval-strict-v1",
+            "rationale": "Conservative candidate for safety.",
+        },
+        "candidate": {
+            "candidate_id": "candidate_demo",
+            "candidate_policy": "builtin-approval-strict-v1",
+            "parent_id": "builtin-approval-v1",
+            "objective": "reduce_false_approval",
+            "touched_fragments": ["approval-boundary"],
+            "mutation_operator": "tighten_positive_boundary",
+            "fragment_mutations": [],
+            "originating_evidence": {"suite": "approval-core", "failure_case_count": 2},
+        },
+    }), encoding="utf-8")
+
+    cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
+    monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: cfg)
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="candidate-status",
+        candidate_id="candidate_demo",
+        manifest="",
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate"]["candidate_id"] == "candidate_demo"
+    assert payload["review"]["review_status"] == "needs_human_review"
+
+
 def test_eval_gate_candidate_json_output(tmp_path, monkeypatch, capsys):
     runtime_dir = tmp_path / ".supervisor" / "runtime"
     candidates_dir = tmp_path / ".supervisor" / "evals" / "candidates"
@@ -1000,6 +1042,8 @@ def test_eval_gate_candidate_json_output(tmp_path, monkeypatch, capsys):
         run_id=[],
         max_mismatch_rate=0.25,
         max_friction_events=0,
+        output="",
+        save_report=False,
         config=None,
         json=True,
     ))
@@ -1008,6 +1052,235 @@ def test_eval_gate_candidate_json_output(tmp_path, monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["candidate_id"] == "candidate_demo"
     assert payload["decision"] == "hold"
+
+
+def test_eval_promote_candidate_json_output(tmp_path, monkeypatch, capsys):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    candidates_dir = tmp_path / ".supervisor" / "evals" / "candidates"
+    candidates_dir.mkdir(parents=True)
+    (candidates_dir / "candidate_demo.json").write_text(json.dumps({
+        "candidate_id": "candidate_demo",
+        "proposal": {
+            "suite": "approval-core",
+            "objective": "reduce_false_approval",
+            "baseline_policy": "builtin-approval-v1",
+            "recommended_candidate_policy": "builtin-approval-strict-v1",
+            "rationale": "Conservative candidate for safety.",
+        },
+        "candidate": {
+            "candidate_id": "candidate_demo",
+            "candidate_policy": "builtin-approval-strict-v1",
+            "parent_id": "builtin-approval-v1",
+            "objective": "reduce_false_approval",
+            "touched_fragments": ["approval-boundary"],
+            "mutation_operator": "tighten_positive_boundary",
+            "fragment_mutations": [],
+            "originating_evidence": {"suite": "approval-core", "failure_case_count": 2},
+        },
+    }), encoding="utf-8")
+
+    cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
+    monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: cfg)
+    monkeypatch.setattr("supervisor.eval.load_eval_suite", lambda ref: object())
+    monkeypatch.setattr("supervisor.eval.evaluate_candidate_gate", lambda review, suite, canary_report=None: {
+        "candidate_id": review["candidate_id"],
+        "candidate_policy": "builtin-approval-strict-v1",
+        "baseline_policy": "builtin-approval-v1",
+        "suite": "approval-core",
+        "review_status": "needs_human_review",
+        "decision": "needs_canary",
+        "compare": {},
+        "canary": None,
+        "next_action": "thin-supervisor eval canary --run-id <recent_run>",
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="promote-candidate",
+        candidate_id="candidate_demo",
+        manifest="",
+        approved_by="human",
+        force=False,
+        run_id=[],
+        max_mismatch_rate=0.25,
+        max_friction_events=0,
+        output="",
+        save_report=False,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "promoted"
+    assert payload["approved_by"] == "human"
+
+
+def test_eval_gate_candidate_can_save_report(tmp_path, monkeypatch, capsys):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    candidates_dir = tmp_path / ".supervisor" / "evals" / "candidates"
+    candidates_dir.mkdir(parents=True)
+    (candidates_dir / "candidate_demo.json").write_text(json.dumps({
+        "candidate_id": "candidate_demo",
+        "proposal": {
+            "suite": "approval-core",
+            "objective": "reduce_false_approval",
+            "baseline_policy": "builtin-approval-v1",
+            "recommended_candidate_policy": "builtin-approval-strict-v1",
+            "rationale": "Conservative candidate for safety.",
+        },
+        "candidate": {
+            "candidate_id": "candidate_demo",
+            "candidate_policy": "builtin-approval-strict-v1",
+            "parent_id": "builtin-approval-v1",
+            "objective": "reduce_false_approval",
+            "touched_fragments": ["approval-boundary"],
+            "mutation_operator": "tighten_positive_boundary",
+            "fragment_mutations": [],
+            "originating_evidence": {"suite": "approval-core", "failure_case_count": 2},
+        },
+    }), encoding="utf-8")
+
+    cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
+    monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: cfg)
+    monkeypatch.setattr("supervisor.eval.load_eval_suite", lambda ref: object())
+    monkeypatch.setattr("supervisor.eval.evaluate_candidate_gate", lambda review, suite, canary_report=None: {
+        "candidate_id": review["candidate_id"],
+        "candidate_policy": "builtin-approval-strict-v1",
+        "baseline_policy": "builtin-approval-v1",
+        "suite": "approval-core",
+        "review_status": review["review_status"],
+        "decision": "needs_canary",
+        "compare": {},
+        "canary": None,
+        "next_action": "thin-supervisor eval canary --run-id <recent_run>",
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="gate-candidate",
+        candidate_id="candidate_demo",
+        manifest="",
+        run_id=[],
+        max_mismatch_rate=0.25,
+        max_friction_events=0,
+        output="",
+        save_report=True,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["report_path"].endswith(".json")
+    assert Path(payload["report_path"]).exists()
+
+
+def test_eval_promote_candidate_can_save_report(tmp_path, monkeypatch, capsys):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    candidates_dir = tmp_path / ".supervisor" / "evals" / "candidates"
+    candidates_dir.mkdir(parents=True)
+    (candidates_dir / "candidate_demo.json").write_text(json.dumps({
+        "candidate_id": "candidate_demo",
+        "proposal": {
+            "suite": "approval-core",
+            "objective": "reduce_false_approval",
+            "baseline_policy": "builtin-approval-v1",
+            "recommended_candidate_policy": "builtin-approval-strict-v1",
+            "rationale": "Conservative candidate for safety.",
+        },
+        "candidate": {
+            "candidate_id": "candidate_demo",
+            "candidate_policy": "builtin-approval-strict-v1",
+            "parent_id": "builtin-approval-v1",
+            "objective": "reduce_false_approval",
+            "touched_fragments": ["approval-boundary"],
+            "mutation_operator": "tighten_positive_boundary",
+            "fragment_mutations": [],
+            "originating_evidence": {"suite": "approval-core", "failure_case_count": 2},
+        },
+    }), encoding="utf-8")
+
+    cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
+    monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: cfg)
+    monkeypatch.setattr("supervisor.eval.load_eval_suite", lambda ref: object())
+    monkeypatch.setattr("supervisor.eval.evaluate_candidate_gate", lambda review, suite, canary_report=None: {
+        "candidate_id": review["candidate_id"],
+        "candidate_policy": "builtin-approval-strict-v1",
+        "baseline_policy": "builtin-approval-v1",
+        "suite": "approval-core",
+        "review_status": "needs_human_review",
+        "decision": "needs_canary",
+        "compare": {},
+        "canary": None,
+        "next_action": "thin-supervisor eval canary --run-id <recent_run>",
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="promote-candidate",
+        candidate_id="candidate_demo",
+        manifest="",
+        approved_by="human",
+        force=True,
+        run_id=[],
+        max_mismatch_rate=0.25,
+        max_friction_events=0,
+        output="",
+        save_report=True,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["report_path"].endswith(".json")
+    assert Path(payload["report_path"]).exists()
+
+
+def test_eval_promotion_history_json_output(tmp_path, monkeypatch, capsys):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
+    monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: cfg)
+    monkeypatch.setattr("supervisor.eval.list_promotions", lambda runtime_dir: [
+        {"candidate_id": "candidate_a", "suite": "approval-core", "status": "promoted", "promoted_at": "2026-04-13T00:00:00+00:00"}
+    ])
+    monkeypatch.setattr("supervisor.eval.current_promotions", lambda history: {
+        "approval-core": history[0]
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="promotion-history",
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["history"][0]["candidate_id"] == "candidate_a"
+    assert payload["current"]["approval-core"]["status"] == "promoted"
+
+
+def test_eval_promotion_history_plain_output_tolerates_sparse_records(tmp_path, monkeypatch, capsys):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
+    monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: cfg)
+    monkeypatch.setattr("supervisor.eval.list_promotions", lambda runtime_dir: [
+        {"suite": "approval-core", "candidate_id": "candidate_a", "status": "promoted"},
+        {"suite": "routing-core"},
+    ])
+    monkeypatch.setattr("supervisor.eval.current_promotions", lambda history: {
+        "approval-core": history[0],
+        "routing-core": history[1],
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="promotion-history",
+        config=None,
+        json=False,
+    ))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "approval-core: candidate_a (promoted)" in out
+    assert "routing-core: ? (?)" in out
 
 
 def test_run_postmortem_writes_default_report(tmp_path, monkeypatch):

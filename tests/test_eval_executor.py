@@ -110,3 +110,36 @@ def test_run_eval_suite_supports_finish_gate_cases():
     assert report["counts"]["passed"] == 1
     assert report["results"][0]["actual"]["finish_ok"] is False
     assert report["weighted"]["total"] == 3.0
+
+
+def test_run_eval_suite_supports_pause_summary_cases():
+    suite = EvalSuite(
+        name="pause-ux-core",
+        cases=[
+            EvalCase(
+                case_id="pause_resume_hint",
+                category="pause_summary",
+                conversation=[],
+                expected={
+                    "pause_reason": "node mismatch persisted for 5 checkpoints",
+                    "next_action": "thin-supervisor run resume --spec /tmp/spec.yaml --pane %9 --surface tmux",
+                    "is_waiting_for_review": False,
+                },
+                metadata={
+                    "state": {
+                        "run_id": "run_123",
+                        "top_state": "PAUSED_FOR_HUMAN",
+                        "spec_path": "/tmp/spec.yaml",
+                        "pane_target": "%9",
+                        "surface_type": "tmux",
+                        "human_escalations": [{"reason": "node mismatch persisted for 5 checkpoints"}],
+                    }
+                },
+            )
+        ],
+    )
+
+    report = run_eval_suite(suite)
+
+    assert report["counts"]["passed"] == 1
+    assert report["results"][0]["actual"]["pause_reason"] == "node mismatch persisted for 5 checkpoints"

@@ -13,6 +13,7 @@ from supervisor.domain.models import (
 from supervisor.eval.cases import EvalCase, EvalSuite
 from supervisor.gates.finish_gate import FinishGate
 from supervisor.loop import SupervisorLoop
+from supervisor.pause_summary import summarize_state
 
 
 _APPROVAL_PATTERNS = [
@@ -192,6 +193,11 @@ def _evaluate_finish_gate(case: EvalCase) -> dict:
     }
 
 
+def _evaluate_pause_summary(case: EvalCase) -> dict:
+    state = dict(case.metadata.get("state") or {})
+    return summarize_state(state)
+
+
 def _evaluate_case(case: EvalCase, detector) -> dict:
     if case.category == "approval":
         return detector(case)
@@ -199,6 +205,8 @@ def _evaluate_case(case: EvalCase, detector) -> dict:
         return _detect_gate_decision(case)
     if case.category == "finish_gate":
         return _evaluate_finish_gate(case)
+    if case.category == "pause_summary":
+        return _evaluate_pause_summary(case)
     raise ValueError(f"unsupported eval category: {case.category}")
 
 

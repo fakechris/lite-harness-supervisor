@@ -1,12 +1,15 @@
 from .cases import EvalCase, EvalSuite, bundled_suite_path, list_bundled_suites, load_eval_suite, save_eval_suite
 from .canary import run_canary_eval
 from .comparator import compare_eval_policies
+from .dossier import build_candidate_dossier
 from .executor import run_eval_suite
 from .proposals import propose_candidate_policy
 from .promotion import evaluate_candidate_gate, run_candidate_gate
+from .registry import current_promotions, list_promotions, promote_candidate, registry_path
 from .reporting import (
     default_candidate_dir,
     default_report_dir,
+    list_eval_reports,
     load_candidate_manifest,
     review_candidate_manifest,
     save_candidate_manifest,
@@ -19,16 +22,21 @@ __all__ = [
     "EvalCase",
     "EvalSuite",
     "bundled_suite_path",
+    "build_candidate_dossier",
     "run_canary_eval",
     "compare_eval_policies",
+    "current_promotions",
     "default_candidate_dir",
     "default_report_dir",
     "expand_eval_suite",
     "evaluate_candidate_gate",
     "list_bundled_suites",
     "load_candidate_manifest",
+    "list_eval_reports",
     "load_eval_suite",
     "propose_candidate_policy",
+    "promote_candidate",
+    "registry_path",
     "review_candidate_manifest",
     "run_candidate_gate",
     "run_eval_suite",

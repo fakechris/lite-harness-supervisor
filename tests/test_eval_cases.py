@@ -1,4 +1,4 @@
-from supervisor.eval.cases import EvalCase, load_eval_suite
+from supervisor.eval.cases import EvalCase, list_bundled_suites, load_eval_suite
 
 
 def test_load_eval_suite_from_jsonl(tmp_path):
@@ -53,3 +53,11 @@ def test_eval_case_extended_fields_round_trip(tmp_path):
     assert case.allowed_alternatives == ["CONTINUE"]
     assert case.source_run_id == "run_123"
     assert case.source_checkpoint_seq == 7
+
+
+def test_list_bundled_suites_includes_new_policy_suites():
+    suites = list_bundled_suites()
+
+    assert "approval-core" in suites
+    assert "approval-adversarial" in suites
+    assert "pause-ux-core" in suites
