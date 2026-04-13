@@ -894,6 +894,7 @@ def cmd_learn(args):
 def cmd_eval(args):
     """Run deterministic eval suites for skill and policy behavior."""
     from supervisor.eval import (
+        build_candidate_dossier,
         compare_eval_policies,
         current_promotions,
         default_report_dir,
@@ -1092,6 +1093,17 @@ def cmd_eval(args):
                 runtime_dir=runtime_dir,
             )
             review = review_candidate_manifest(manifest)
+            if getattr(args, "save_report", False) or getattr(args, "output", ""):
+                report_path = save_eval_report(
+                    {
+                        **review,
+                        "manifest_path": getattr(args, "manifest", ""),
+                    },
+                    report_kind="review",
+                    runtime_dir=runtime_dir,
+                    output_path=getattr(args, "output", ""),
+                )
+                review["report_path"] = str(report_path)
         except Exception as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
@@ -1103,6 +1115,26 @@ def cmd_eval(args):
             print(f"Objective:    {review['objective']}")
             print(f"Review:       {review['review_status']}")
             print(f"Next action:  {review['next_action']}")
+        return 0
+
+    if args.eval_action == "candidate-status":
+        try:
+            dossier = build_candidate_dossier(
+                candidate_id=getattr(args, "candidate_id", ""),
+                manifest_path=getattr(args, "manifest", ""),
+                runtime_dir=runtime_dir,
+            )
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(json.dumps(dossier, ensure_ascii=False))
+        else:
+            print(f"Candidate:    {dossier['candidate']['candidate_id']}")
+            print(f"Policy:       {dossier['candidate']['candidate_policy']}")
+            print(f"Objective:    {dossier['proposal'].get('objective', '')}")
+            print(f"Promoted:     {'yes' if dossier['promotion']['is_current'] else 'no'}")
+            print(f"Next action:  {dossier['next_action']}")
         return 0
 
     if args.eval_action == "gate-candidate":
@@ -1123,6 +1155,15 @@ def cmd_eval(args):
                     max_friction_events=args.max_friction_events,
                 )
             gate = evaluate_candidate_gate(review, suite=suite, canary_report=canary_report)
+            gate["manifest_path"] = getattr(args, "manifest", "")
+            if getattr(args, "save_report", False) or getattr(args, "output", ""):
+                report_path = save_eval_report(
+                    gate,
+                    report_kind="gate",
+                    runtime_dir=runtime_dir,
+                    output_path=getattr(args, "output", ""),
+                )
+                gate["report_path"] = str(report_path)
         except Exception as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
@@ -1153,12 +1194,23 @@ def cmd_eval(args):
                     max_friction_events=args.max_friction_events,
                 )
             gate = evaluate_candidate_gate(review, suite=suite, canary_report=canary_report)
+            gate["objective"] = review.get("objective", "")
+            gate["touched_fragments"] = list(review.get("touched_fragments", []) or [])
+            gate["manifest_path"] = getattr(args, "manifest", "")
             record = promote_candidate(
                 gate,
                 runtime_dir=runtime_dir,
                 approved_by=args.approved_by,
                 force=args.force,
             )
+            if getattr(args, "save_report", False) or getattr(args, "output", ""):
+                report_path = save_eval_report(
+                    record,
+                    report_kind="promotion",
+                    runtime_dir=runtime_dir,
+                    output_path=getattr(args, "output", ""),
+                )
+                record["report_path"] = str(report_path)
         except Exception as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
@@ -1193,7 +1245,7 @@ def cmd_eval(args):
             print(name)
         return 0
 
-    print("Usage: thin-supervisor eval {list,run,replay,compare,expand,propose,review-candidate,gate-candidate,promote-candidate,promotion-history} ...")
+    print("Usage: thin-supervisor eval {list,run,replay,compare,expand,propose,review-candidate,candidate-status,gate-candidate,promote-candidate,promotion-history} ...")
     return 1
 
 
@@ -1736,14 +1788,23 @@ def main():
     p_eval_review = eval_sub.add_parser("review-candidate", help="Review a persisted candidate manifest")
     p_eval_review.add_argument("--candidate-id", default="", help="Candidate id to load from .supervisor/evals/candidates/")
     p_eval_review.add_argument("--manifest", default="", help="Explicit candidate manifest path")
+    p_eval_review.add_argument("--output", default="", help="Optional report output path")
+    p_eval_review.add_argument("--save-report", action="store_true", help="Persist report under .supervisor/evals/reports/")
     p_eval_review.add_argument("--config", default=None, help="Config YAML path")
     p_eval_review.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    p_eval_status = eval_sub.add_parser("candidate-status", help="Show a unified lifecycle dossier for a candidate")
+    p_eval_status.add_argument("--candidate-id", default="", help="Candidate id to load from .supervisor/evals/candidates/")
+    p_eval_status.add_argument("--manifest", default="", help="Explicit candidate manifest path")
+    p_eval_status.add_argument("--config", default=None, help="Config YAML path")
+    p_eval_status.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     p_eval_gate = eval_sub.add_parser("gate-candidate", help="Run the bounded promotion gate for a candidate")
     p_eval_gate.add_argument("--candidate-id", default="", help="Candidate id to load from .supervisor/evals/candidates/")
     p_eval_gate.add_argument("--manifest", default="", help="Explicit candidate manifest path")
     p_eval_gate.add_argument("--run-id", action="append", default=[], help="Optional canary run id (repeatable)")
     p_eval_gate.add_argument("--max-mismatch-rate", type=float, default=0.25, help="Canary hold threshold for mismatch rate")
     p_eval_gate.add_argument("--max-friction-events", type=int, default=0, help="Canary hold threshold for friction events")
+    p_eval_gate.add_argument("--output", default="", help="Optional report output path")
+    p_eval_gate.add_argument("--save-report", action="store_true", help="Persist report under .supervisor/evals/reports/")
     p_eval_gate.add_argument("--config", default=None, help="Config YAML path")
     p_eval_gate.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     p_eval_promote = eval_sub.add_parser("promote-candidate", help="Record a manually approved promotion decision")
@@ -1754,6 +1815,8 @@ def main():
     p_eval_promote.add_argument("--run-id", action="append", default=[], help="Optional canary run id (repeatable)")
     p_eval_promote.add_argument("--max-mismatch-rate", type=float, default=0.25, help="Canary hold threshold for mismatch rate")
     p_eval_promote.add_argument("--max-friction-events", type=int, default=0, help="Canary hold threshold for friction events")
+    p_eval_promote.add_argument("--output", default="", help="Optional report output path")
+    p_eval_promote.add_argument("--save-report", action="store_true", help="Persist report under .supervisor/evals/reports/")
     p_eval_promote.add_argument("--config", default=None, help="Config YAML path")
     p_eval_promote.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     p_eval_history = eval_sub.add_parser("promotion-history", help="Show promotion registry history")

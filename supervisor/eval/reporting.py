@@ -77,6 +77,30 @@ def load_candidate_manifest(
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def list_eval_reports(
+    *,
+    runtime_dir: str = ".supervisor/runtime",
+    report_kind: str = "",
+) -> list[dict]:
+    report_dir = default_report_dir(runtime_dir)
+    if not report_dir.exists():
+        return []
+
+    reports: list[dict] = []
+    for path in sorted(report_dir.glob("*.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        item = {
+            "path": str(path),
+            "report_kind": payload.get("report_kind", ""),
+            "saved_at": payload.get("saved_at", ""),
+            "payload": payload.get("payload", {}),
+        }
+        if report_kind and item["report_kind"] != report_kind:
+            continue
+        reports.append(item)
+    return reports
+
+
 def review_candidate_manifest(manifest: dict) -> dict:
     candidate = dict(manifest.get("candidate") or {})
     proposal = dict(manifest.get("proposal") or {})
