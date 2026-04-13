@@ -1006,10 +1006,12 @@ def cmd_eval(args):
     if args.eval_action == "canary":
         try:
             candidate_id = str(getattr(args, "candidate_id", "") or "").strip()
-            phase = str(getattr(args, "phase", "") or "").strip()
-            if phase and not candidate_id:
+            phase = str(getattr(args, "phase", None) or "").strip()
+            if phase and phase != "shadow" and not candidate_id:
                 print("Error: --phase requires --candidate-id", file=sys.stderr)
                 return 1
+            if candidate_id and not phase:
+                phase = "shadow"
             report = run_canary_eval(
                 args.run_id,
                 runtime_dir=runtime_dir,
@@ -1810,7 +1812,7 @@ def main():
     p_eval_canary = eval_sub.add_parser("canary", help="Aggregate replay/friction over recent real runs")
     p_eval_canary.add_argument("--run-id", action="append", required=True, help="Run id to include (repeatable)")
     p_eval_canary.add_argument("--candidate-id", default="", help="Optional candidate id to bind rollout bookkeeping")
-    p_eval_canary.add_argument("--phase", choices=["shadow", "limited"], default="shadow", help="Rollout phase when candidate-id is provided")
+    p_eval_canary.add_argument("--phase", choices=["shadow", "limited"], default=None, help="Rollout phase when candidate-id is provided (defaults to shadow)")
     p_eval_canary.add_argument("--max-mismatch-rate", type=float, default=0.25, help="Promotion hold threshold for mismatch rate")
     p_eval_canary.add_argument("--max-friction-events", type=int, default=0, help="Promotion hold threshold for friction events")
     p_eval_canary.add_argument("--output", default="", help="Optional report output path")

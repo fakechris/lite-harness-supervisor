@@ -62,6 +62,19 @@ def test_current_rollouts_returns_latest_per_candidate():
     assert current["candidate_b"]["phase"] == "shadow"
 
 
+def test_current_rollouts_ignores_none_candidate_and_saved_at_values():
+    history = [
+        {"candidate_id": None, "phase": "shadow", "saved_at": "2026-04-12T00:00:00+00:00"},
+        {"candidate_id": "candidate_a", "phase": "shadow", "saved_at": None},
+        {"candidate_id": "candidate_a", "phase": "limited", "saved_at": "2026-04-13T00:00:00+00:00"},
+    ]
+
+    current = current_rollouts(history)
+
+    assert list(current) == ["candidate_a"]
+    assert current["candidate_a"]["phase"] == "limited"
+
+
 def test_list_rollouts_skips_malformed_jsonl_lines(tmp_path):
     runtime_dir = tmp_path / ".supervisor" / "runtime"
     record_rollout(candidate_id="candidate_a", phase="shadow", canary_report=_canary_report(), runtime_dir=str(runtime_dir))

@@ -65,10 +65,10 @@ def list_rollouts(
 def current_rollouts(history: list[dict]) -> dict[str, dict]:
     current: dict[str, dict] = {}
     for item in history:
-        candidate_id = str(item.get("candidate_id", "")).strip()
+        candidate_id = str(item.get("candidate_id") or "").strip()
         if not candidate_id:
             continue
         previous = current.get(candidate_id)
-        if previous is None or str(item.get("saved_at", "")) >= str(previous.get("saved_at", "")):
+        if previous is None or str(item.get("saved_at") or "") >= str(previous.get("saved_at") or ""):
             current[candidate_id] = item
     return current

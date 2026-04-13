@@ -868,6 +868,37 @@ def test_eval_canary_json_output(monkeypatch, capsys):
     assert payload["summary"]["run_count"] == 2
 
 
+def test_eval_canary_allows_parser_default_shadow_without_candidate(monkeypatch, capsys):
+    monkeypatch.setattr("supervisor.eval.run_canary_eval", lambda run_ids, **kwargs: {
+        "decision": "hold",
+        "summary": {
+            "run_count": len(run_ids),
+            "avg_pass_rate": 0.75,
+            "mismatch_kinds": {"ux_only_divergence": 1},
+            "friction": {"total_events": 1, "by_kind": {"repeated_confirmation": 1}, "by_signal": {}},
+        },
+        "runs": [{"run_id": run_id} for run_id in run_ids],
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="canary",
+        run_id=["run_a"],
+        candidate_id="",
+        phase="shadow",
+        max_mismatch_rate=0.25,
+        max_friction_events=1,
+        output="",
+        save_report=False,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["decision"] == "hold"
+    assert payload["summary"]["run_count"] == 1
+
+
 def test_eval_canary_json_output_can_record_rollout(tmp_path, monkeypatch, capsys):
     runtime_dir = tmp_path / ".supervisor" / "runtime"
     cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
