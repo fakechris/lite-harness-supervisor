@@ -425,6 +425,45 @@ def test_learn_friction_add_and_list_json(tmp_path, monkeypatch, capsys):
     assert events[0]["kind"] == "repeated_confirmation"
 
 
+def test_learn_friction_summarize_json(tmp_path, monkeypatch, capsys):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    config_path = tmp_path / ".supervisor" / "config.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps({"runtime_dir": str(runtime_dir)}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    app.cmd_learn(argparse.Namespace(
+        learn_action="friction",
+        friction_action="add",
+        kind="repeated_confirmation",
+        message="user approved twice",
+        run_id="run_1",
+        user_id="default",
+        signal=["user_repeated_approval"],
+        json=False,
+        config=None,
+    ))
+    capsys.readouterr()
+
+    result = app.cmd_learn(argparse.Namespace(
+        learn_action="friction",
+        friction_action="summarize",
+        kind="",
+        run_id="run_1",
+        user_id="default",
+        json=True,
+        config=None,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["total_events"] == 1
+    assert payload["by_kind"]["repeated_confirmation"] == 1
+
+
 def test_learn_prefs_set_and_show_json(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
 
@@ -528,6 +567,7 @@ def test_eval_run_outputs_json_summary(capsys):
     assert payload["suite"] == "approval-core"
     assert payload["counts"]["total"] >= 1
     assert "pass_rate" in payload["counts"]
+    assert "weighted" in payload
 
 
 def test_eval_replay_outputs_json_summary(tmp_path, monkeypatch, capsys):
@@ -674,6 +714,17 @@ def test_eval_propose_outputs_json_summary(capsys):
     assert payload["recommended_candidate_policy"] == "builtin-approval-strict-v1"
 
 
+def test_eval_list_includes_new_supervision_policy_suites(capsys):
+    result = app.cmd_eval(argparse.Namespace(eval_action="list"))
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert "approval-core" in out
+    assert "routing-core" in out
+    assert "escalation-core" in out
+    assert "finish-gate-core" in out
+
+
 def test_eval_run_can_save_report(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
 
@@ -786,6 +837,35 @@ def test_run_replay_json_output(monkeypatch, capsys):
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["matched_count"] == 2
+
+
+def test_eval_canary_json_output(monkeypatch, capsys):
+    monkeypatch.setattr("supervisor.eval.run_canary_eval", lambda run_ids, **kwargs: {
+        "decision": "hold",
+        "summary": {
+            "run_count": len(run_ids),
+            "avg_pass_rate": 0.75,
+            "mismatch_kinds": {"ux_only_divergence": 1},
+            "friction": {"total_events": 1, "by_kind": {"repeated_confirmation": 1}, "by_signal": {}},
+        },
+        "runs": [{"run_id": run_id} for run_id in run_ids],
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="canary",
+        run_id=["run_a", "run_b"],
+        max_mismatch_rate=0.25,
+        max_friction_events=1,
+        output="",
+        save_report=False,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["decision"] == "hold"
+    assert payload["summary"]["run_count"] == 2
 
 
 def test_run_postmortem_writes_default_report(tmp_path, monkeypatch):

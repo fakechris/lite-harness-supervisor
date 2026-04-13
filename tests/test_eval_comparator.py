@@ -16,6 +16,7 @@ def test_compare_eval_policies_blinds_outputs_and_finds_baseline_win():
     assert report["summary"]["total_cases"] >= 1
     assert report["summary"]["wins"]["baseline"] >= 1
     assert report["summary"]["wins"]["candidate"] == 0
+    assert report["summary"]["weighted_wins"]["baseline"] >= 1.0
     first = report["comparisons"][0]
     assert first["blind"]["A"]["policy"] != first["blind"]["B"]["policy"]
     assert {
@@ -66,3 +67,4 @@ def test_compare_eval_policies_matches_cases_by_case_id(monkeypatch):
     )
 
     assert report["summary"]["wins"]["tie"] == 2
+    assert report["summary"]["weighted_wins"]["tie"] == 0.0

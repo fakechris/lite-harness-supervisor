@@ -256,16 +256,18 @@ thin-supervisor run postmortem <run_id> [--output file]
 thin-supervisor spec approve --spec <spec> [--by human]
 thin-supervisor learn friction add --kind <kind> --message "..." [--run-id <run_id>] [--signal <signal>]
 thin-supervisor learn friction list [--run-id <run_id>] [--kind <kind>] [--json]
+thin-supervisor learn friction summarize [--run-id <run_id>] [--kind <kind>] [--json]
 thin-supervisor learn prefs set --key <key> --value <value>
 thin-supervisor learn prefs show [--json]
 thin-supervisor eval list
-thin-supervisor eval run [--suite approval-core] [--json]
+thin-supervisor eval run [--suite approval-core|routing-core|escalation-core|finish-gate-core] [--json]
 thin-supervisor eval replay --run-id <run_id> [--json]
 thin-supervisor eval compare --suite approval-core --candidate-policy <policy> [--json]
+thin-supervisor eval canary --run-id <run_id> [--run-id <run_id> ...] [--json]
 thin-supervisor eval expand --suite approval-core --output <path> [--variants-per-case 2]
 thin-supervisor eval propose --suite approval-core --objective <goal> [--json]
 
-Add `--save-report` to `run`, `replay`, `compare`, or `propose` to persist a JSON report under `.supervisor/evals/reports/`.
+Add `--save-report` to `run`, `replay`, `compare`, `canary`, or `propose` to persist a JSON report under `.supervisor/evals/reports/`.
 
 thin-supervisor status                                     # Active runs in current worktree
 thin-supervisor list                                       # Detailed active-run view
@@ -288,7 +290,7 @@ thin-supervisor bridge <action> [args]                     # tmux bridge operati
 
 If a daemon-managed run pauses, `status` and `list` now show the human-readable reason and the suggested next command. For non-active persisted runs, the same hint appears under `Local state found:`.
 
-`thin-supervisor eval` is the first offline evaluation surface for the new skill-evolution work. The initial bundled suite is `approval-core`, which deterministically checks explicit-approval vs re-ask behavior. `thin-supervisor eval replay --run-id ...` wraps the existing history replay path into the same evaluation surface so policy candidates can be checked against real historical traces. `thin-supervisor eval compare ...` adds a blind `A/B`-style comparator over deterministic suite results so baseline and candidate policies can be compared without hard-coding one output format into the report consumer. `thin-supervisor eval expand ...` generates provenance-tagged synthetic variants from the golden suite so coverage can grow without mutating the original contract set. `thin-supervisor eval propose ...` is the first constrained candidate-generator surface: it summarizes failure cases, consults the advisory/self-review layer, and recommends a policy candidate for a stated objective without automatically changing shipped defaults.
+`thin-supervisor eval` is the first offline evaluation surface for the new skill-evolution work. Bundled suites now cover more than approval copy: `approval-core` checks explicit approval vs re-ask behavior, `routing-core` checks deterministic `step_done/workflow_done -> VERIFY_STEP` routing, `escalation-core` checks `blocked -> ESCALATE_TO_HUMAN`, and `finish-gate-core` checks reviewer and completion contracts. `thin-supervisor eval replay --run-id ...` wraps the existing history replay path into the same evaluation surface so policy candidates can be checked against real historical traces. `thin-supervisor eval compare ...` adds a blind `A/B`-style comparator over deterministic suite results so baseline and candidate policies can be compared without hard-coding one output format into the report consumer. `thin-supervisor eval canary ...` aggregates replay pass-rate, mismatch kinds, and friction over a set of real runs so shadow-canary promotion decisions become a command instead of a checklist. `thin-supervisor eval expand ...` generates provenance-tagged synthetic variants from the golden suite so coverage can grow without mutating the original contract set. `thin-supervisor eval propose ...` is the first constrained candidate-generator surface: it summarizes failure cases, consults the advisory/self-review layer, and recommends a policy candidate for a stated objective without automatically changing shipped defaults.
 
 ### Real Canary Loop
 
@@ -301,6 +303,7 @@ Yes, you should run real canaries. A safe sequence is:
    `thin-supervisor run summarize <run_id>`
    `thin-supervisor run postmortem <run_id>`
    `thin-supervisor eval replay --run-id <run_id> --save-report`
+   `thin-supervisor eval canary --run-id <run_id> ... --save-report`
 3. Limited rollout
    If shadow canary stays clean, run 10-20 real tasks with the candidate under close observation.
 
@@ -312,6 +315,12 @@ thin-supervisor learn friction add \
   --message "user had to approve twice" \
   --run-id <run_id> \
   --signal user_repeated_approval
+```
+
+Then summarize what actually accumulated for a run:
+
+```bash
+thin-supervisor learn friction summarize --run-id <run_id> --json
 ```
 
 ### Bridge subcommands

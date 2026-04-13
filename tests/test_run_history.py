@@ -204,6 +204,9 @@ def test_summarize_run_reports_counts_and_oracle_links(tmp_path, monkeypatch):
     assert summary["counts"]["oracle_notes"] == 1
     assert summary["counts"]["friction_events"] == 1
     assert summary["friction_kinds"] == ["repeated_confirmation"]
+    assert summary["friction_summary"]["total_events"] == 1
+    assert summary["friction_summary"]["by_kind"]["repeated_confirmation"] == 1
+    assert summary["friction_summary"]["by_signal"]["user_repeated_approval"] == 1
     assert summary["oracle_consultation_ids"] == ["oracle_123"]
 
 

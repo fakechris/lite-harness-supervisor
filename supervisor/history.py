@@ -9,7 +9,11 @@ from pathlib import Path
 
 from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
-from supervisor.learning import list_friction_events, load_user_preferences
+from supervisor.learning import (
+    list_friction_events,
+    load_user_preferences,
+    summarize_friction_events,
+)
 
 
 SCHEMA_VERSION = "run_export.v1"
@@ -107,6 +111,7 @@ def export_run(run_id: str, runtime_dir: str = ".supervisor/runtime") -> dict:
         "session_log": _read_jsonl(run_dir / "session_log.jsonl"),
         "notes": related_notes(run_id, runtime_dir),
         "friction_events": list_friction_events(runtime_dir, run_id=run_id, user_id=user_id),
+        "friction_summary": summarize_friction_events(runtime_dir, run_id=run_id, user_id=user_id),
         "user_preferences": load_user_preferences(runtime_dir, user_id=user_id),
     }
 
@@ -115,6 +120,11 @@ def summarize_run(exported: dict) -> dict:
     session_log = exported.get("session_log", [])
     notes = exported.get("notes", [])
     friction_events = exported.get("friction_events", [])
+    friction_summary = exported.get("friction_summary") or {
+        "total_events": len(friction_events),
+        "by_kind": {},
+        "by_signal": {},
+    }
     event_counts = Counter(event.get("event_type", "") for event in session_log)
     friction_kinds = sorted({event.get("kind", "") for event in friction_events if event.get("kind", "")})
     verification_ok = 0
@@ -159,6 +169,7 @@ def summarize_run(exported: dict) -> dict:
         },
         "oracle_consultation_ids": oracle_ids,
         "friction_kinds": friction_kinds,
+        "friction_summary": friction_summary,
     }
 
 
@@ -217,11 +228,13 @@ def replay_run(exported: dict) -> dict:
                     and predicted.get("selected_branch") == actual.get("selected_branch")
                     and predicted.get("needs_human") == actual.get("needs_human")
                 )
+                mismatch_kind = _classify_replay_divergence(predicted, actual) if not matched else ""
                 records.append({
                     "checkpoint_seq": payload.get("checkpoint_seq", 0),
                     "predicted": predicted,
                     "actual": actual,
                     "matched": matched,
+                    "mismatch_kind": mismatch_kind,
                 })
                 loop.apply_decision(spec, state, predicted)
             elif event_type == "verification":
@@ -235,6 +248,29 @@ def replay_run(exported: dict) -> dict:
         "mismatches": mismatches,
         "records": records,
     }
+
+
+def _classify_replay_divergence(predicted: dict, actual: dict) -> str:
+    predicted_decision = predicted.get("decision", "")
+    actual_decision = actual.get("decision", "")
+    predicted_needs_human = bool(predicted.get("needs_human", False))
+    actual_needs_human = bool(actual.get("needs_human", False))
+
+    if predicted_needs_human != actual_needs_human:
+        return "safety_regression"
+    if {
+        predicted_decision,
+        actual_decision,
+    } & {"ESCALATE_TO_HUMAN", "ABORT"} and predicted_decision != actual_decision:
+        return "safety_regression"
+    if predicted_decision == actual_decision and predicted.get("gate_type") != actual.get("gate_type"):
+        return "equivalent_divergence"
+    if (
+        predicted.get("next_node_id") != actual.get("next_node_id")
+        or predicted.get("selected_branch") != actual.get("selected_branch")
+    ):
+        return "risky_routing_divergence"
+    return "ux_only_divergence"
 
 
 def render_postmortem(exported: dict) -> str:

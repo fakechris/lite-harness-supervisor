@@ -124,4 +124,89 @@ def test_run_replay_eval_returns_non_regression_summary(tmp_path, monkeypatch):
     assert report["summary"]["decision_count"] == 1
     assert report["summary"]["matched_count"] == 1
     assert report["summary"]["mismatch_count"] == 0
+    assert report["summary"]["mismatch_kinds"] == {}
+    assert report["summary"]["friction"]["total_events"] == 0
     assert report["summary"]["pass_rate"] == 1.0
+
+
+def test_run_replay_eval_classifies_mismatch_kinds(tmp_path, monkeypatch):
+    workspace, run_id = _build_replay_workspace(tmp_path)
+    run_dir = workspace / ".supervisor" / "runtime" / "runs" / run_id
+    decision = {
+        "decision_id": "dec_1",
+        "decision": "ESCALATE_TO_HUMAN",
+        "reason": "checkpoint says blocked",
+        "confidence": 1.0,
+        "needs_human": True,
+        "timestamp": "2026-04-12T00:00:01Z",
+        "gate_type": "checkpoint_status",
+        "triggered_by_seq": 1,
+        "triggered_by_checkpoint_id": "cp_1",
+        "next_instruction": None,
+        "selected_branch": None,
+        "next_node_id": None,
+    }
+    events = [
+        {
+            "run_id": run_id,
+            "seq": 1,
+            "event_type": "checkpoint",
+            "timestamp": "2026-04-12T00:00:01Z",
+            "payload": {
+                "checkpoint_id": "cp_1",
+                "run_id": run_id,
+                "checkpoint_seq": 1,
+                "status": "workflow_done",
+                "current_node": "first",
+                "summary": "done",
+            },
+        },
+        {
+            "run_id": run_id,
+            "seq": 2,
+            "event_type": "gate_decision",
+            "timestamp": "2026-04-12T00:00:01Z",
+            "payload": decision,
+        },
+    ]
+    (run_dir / "decision_log.jsonl").write_text(json.dumps(decision) + "\n", encoding="utf-8")
+    (run_dir / "session_log.jsonl").write_text(
+        "\n".join(json.dumps(item) for item in events) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(workspace)
+
+    from supervisor.eval.replay import run_replay_eval
+
+    report = run_replay_eval(run_id)
+
+    assert report["summary"]["mismatch_count"] == 1
+    assert report["summary"]["mismatch_kinds"]["safety_regression"] == 1
+
+
+def test_run_replay_eval_includes_friction_summary(tmp_path, monkeypatch):
+    workspace, run_id = _build_replay_workspace(tmp_path)
+    shared = workspace / ".supervisor" / "runtime" / "shared"
+    (shared / "friction_events.jsonl").write_text(
+        json.dumps(
+            {
+                "event_id": "friction_1",
+                "timestamp": "2026-04-12T00:00:02Z",
+                "kind": "repeated_confirmation",
+                "message": "user had to approve twice",
+                "run_id": run_id,
+                "user_id": "default",
+                "signals": ["user_repeated_approval"],
+                "metadata": {},
+            }
+        ) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(workspace)
+
+    from supervisor.eval.replay import run_replay_eval
+
+    report = run_replay_eval(run_id)
+
+    assert report["summary"]["friction"]["total_events"] == 1
+    assert report["summary"]["friction"]["by_kind"]["repeated_confirmation"] == 1

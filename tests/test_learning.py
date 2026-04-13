@@ -11,6 +11,7 @@ from supervisor.learning import (
     list_friction_events,
     load_user_preferences,
     save_user_preferences,
+    summarize_friction_events,
 )
 
 
@@ -109,3 +110,36 @@ def test_save_user_preferences_preserves_other_users(tmp_path):
     assert updated["approval_style"] == "verbose"
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["alice"]["clarify_tolerance"] == "low"
+
+
+def test_summarize_friction_events_groups_by_kind_and_signal(tmp_path):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+
+    append_friction_event(
+        runtime_dir,
+        kind="repeated_confirmation",
+        message="user approved twice",
+        run_id="run_1",
+        signals=["user_repeated_approval", "agent_reasked"],
+    )
+    append_friction_event(
+        runtime_dir,
+        kind="repeated_confirmation",
+        message="user approved twice again",
+        run_id="run_1",
+        signals=["user_repeated_approval"],
+    )
+    append_friction_event(
+        runtime_dir,
+        kind="unexpected_pause_confusion",
+        message="user missed pause",
+        run_id="run_2",
+        signals=["silent_pause"],
+    )
+
+    summary = summarize_friction_events(runtime_dir, run_id="run_1")
+
+    assert summary["total_events"] == 2
+    assert summary["by_kind"]["repeated_confirmation"] == 2
+    assert summary["by_signal"]["user_repeated_approval"] == 2
+    assert summary["by_signal"]["agent_reasked"] == 1

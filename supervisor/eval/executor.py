@@ -2,7 +2,17 @@ from __future__ import annotations
 
 import re
 
+from supervisor.domain.enums import TopState
+from supervisor.domain.models import (
+    AcceptanceContract,
+    RetryBudget,
+    StepSpec,
+    SupervisorState,
+    WorkflowSpec,
+)
 from supervisor.eval.cases import EvalCase, EvalSuite
+from supervisor.gates.finish_gate import FinishGate
+from supervisor.loop import SupervisorLoop
 
 
 _APPROVAL_PATTERNS = [
@@ -33,6 +43,23 @@ _NOT_READY_PATTERNS = [
     r"先改",
     r"修改",
 ]
+
+_SEVERITY_WEIGHTS = {
+    "low": 1.0,
+    "medium": 2.0,
+    "high": 3.0,
+    "critical": 5.0,
+}
+
+
+class _EvalStore:
+    runtime_root = ".supervisor/runtime"
+
+    def append_session_event(self, *_args, **_kwargs):
+        return None
+
+    def save(self, *_args, **_kwargs):
+        return None
 
 
 def _last_user_message(case: EvalCase) -> str:
@@ -95,6 +122,111 @@ _POLICIES = {
 }
 
 
+def _case_weight(case: EvalCase) -> float:
+    explicit = case.weights.get("case")
+    if explicit is not None:
+        try:
+            return float(explicit)
+        except (TypeError, ValueError):
+            pass
+    return _SEVERITY_WEIGHTS.get(case.severity, _SEVERITY_WEIGHTS["medium"])
+
+
+def _build_eval_spec(case: EvalCase) -> WorkflowSpec:
+    step_ids = list(case.metadata.get("step_ids") or ["s1"])
+    steps = [StepSpec(id=step_id, type="task", objective=f"eval {step_id}") for step_id in step_ids]
+    acceptance = AcceptanceContract(
+        goal="eval",
+        require_all_steps_done=bool(case.metadata.get("require_all_steps_done", True)),
+        require_verification_pass=bool(case.metadata.get("require_verification_pass", True)),
+        must_review_by=str(case.metadata.get("must_review_by") or ""),
+        forbidden_states=list(case.metadata.get("forbidden_states") or []),
+        risk_class=str(case.metadata.get("risk_class") or "standard"),
+    )
+    return WorkflowSpec(
+        kind="linear_plan",
+        id=f"eval_{case.case_id}",
+        goal="eval",
+        steps=steps,
+        acceptance=acceptance,
+    )
+
+
+def _build_eval_state(case: EvalCase, spec: WorkflowSpec) -> SupervisorState:
+    state = SupervisorState(
+        run_id="run_eval",
+        spec_id=spec.id,
+        mode="sidecar",
+        top_state=TopState.GATING,
+        current_node_id=str(case.metadata.get("current_node_id") or spec.first_node_id()),
+        retry_budget=RetryBudget(),
+    )
+    state.done_node_ids = list(case.metadata.get("done_node_ids") or [])
+    state.completed_reviews = list(case.metadata.get("completed_reviews") or [])
+    state.verification = {"ok": bool(case.metadata.get("verification_ok", False))}
+    checkpoint_status = str(case.metadata.get("checkpoint_status") or "")
+    if checkpoint_status:
+        state.last_agent_checkpoint = {"status": checkpoint_status}
+    return state
+
+
+def _detect_gate_decision(case: EvalCase) -> dict:
+    spec = _build_eval_spec(case)
+    state = _build_eval_state(case, spec)
+    decision = SupervisorLoop(_EvalStore()).gate(spec, state)
+    return {
+        "decision": decision.decision,
+        "needs_human": decision.needs_human,
+        "gate_type": decision.gate_type,
+    }
+
+
+def _evaluate_finish_gate(case: EvalCase) -> dict:
+    spec = _build_eval_spec(case)
+    state = _build_eval_state(case, spec)
+    result = FinishGate().evaluate(spec, state)
+    return {
+        "finish_ok": result["ok"],
+        "risk_class": result["risk_class"],
+        "reason": result["reason"],
+    }
+
+
+def _evaluate_case(case: EvalCase, detector) -> dict:
+    if case.category == "approval":
+        return detector(case)
+    if case.category == "gate_decision":
+        return _detect_gate_decision(case)
+    if case.category == "finish_gate":
+        return _evaluate_finish_gate(case)
+    raise ValueError(f"unsupported eval category: {case.category}")
+
+
+def _expected_result_map(case: EvalCase) -> dict:
+    expected = dict(case.expected)
+    if case.expected_decision and "decision" not in expected:
+        expected["decision"] = case.expected_decision
+    return expected
+
+
+def _mismatches_for_case(case: EvalCase, actual: dict) -> dict:
+    expected = _expected_result_map(case)
+    mismatches: dict[str, dict] = {}
+    for key, expected_value in expected.items():
+        actual_value = actual.get(key)
+        if key == "reason_contains":
+            if str(expected_value) not in str(actual.get("reason", "")):
+                mismatches[key] = {"expected": expected_value, "actual": actual.get("reason", "")}
+            continue
+        if key == "decision" and case.allowed_alternatives:
+            if actual_value != expected_value and actual_value not in set(case.allowed_alternatives):
+                mismatches[key] = {"expected": expected_value, "actual": actual_value}
+            continue
+        if actual_value != expected_value:
+            mismatches[key] = {"expected": expected_value, "actual": actual_value}
+    return mismatches
+
+
 def run_eval_suite(suite: EvalSuite, *, policy: str = "builtin-approval-v1") -> dict:
     detector = _POLICIES.get(policy)
     if detector is None:
@@ -103,25 +235,26 @@ def run_eval_suite(suite: EvalSuite, *, policy: str = "builtin-approval-v1") -> 
     results: list[dict] = []
     passed = 0
     failed = 0
+    weighted_total = 0.0
+    weighted_passed = 0.0
 
     for case in suite.cases:
-        if case.category != "approval":
-            raise ValueError(f"unsupported eval category: {case.category}")
-        actual = detector(case)
-        mismatches = {
-            key: {"expected": expected, "actual": actual.get(key)}
-            for key, expected in case.expected.items()
-            if actual.get(key) != expected
-        }
+        actual = _evaluate_case(case, detector)
+        mismatches = _mismatches_for_case(case, actual)
         case_passed = not mismatches
+        weight = _case_weight(case)
         passed += 1 if case_passed else 0
         failed += 0 if case_passed else 1
+        weighted_total += weight
+        weighted_passed += weight if case_passed else 0.0
         results.append(
             {
                 "case_id": case.case_id,
                 "category": case.category,
+                "severity": case.severity,
+                "weight": weight,
                 "passed": case_passed,
-                "expected": case.expected,
+                "expected": _expected_result_map(case),
                 "actual": actual,
                 "mismatches": mismatches,
             }
@@ -136,6 +269,12 @@ def run_eval_suite(suite: EvalSuite, *, policy: str = "builtin-approval-v1") -> 
             "passed": passed,
             "failed": failed,
             "pass_rate": (passed / total) if total else 0.0,
+        },
+        "weighted": {
+            "total": weighted_total,
+            "passed": weighted_passed,
+            "failed": max(weighted_total - weighted_passed, 0.0),
+            "pass_rate": (weighted_passed / weighted_total) if weighted_total else 0.0,
         },
         "results": results,
     }
