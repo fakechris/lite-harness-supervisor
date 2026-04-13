@@ -869,6 +869,168 @@ def cmd_learn(args):
     return 1
 
 
+def cmd_eval(args):
+    """Run deterministic eval suites for skill and policy behavior."""
+    from supervisor.eval import (
+        compare_eval_policies,
+        default_report_dir,
+        expand_eval_suite,
+        list_bundled_suites,
+        load_eval_suite,
+        propose_candidate_policy,
+        run_eval_suite,
+        run_replay_eval,
+        save_eval_report,
+        save_eval_suite,
+    )
+
+    runtime_dir = RuntimeConfig.load(getattr(args, "config", None) or CONFIG_FILE).runtime_dir
+
+    if args.eval_action == "run":
+        try:
+            suite_ref = args.suite_file or args.suite
+            suite = load_eval_suite(suite_ref)
+            report = run_eval_suite(suite, policy=args.policy)
+            if getattr(args, "save_report", False) or getattr(args, "output", ""):
+                report_path = save_eval_report(
+                    report,
+                    report_kind="run",
+                    runtime_dir=runtime_dir,
+                    output_path=getattr(args, "output", ""),
+                )
+                report["report_path"] = str(report_path)
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+
+        if getattr(args, "json", False):
+            print(json.dumps(report, ensure_ascii=False))
+        else:
+            counts = report["counts"]
+            print(f"Suite:     {report['suite']}")
+            print(f"Policy:    {report['policy']}")
+            print(f"Pass rate: {counts['passed']}/{counts['total']} ({counts['pass_rate']:.0%})")
+            for item in report["results"]:
+                status = "PASS" if item["passed"] else "FAIL"
+                print(f"{status} {item['case_id']}")
+        return 0
+
+    if args.eval_action == "replay":
+        try:
+            report = run_replay_eval(args.run_id, runtime_dir=runtime_dir)
+            if getattr(args, "save_report", False) or getattr(args, "output", ""):
+                report_path = save_eval_report(
+                    report,
+                    report_kind="replay",
+                    runtime_dir=runtime_dir,
+                    output_path=getattr(args, "output", ""),
+                )
+                report["report_path"] = str(report_path)
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(json.dumps(report, ensure_ascii=False))
+        else:
+            summary = report["summary"]
+            print(f"Run:       {report['run_id']}")
+            print(f"Decisions: {summary['matched_count']}/{summary['decision_count']} matched")
+            print(f"Mismatches:{summary['mismatch_count']}")
+            print(f"Pass rate: {summary['pass_rate']:.0%}")
+        return 0
+
+    if args.eval_action == "compare":
+        try:
+            suite_ref = args.suite_file or args.suite
+            suite = load_eval_suite(suite_ref)
+            report = compare_eval_policies(
+                suite,
+                baseline_policy=args.baseline_policy,
+                candidate_policy=args.candidate_policy,
+            )
+            if getattr(args, "save_report", False) or getattr(args, "output", ""):
+                report_path = save_eval_report(
+                    report,
+                    report_kind="compare",
+                    runtime_dir=runtime_dir,
+                    output_path=getattr(args, "output", ""),
+                )
+                report["report_path"] = str(report_path)
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(json.dumps(report, ensure_ascii=False))
+        else:
+            wins = report["summary"]["wins"]
+            print(f"Suite:      {report['suite']}")
+            print(f"Baseline:   {report['baseline_policy']}")
+            print(f"Candidate:  {report['candidate_policy']}")
+            print(f"Wins:       baseline={wins['baseline']} candidate={wins['candidate']} tie={wins['tie']}")
+        return 0
+
+    if args.eval_action == "expand":
+        try:
+            suite_ref = args.suite_file or args.suite
+            suite = load_eval_suite(suite_ref)
+            expanded = expand_eval_suite(suite, variants_per_case=args.variants_per_case)
+            output = save_eval_suite(expanded, args.output)
+            payload = {
+                "suite": suite.name,
+                "output": str(output),
+                "generated_cases": len(expanded.cases),
+                "variants_per_case": args.variants_per_case,
+            }
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            print(f"Expanded suite: {suite.name}")
+            print(f"Output:         {output}")
+            print(f"Generated:      {len(expanded.cases)} cases")
+        return 0
+
+    if args.eval_action == "propose":
+        try:
+            suite_ref = args.suite_file or args.suite
+            suite = load_eval_suite(suite_ref)
+            proposal = propose_candidate_policy(
+                suite,
+                objective=args.objective,
+                baseline_policy=args.baseline_policy,
+            )
+            if getattr(args, "save_report", False) or getattr(args, "output", ""):
+                report_path = save_eval_report(
+                    proposal,
+                    report_kind="proposal",
+                    runtime_dir=runtime_dir,
+                    output_path=getattr(args, "output", ""),
+                )
+                proposal["report_path"] = str(report_path)
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(json.dumps(proposal, ensure_ascii=False))
+        else:
+            print(f"Suite:        {proposal['suite']}")
+            print(f"Objective:    {proposal['objective']}")
+            print(f"Baseline:     {proposal['baseline_policy']}")
+            print(f"Recommended:  {proposal['recommended_candidate_policy']}")
+            print(f"Rationale:    {proposal['rationale']}")
+        return 0
+
+    if args.eval_action == "list":
+        for name in list_bundled_suites():
+            print(name)
+        return 0
+
+    print("Usage: thin-supervisor eval {list,run,replay,compare,expand,propose} ...")
+    return 1
+
+
 # ------------------------------------------------------------------
 # skill install
 # ------------------------------------------------------------------
@@ -1343,6 +1505,54 @@ def main():
     p_prefs_show.add_argument("--json", action="store_true", help="Print JSON output")
     p_prefs_show.add_argument("--config", default=None, help="Config YAML path")
 
+    # eval
+    p_eval = sub.add_parser("eval", help="Run deterministic skill/policy eval suites")
+    eval_sub = p_eval.add_subparsers(dest="eval_action")
+    eval_sub.add_parser("list", help="List bundled eval suites")
+    p_eval_run = eval_sub.add_parser("run", help="Run a bundled or explicit eval suite")
+    p_eval_run.add_argument("--suite", default="approval-core", help="Bundled suite name")
+    p_eval_run.add_argument("--suite-file", default=None, help="Path to a JSONL eval suite")
+    p_eval_run.add_argument("--policy", default="builtin-approval-v1", help="Policy adapter to evaluate")
+    p_eval_run.add_argument("--output", default="", help="Optional report output path")
+    p_eval_run.add_argument("--save-report", action="store_true", help="Persist report under .supervisor/evals/reports/")
+    p_eval_run.add_argument("--config", default=None, help="Config YAML path")
+    p_eval_run.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    p_eval_replay = eval_sub.add_parser("replay", help="Replay a historical run as an eval report")
+    p_eval_replay.add_argument("--run-id", required=True, help="Historical run id")
+    p_eval_replay.add_argument("--output", default="", help="Optional report output path")
+    p_eval_replay.add_argument("--save-report", action="store_true", help="Persist report under .supervisor/evals/reports/")
+    p_eval_replay.add_argument("--config", default=None, help="Config YAML path")
+    p_eval_replay.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    p_eval_compare = eval_sub.add_parser("compare", help="Blind-compare baseline vs candidate policy on a suite")
+    p_eval_compare.add_argument("--suite", default="approval-core", help="Bundled suite name")
+    p_eval_compare.add_argument("--suite-file", default=None, help="Path to a JSONL eval suite")
+    p_eval_compare.add_argument("--baseline-policy", default="builtin-approval-v1", help="Baseline policy id")
+    p_eval_compare.add_argument("--candidate-policy", required=True, help="Candidate policy id")
+    p_eval_compare.add_argument("--output", default="", help="Optional report output path")
+    p_eval_compare.add_argument("--save-report", action="store_true", help="Persist report under .supervisor/evals/reports/")
+    p_eval_compare.add_argument("--config", default=None, help="Config YAML path")
+    p_eval_compare.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    p_eval_expand = eval_sub.add_parser("expand", help="Generate synthetic variants from a suite")
+    p_eval_expand.add_argument("--suite", default="approval-core", help="Bundled suite name")
+    p_eval_expand.add_argument("--suite-file", default=None, help="Path to a JSONL eval suite")
+    p_eval_expand.add_argument("--output", required=True, help="Output JSONL path")
+    p_eval_expand.add_argument("--variants-per-case", type=int, default=2, help="Synthetic variants to generate per case")
+    p_eval_expand.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    p_eval_propose = eval_sub.add_parser("propose", help="Propose a constrained candidate policy for an objective")
+    p_eval_propose.add_argument("--suite", default="approval-core", help="Bundled suite name")
+    p_eval_propose.add_argument("--suite-file", default=None, help="Path to a JSONL eval suite")
+    p_eval_propose.add_argument("--baseline-policy", default="builtin-approval-v1", help="Baseline policy id")
+    p_eval_propose.add_argument(
+        "--objective",
+        required=True,
+        choices=["reduce_repeated_confirmation", "reduce_false_approval"],
+        help="Optimization objective",
+    )
+    p_eval_propose.add_argument("--output", default="", help="Optional report output path")
+    p_eval_propose.add_argument("--save-report", action="store_true", help="Persist report under .supervisor/evals/reports/")
+    p_eval_propose.add_argument("--config", default=None, help="Config YAML path")
+    p_eval_propose.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+
     # session
     p_session = sub.add_parser("session", help="Session detection")
     session_sub = p_session.add_subparsers(dest="session_action")
@@ -1439,6 +1649,8 @@ def main():
         sys.exit(cmd_spec(args))
     elif args.command == "learn":
         sys.exit(cmd_learn(args))
+    elif args.command == "eval":
+        sys.exit(cmd_eval(args))
     elif args.command == "session":
         if args.session_action in ("detect", "jsonl", "list"):
             sys.exit(cmd_session(args))

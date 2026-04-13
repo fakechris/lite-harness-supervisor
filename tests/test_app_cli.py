@@ -511,6 +511,188 @@ def test_learn_prefs_show_returns_controlled_error_on_store_failure(monkeypatch,
     assert "Error: corrupt user preferences store" in err
 
 
+def test_eval_run_outputs_json_summary(capsys):
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="run",
+        suite="approval-core",
+        suite_file=None,
+        policy="builtin-approval-v1",
+        output="",
+        save_report=False,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["suite"] == "approval-core"
+    assert payload["counts"]["total"] >= 1
+    assert "pass_rate" in payload["counts"]
+
+
+def test_eval_replay_outputs_json_summary(tmp_path, monkeypatch, capsys):
+    run_id = "run_cli_replay"
+    spec_path = tmp_path / ".supervisor" / "specs" / "demo.yaml"
+    spec_path.parent.mkdir(parents=True, exist_ok=True)
+    spec_path.write_text(
+        "kind: linear_plan\n"
+        "id: demo\n"
+        "goal: replay cli test\n"
+        "steps:\n"
+        "  - id: first\n"
+        "    type: task\n"
+        "    objective: first\n"
+        "    verify:\n"
+        "      - type: command\n"
+        "        run: echo ok\n"
+        "        expect: pass\n",
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    state = {
+        "run_id": run_id,
+        "spec_id": "demo",
+        "mode": "linear_plan",
+        "top_state": "COMPLETED",
+        "current_node_id": "first",
+        "current_attempt": 0,
+        "done_node_ids": ["first"],
+        "branch_history": [],
+        "human_escalations": [],
+        "retry_budget": {"per_node": 3, "global_limit": 12, "used_global": 0},
+        "last_agent_checkpoint": {"status": "workflow_done", "current_node": "first", "summary": "done", "checkpoint_seq": 1},
+        "checkpoint_seq": 1,
+        "verification": {"ok": True, "results": [{"type": "command", "ok": True}]},
+        "last_event": {},
+        "spec_path": str(spec_path),
+        "spec_hash": "",
+        "pane_target": "%1",
+        "surface_type": "tmux",
+        "workspace_root": str(tmp_path),
+        "completed_reviews": [],
+        "last_injected_node_id": "first",
+        "last_injected_attempt": 0,
+    }
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    decision = {
+        "decision_id": "dec_1",
+        "decision": "VERIFY_STEP",
+        "reason": "checkpoint says workflow_done",
+        "confidence": 1.0,
+        "needs_human": False,
+        "timestamp": "2026-04-12T00:00:01Z",
+        "gate_type": "checkpoint_status",
+        "triggered_by_seq": 1,
+        "triggered_by_checkpoint_id": "cp_1",
+        "next_instruction": None,
+        "selected_branch": None,
+        "next_node_id": None,
+    }
+    (run_dir / "decision_log.jsonl").write_text(json.dumps(decision) + "\n", encoding="utf-8")
+    events = [
+        {"run_id": run_id, "seq": 1, "event_type": "checkpoint", "timestamp": "2026-04-12T00:00:01Z", "payload": {"checkpoint_id": "cp_1", "run_id": run_id, "checkpoint_seq": 1, "status": "workflow_done", "current_node": "first", "summary": "done"}},
+        {"run_id": run_id, "seq": 2, "event_type": "gate_decision", "timestamp": "2026-04-12T00:00:01Z", "payload": decision},
+        {"run_id": run_id, "seq": 3, "event_type": "verification", "timestamp": "2026-04-12T00:00:01Z", "payload": {"ok": True, "results": [{"type": "command", "ok": True, "command": "echo ok"}]}},
+    ]
+    (run_dir / "session_log.jsonl").write_text("\n".join(json.dumps(item) for item in events) + "\n", encoding="utf-8")
+    shared = tmp_path / ".supervisor" / "runtime" / "shared"
+    shared.mkdir(parents=True, exist_ok=True)
+    (shared / "notes.jsonl").write_text("", encoding="utf-8")
+    (shared / "friction_events.jsonl").write_text("", encoding="utf-8")
+    (shared / "user_preferences.json").write_text(json.dumps({"default": {}}), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="replay",
+        run_id=run_id,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["run_id"] == run_id
+    assert payload["summary"]["mismatch_count"] == 0
+
+
+def test_eval_compare_outputs_json_summary(capsys):
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="compare",
+        suite="approval-core",
+        suite_file=None,
+        baseline_policy="builtin-approval-v1",
+        candidate_policy="builtin-approval-strict-v1",
+        output="",
+        save_report=False,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["suite"] == "approval-core"
+    assert payload["summary"]["wins"]["baseline"] >= 1
+    assert payload["summary"]["wins"]["candidate"] == 0
+
+
+def test_eval_expand_writes_jsonl_output(tmp_path, capsys):
+    output_path = tmp_path / "approval-expanded.jsonl"
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="expand",
+        suite="approval-core",
+        suite_file=None,
+        output=str(output_path),
+        variants_per_case=2,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["output"] == str(output_path)
+    assert payload["generated_cases"] >= 1
+    assert output_path.exists()
+
+
+def test_eval_propose_outputs_json_summary(capsys):
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="propose",
+        suite="approval-core",
+        suite_file=None,
+        baseline_policy="builtin-approval-v1",
+        objective="reduce_false_approval",
+        output="",
+        save_report=False,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["suite"] == "approval-core"
+    assert payload["recommended_candidate_policy"] == "builtin-approval-strict-v1"
+
+
+def test_eval_run_can_save_report(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="run",
+        suite="approval-core",
+        suite_file=None,
+        policy="builtin-approval-v1",
+        output="",
+        save_report=True,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["report_path"]
+
+
 def test_oracle_consult_json_output(tmp_path, monkeypatch, capsys):
     target = tmp_path / "mod.py"
     target.write_text("print('hi')\n")

@@ -115,6 +115,15 @@ thin-supervisor run summarize <run_id>
 thin-supervisor run replay <run_id>
 thin-supervisor run postmortem <run_id>
 
+# Run the first offline eval suite
+thin-supervisor eval list
+thin-supervisor eval run --suite approval-core --json
+thin-supervisor eval replay --run-id <run_id> --json
+thin-supervisor eval compare --suite approval-core --candidate-policy builtin-approval-strict-v1 --json
+thin-supervisor eval expand --suite approval-core --output .supervisor/evals/approval-core-synth.jsonl
+thin-supervisor eval propose --suite approval-core --objective reduce_false_approval --json
+thin-supervisor eval run --suite approval-core --save-report
+
 # Watch the daemon log
 tail -f .supervisor/runtime/daemon.log
 
@@ -140,6 +149,27 @@ Agent receives instruction, starts step 2
 If verification fails, supervisor injects a retry instruction with failure details.
 If agent is blocked, supervisor escalates to you (pauses and waits).
 If you want to improve the system from past runs instead of only watching the live pane, use `run export`, `run summarize`, `run replay`, and `run postmortem` against the finished `run_id`.
+If you want to validate clarify/approval behavior offline before changing the skill, start with `thin-supervisor eval run --suite approval-core`. If you want to check whether a policy candidate would regress historical supervisor behavior, use `thin-supervisor eval replay --run-id <run_id>`. If you want a quick baseline-vs-candidate outcome summary on the golden suite, use `thin-supervisor eval compare`. If you want broader coverage without rewriting goldens by hand, use `thin-supervisor eval expand` to produce synthetic variants with provenance metadata. If you want the system to recommend a constrained candidate policy for a specific objective, use `thin-supervisor eval propose`; it now includes a failure-case-driven advisory/self-review summary instead of only picking from static rules.
+
+### 7.5 Real canary protocol
+
+Offline eval is necessary but not sufficient. Once a candidate looks good offline, run real canaries in this order:
+
+1. `3-5` shadow canaries
+   Keep the current default behavior in charge, but save eval evidence:
+   ```bash
+   thin-supervisor eval run --suite approval-core --save-report
+   thin-supervisor eval compare --suite approval-core --candidate-policy <candidate> --save-report
+   ```
+2. For each real supervised task, capture:
+   ```bash
+   thin-supervisor run summarize <run_id>
+   thin-supervisor run postmortem <run_id>
+   thin-supervisor eval replay --run-id <run_id> --save-report
+   ```
+3. If the shadow canaries stay clean, move to `10-20` limited rollout runs.
+
+Any user-visible regression should become a friction event immediately so it feeds the next offline loop.
 
 If the spec requires reviewer sign-off (`acceptance.must_review_by`), the run pauses at the finish gate until you acknowledge it:
 
