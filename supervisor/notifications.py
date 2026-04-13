@@ -61,7 +61,14 @@ class TmuxDisplayNotificationChannel:
         cmd = ["tmux"]
         if self.tmux_socket:
             cmd += ["-S", self.tmux_socket]
-        cmd += ["display-message", "-t", event.pane_target, self._format_message(event)]
+        cmd += [
+            "display-message",
+            "-d",
+            str(self._duration_ms(event)),
+            "-t",
+            event.pane_target,
+            self._format_message(event),
+        ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         if result.returncode != 0:
             logger.warning("tmux notification failed: %s", result.stderr.strip())
@@ -71,6 +78,14 @@ class TmuxDisplayNotificationChannel:
         reason = event.reason or "paused for human"
         action = event.next_action or "check thin-supervisor status"
         return f"[thin-supervisor] {event.top_state}: {reason} | next: {action}"
+
+    @staticmethod
+    def _duration_ms(event: NotificationEvent) -> int:
+        if event.event_type in {"run_completed", "human_pause"}:
+            return 15000
+        if event.event_type in {"step_verified", "auto_intervention"}:
+            return 8000
+        return 4000
 
 
 class NotificationManager:

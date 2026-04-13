@@ -77,8 +77,48 @@ def test_tmux_display_notification_channel_emits_display_message(monkeypatch):
     ))
 
     assert calls
-    assert calls[0][:4] == ["tmux", "display-message", "-t", "%0"]
+    assert calls[0][:2] == ["tmux", "display-message"]
+    assert "-d" in calls[0]
+    assert "-t" in calls[0]
+    assert "%0" in calls[0]
     assert "checkpoint says blocked" in calls[0][-1]
+
+
+def test_tmux_display_notification_channel_uses_persistent_duration_for_completion(monkeypatch):
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+
+        class _Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return _Result()
+
+    monkeypatch.setattr("supervisor.notifications.subprocess.run", _fake_run)
+    channel = TmuxDisplayNotificationChannel()
+
+    channel.notify(NotificationEvent(
+        event_type="run_completed",
+        run_id="run_123",
+        top_state="COMPLETED",
+        reason="workflow completed",
+        next_action="thin-supervisor run summarize run_123",
+        pane_target="%0",
+        spec_path="plan.yaml",
+        workspace_root="/tmp/workspace",
+        surface_type="tmux",
+    ))
+
+    assert calls
+    assert calls[0][:2] == ["tmux", "display-message"]
+    assert "-d" in calls[0]
+    duration_index = calls[0].index("-d")
+    assert int(calls[0][duration_index + 1]) >= 10000
+    assert "COMPLETED" in calls[0][-1]
+    assert "workflow completed" in calls[0][-1]
 
 
 def test_notification_manager_builds_channels_from_config(tmp_path):

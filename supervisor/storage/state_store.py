@@ -33,6 +33,7 @@ class StateStore:
         pane_target: str = "",
         surface_type: str = "tmux",
         workspace_root: str = "",
+        controller_mode: str = "",
     ) -> SupervisorState:
         spec_hash = self._hash_spec(spec_path) if spec_path else ""
 
@@ -52,6 +53,9 @@ class StateStore:
                 elif surface_type and state.surface_type and state.surface_type != surface_type:
                     self._archive_state(state.run_id)
                 else:
+                    if controller_mode and getattr(state, "controller_mode", "") != controller_mode:
+                        state.controller_mode = controller_mode
+                        self.save(state)
                     self._session_seq = self._read_last_seq()
                     return state
 
@@ -66,6 +70,7 @@ class StateStore:
             pane_target=pane_target,
             surface_type=surface_type,
             workspace_root=workspace_root or os.getcwd(),
+            controller_mode=controller_mode or "daemon",
         )
         state.retry_budget.per_node = spec.policy.max_retries_per_node
         state.retry_budget.global_limit = spec.policy.max_retries_global

@@ -149,6 +149,8 @@ class DaemonServer:
 
             if state.top_state not in RECOVERABLE_ORPHANED_STATES:
                 continue
+            if getattr(state, "controller_mode", "daemon") == "foreground":
+                continue
 
             previous_top_state = state_data.get("top_state", state.top_state.value)
             transition_top_state(state, TopState.PAUSED_FOR_HUMAN, reason="daemon startup orphan recovery")
@@ -261,6 +263,7 @@ class DaemonServer:
             spec, spec_path=spec_path, pane_target=pane_target,
             surface_type=surface_type,
             workspace_root=workspace_root,
+            controller_mode="daemon",
         )
 
         if state.run_id != run_id:
@@ -424,6 +427,7 @@ class DaemonServer:
                     target_spec, spec_path=spec_path, pane_target=pane_target,
                     surface_type=surface_type,
                     workspace_root=state_data.get("workspace_root", os.getcwd()),
+                    controller_mode="daemon",
                 )
                 resumed_from = state.top_state.value
                 entry = RunEntry(run_id, spec_path, pane_target,
@@ -534,6 +538,7 @@ class DaemonServer:
                 pane_target=state_data.get("pane_target", ""),
                 surface_type=state_data.get("surface_type", "tmux"),
                 workspace_root=state_data.get("workspace_root", os.getcwd()),
+                controller_mode="daemon",
             )
             completed_reviews = set(getattr(state, "completed_reviews", []) or [])
             completed_reviews.add(reviewer)

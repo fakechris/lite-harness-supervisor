@@ -301,6 +301,7 @@ def cmd_run_foreground(args):
         pane_target=pane_target,
         surface_type=surface_type,
         workspace_root=os.getcwd(),
+        controller_mode="foreground",
     )
 
     from supervisor.adapters.surface_factory import create_surface
@@ -500,12 +501,12 @@ def cmd_run_stop(args):
 def _find_local_run_summaries() -> list[dict]:
     """Read persisted local run state outside the daemon's active registry."""
     runtime_dir = Path(RUNTIME_DIR)
-    summaries: list[dict] = []
+    states: list[dict] = []
 
     legacy_state = runtime_dir / "state.json"
     if legacy_state.exists():
         try:
-            summaries.append(summarize_state(json.loads(legacy_state.read_text())))
+            states.append(json.loads(legacy_state.read_text()))
         except json.JSONDecodeError:
             pass
 
@@ -516,26 +517,28 @@ def _find_local_run_summaries() -> list[dict]:
             if not state_path.exists():
                 continue
             try:
-                summaries.append(summarize_state(json.loads(state_path.read_text())))
+                states.append(json.loads(state_path.read_text()))
             except json.JSONDecodeError:
                 continue
 
-    return summaries
+    return states
 
 
 def _summarize_local_state_for_hint(state: dict) -> dict:
     summary = summarize_state(state)
-    if summary.get("top_state") in {"RUNNING", "GATING", "VERIFYING"}:
+    if (
+        summary.get("top_state") in {"RUNNING", "GATING", "VERIFYING"}
+        and state.get("controller_mode", "daemon") != "foreground"
+    ):
         orphaned_reason = "persisted run was left in progress without an active daemon worker"
-        paused_view = dict(summary)
+        paused_view = dict(state)
         paused_view["top_state"] = "PAUSED_FOR_HUMAN"
-        paused_view["human_escalations"] = [{"reason": orphaned_reason}]
-        paused_summary = summarize_state(paused_view)
-        summary["pause_reason"] = paused_summary.get("pause_reason", orphaned_reason)
-        summary["status_reason"] = ""
-        summary["next_action"] = paused_summary.get("next_action", "")
-        summary["is_waiting_for_review"] = False
+        paused_view["human_escalations"] = list(paused_view.get("human_escalations", [])) + [
+            {"reason": orphaned_reason}
+        ]
+        summary = summarize_state(paused_view)
         summary["orphaned_local_state"] = True
+        summary["orphaned_from"] = state.get("top_state", "")
     return summary
 
 
@@ -1452,7 +1455,7 @@ def cmd_status(args):
         state_path = Path(RUNTIME_DIR) / "state.json"
         if state_path.exists():
             try:
-                state = summarize_state(json.loads(state_path.read_text()))
+                state = _summarize_local_state_for_hint(json.loads(state_path.read_text()))
                 print(f"Run:   {state.get('run_id', '?')}")
                 print(f"State: {state.get('top_state', '?')}")
                 print(f"Node:  {state.get('current_node_id', '?')}")
@@ -1474,7 +1477,7 @@ def cmd_status(args):
         state_path = run_dir / "state.json"
         if state_path.exists():
             try:
-                state = summarize_state(json.loads(state_path.read_text()))
+                state = _summarize_local_state_for_hint(json.loads(state_path.read_text()))
                 if not found:
                     print(f"{'RUN_ID':<20} {'PANE':<20} {'STATE':<18} {'NODE'}")
                     found = True
