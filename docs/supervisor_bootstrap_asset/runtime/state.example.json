@@ -5,7 +5,6 @@
   "top_state": "RUNNING",
   "current_node_id": "implement_feature",
   "current_attempt": 1,
-  "node_status": "CURRENT_STEP_RUNNING",
   "done_node_ids": ["write_test"],
   "branch_history": [],
   "human_escalations": [],

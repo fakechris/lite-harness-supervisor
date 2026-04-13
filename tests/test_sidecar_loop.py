@@ -63,6 +63,26 @@ class ConsumeTrackingTerminal(MockTerminal):
         self.consume_calls += 1
 
 
+class StickyCheckpointTerminal(MockTerminal):
+    def __init__(self, checkpoint_text: str):
+        super().__init__([])
+        self.checkpoint_text = checkpoint_text
+        self.read_count = 0
+        self.consume_calls = 0
+        self.consumed = False
+
+    def read(self, lines: int = 100) -> str:
+        self._read_done = True
+        self.read_count += 1
+        if self.consumed:
+            return ""
+        return self.checkpoint_text
+
+    def consume_checkpoint(self) -> None:
+        self.consume_calls += 1
+        self.consumed = True
+
+
 class RecordingChannel:
     def __init__(self):
         self.events = []
@@ -94,6 +114,25 @@ def _make_two_checkpoints(first_summary: str, second_summary: str, *, node: str 
         _make_checkpoint("working", node, first_summary)
         + "\nnoise\n"
         + _make_checkpoint("working", node, second_summary)
+    )
+
+
+def _make_checkpoint_with_seq(status: str, node: str, summary: str, seq: int) -> str:
+    return (
+        f"<checkpoint>\n"
+        f"checkpoint_seq: {seq}\n"
+        f"status: {status}\n"
+        f"current_node: {node}\n"
+        f"summary: {summary}\n"
+        f"evidence:\n"
+        f"  - ran: echo ok\n"
+        f"candidate_next_actions:\n"
+        f"  - continue\n"
+        f"needs:\n"
+        f"  - none\n"
+        f"question_for_supervisor:\n"
+        f"  - none\n"
+        f"</checkpoint>\n"
     )
 
 
@@ -290,6 +329,34 @@ def test_sidecar_reinjects_guidance_after_working_checkpoint(tmp_path):
     assert len(continue_injections) == 1
 
 
+def test_sidecar_drops_deferred_continue_when_same_batch_advances_node(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    terminal = MockTerminal([
+        _make_checkpoint("working", "write_test", "making progress")
+        + _make_checkpoint("step_done", "write_test", "wrote the test"),
+        _make_checkpoint("step_done", "implement_feature", "feature done"),
+        _make_checkpoint("step_done", "final_verify", "all done"),
+    ])
+
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+
+    assert final.top_state == TopState.COMPLETED
+    session_events = [
+        json.loads(line)
+        for line in store.session_log_path.read_text().splitlines()
+    ]
+    continue_injections = [
+        event for event in session_events
+        if event["event_type"] == "injection"
+        and event["payload"].get("trigger_type") == "continue"
+    ]
+    assert continue_injections == []
+
+
 def test_sidecar_notifies_on_checkpoint_mismatch_pause(tmp_path):
     spec = load_spec("specs/examples/linear_plan.example.yaml")
     store = StateStore(str(tmp_path / "runtime"))
@@ -350,7 +417,194 @@ def test_sidecar_discards_stale_mismatch_batch_after_auto_intervention(tmp_path)
     final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
 
     assert final.top_state == TopState.COMPLETED
-    assert final.auto_intervention_count == 1
+    assert final.auto_intervention_count == 0
+    session_events = [
+        json.loads(line)
+        for line in store.session_log_path.read_text().splitlines()
+    ]
+    auto_interventions = [
+        event for event in session_events
+        if event["event_type"] == "auto_intervention"
+    ]
+    assert len(auto_interventions) == 1
+
+
+def test_sidecar_persists_node_mismatch_count_across_loop_restarts(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    class _StopAfter:
+        def __init__(self, terminal, limit):
+            self.terminal = terminal
+            self.limit = limit
+
+        def is_set(self):
+            return self.terminal.read_count >= self.limit
+
+    terminal = StickyCheckpointTerminal(
+        _make_checkpoint("working", "final_verify", "same mismatch kept in buffer")
+    )
+    partial = loop.run_sidecar(
+        spec,
+        state,
+        terminal,
+        poll_interval=0,
+        read_lines=50,
+        stop_event=_StopAfter(terminal, 3),
+    )
+
+    assert partial.top_state == TopState.RUNNING
+    assert partial.node_mismatch_count == 3
+    assert partial.last_mismatch_node_id == "final_verify"
+
+    terminal2 = StickyCheckpointTerminal(
+        _make_checkpoint("working", "final_verify", "same mismatch kept in buffer")
+    )
+    final = loop.run_sidecar(
+        spec,
+        partial,
+        terminal2,
+        poll_interval=0,
+        read_lines=50,
+        stop_event=_StopAfter(terminal2, 3),
+    )
+
+    assert final.top_state == TopState.PAUSED_FOR_HUMAN
+    assert "node mismatch persisted for 5 checkpoints" in final.human_escalations[-1]["reason"]
+
+
+def test_sidecar_counts_flapping_wrong_nodes_toward_mismatch_threshold(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    terminal = MockTerminal([
+        _make_checkpoint("working", "final_verify", "wrong node 1"),
+        _make_checkpoint("working", "implement_feature", "wrong node 2"),
+        _make_checkpoint("working", "final_verify", "wrong node 3"),
+        _make_checkpoint("working", "implement_feature", "wrong node 4"),
+        _make_checkpoint("working", "final_verify", "wrong node 5"),
+    ])
+
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+
+    assert final.top_state == TopState.PAUSED_FOR_HUMAN
+    assert final.node_mismatch_count >= 5
+    assert final.last_mismatch_node_id == "final_verify"
+    assert "node mismatch persisted for 5 checkpoints" in final.human_escalations[-1]["reason"]
+
+
+def test_sidecar_progress_checkpoint_preserves_escalation_history(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    state.human_escalations = [{"reason": "earlier pause"}]
+    loop = SupervisorLoop(store)
+
+    class _StopAfterContinue:
+        def __init__(self, terminal):
+            self.terminal = terminal
+
+        def is_set(self):
+            return len(self.terminal.injected) >= 1
+
+    terminal = MockTerminal([
+        _make_checkpoint("working", "write_test", "resumed progress"),
+    ])
+
+    final = loop.run_sidecar(
+        spec, state, terminal, poll_interval=0, read_lines=50, stop_event=_StopAfterContinue(terminal)
+    )
+
+    assert final.top_state == TopState.RUNNING
+    assert final.human_escalations == [{"reason": "earlier pause"}]
+
+
+def test_sidecar_accepts_checkpoint_seq_reset_after_worker_restart(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    state.checkpoint_seq = 7
+    loop = SupervisorLoop(store)
+
+    class _StopAfter:
+        def __init__(self, terminal):
+            self.terminal = terminal
+
+        def is_set(self):
+            return self.terminal.read_count >= 2
+
+    terminal = StickyCheckpointTerminal(
+        _make_checkpoint_with_seq("step_done", "write_test", "worker restarted", 1)
+    )
+    stop_event = _StopAfter(terminal)
+
+    final = loop.run_sidecar(
+        spec, state, terminal, poll_interval=0, read_lines=50, stop_event=stop_event
+    )
+
+    assert "write_test" in final.done_node_ids
+    assert final.current_node_id == "implement_feature"
+    assert final.checkpoint_seq == 1
+
+
+def test_sidecar_pauses_after_idle_timeout(tmp_path, monkeypatch):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+    terminal = MockTerminal([])
+
+    ticks = {"value": 0}
+
+    def _fake_monotonic():
+        ticks["value"] += 1
+        return ticks["value"]
+
+    monkeypatch.setattr("supervisor.loop.time.monotonic", _fake_monotonic)
+
+    final = loop.run_sidecar(
+        spec,
+        state,
+        terminal,
+        poll_interval=0,
+        read_lines=50,
+        idle_timeout_sec=3,
+    )
+
+    assert final.top_state == TopState.PAUSED_FOR_HUMAN
+    assert "idle timeout" in final.human_escalations[-1]["reason"]
+    session_events = store.session_log_path.read_text()
+    assert "agent_idle_timeout" in session_events
+
+
+def test_sidecar_does_not_consume_mismatch_checkpoint_before_threshold(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    class _StopAfter:
+        def __init__(self, terminal):
+            self.terminal = terminal
+
+        def is_set(self):
+            return self.terminal.read_count >= 6
+
+    terminal = StickyCheckpointTerminal(
+        _make_checkpoint("working", "final_verify", "same mismatch kept in buffer")
+    )
+    stop_event = _StopAfter(terminal)
+
+    final = loop.run_sidecar(
+        spec, state, terminal, poll_interval=0, read_lines=50, stop_event=stop_event
+    )
+
+    assert final.top_state == TopState.PAUSED_FOR_HUMAN
+    assert terminal.consume_calls == 0
 
 
 def test_sidecar_notifies_on_verified_step_and_completion(tmp_path):

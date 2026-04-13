@@ -204,12 +204,11 @@ class TestScenarioJsonlObservationOnly:
         ])
 
         final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50, stop_event=_make_stop_event())
-        # JSONL observation-only: loop processes checkpoints but inject
-        # is marked observation-only, so it continues observing
-        assert final.top_state == TopState.COMPLETED
+        assert final.top_state == TopState.PAUSED_FOR_HUMAN
+        assert "observation-only surface cannot confirm instruction delivery" in final.human_escalations[-1]["reason"]
 
     def test_observation_only_flag_respected(self, tmp_path):
-        """Loop should know this is observation-only and not pause on inject."""
+        """Observation-only surfaces should not pretend inject delivery succeeded."""
         spec = load_spec("specs/examples/linear_plan.example.yaml")
         store = StateStore(str(tmp_path / "runtime"))
         state = store.load_or_init(spec, workspace_root=str(tmp_path))
@@ -219,8 +218,8 @@ class TestScenarioJsonlObservationOnly:
             _make_checkpoint("step_done", "write_test", "wrote tests"),
         ])
 
-        loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50, stop_event=_make_stop_event())
-        # Should have written instruction to file (observation-only inject)
+        final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50, stop_event=_make_stop_event())
+        assert final.top_state == TopState.PAUSED_FOR_HUMAN
         assert len(terminal.injected) >= 1
 
     def test_observation_only_does_not_require_spec_node_ids(self, tmp_path):
@@ -242,7 +241,7 @@ class TestScenarioJsonlObservationOnly:
             spec, state, terminal, poll_interval=0, read_lines=50, stop_event=_make_stop_event()
         )
 
-        assert final.top_state == TopState.COMPLETED
+        assert final.top_state == TopState.PAUSED_FOR_HUMAN
 
     def test_stale_done_node_checkpoint_escalates_in_observation_only_mode(self, tmp_path):
         spec = load_spec("specs/examples/linear_plan.example.yaml")

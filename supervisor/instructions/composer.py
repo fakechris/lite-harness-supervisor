@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from supervisor.domain.models import HandoffInstruction, SupervisionPolicy
+from supervisor.protocol.checkpoints import checkpoint_example_block
 
 
 class InstructionComposer:
@@ -67,21 +68,5 @@ class InstructionComposer:
         return (
             f"Stay on current_node: {node_id}.\n"
             "After meaningful progress, output a checkpoint block exactly like:\n"
-            "<checkpoint>\n"
-            "run_id: <run_id>\n"
-            "checkpoint_seq: <incrementing integer>\n"
-            "status: <working | blocked | step_done | workflow_done>\n"
-            f"current_node: {node_id}\n"
-            "summary: <one-line description>\n"
-            "evidence:\n"
-            "  - modified: <file path>\n"
-            "  - ran: <command>\n"
-            "  - result: <short result>\n"
-            "candidate_next_actions:\n"
-            "  - <next action>\n"
-            "needs:\n"
-            "  - none\n"
-            "question_for_supervisor:\n"
-            "  - none\n"
-            "</checkpoint>"
+            f"{checkpoint_example_block(node_id)}"
         )

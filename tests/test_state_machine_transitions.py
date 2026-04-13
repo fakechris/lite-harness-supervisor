@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 
 from supervisor.domain.enums import DecisionType, TopState
-from supervisor.domain.models import SupervisorDecision
+from supervisor.domain.models import SupervisorDecision, SupervisorState
+from supervisor.domain.state_machine import InvalidTopStateTransition, normalize_top_state, transition_top_state
 from supervisor.loop import SupervisorLoop
 from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
@@ -15,6 +16,50 @@ class RecordingChannel:
 
     def notify(self, event) -> None:
         self.events.append(event)
+
+
+def test_normalize_legacy_top_state_values():
+    assert normalize_top_state("INIT") == TopState.READY
+    assert normalize_top_state("AWAITING_AGENT_EVENT") == TopState.RUNNING
+
+
+def test_supervisor_state_from_dict_normalizes_legacy_top_state(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    raw = state.to_dict()
+    raw["top_state"] = "INIT"
+
+    restored = SupervisorState.from_dict(raw)
+
+    assert restored.top_state == TopState.READY
+
+
+def test_supervisor_state_from_dict_ignores_legacy_node_status_field(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    raw = state.to_dict()
+    raw["node_status"] = "CURRENT_STEP_DONE"
+
+    restored = SupervisorState.from_dict(raw)
+
+    assert restored.top_state == state.top_state
+    assert not hasattr(restored, "node_status")
+
+
+def test_transition_table_rejects_completed_to_running(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    state.top_state = TopState.COMPLETED
+
+    try:
+        transition_top_state(state, TopState.RUNNING, reason="invalid restart")
+    except InvalidTopStateTransition as exc:
+        assert "COMPLETED -> RUNNING" in str(exc)
+    else:
+        raise AssertionError("expected InvalidTopStateTransition")
 
 
 def test_apply_decision_continue_keeps_run_running(tmp_path):
@@ -37,6 +82,51 @@ def test_apply_decision_continue_keeps_run_running(tmp_path):
     assert state.current_node_id == "write_test"
     assert state.last_decision["decision"] == DecisionType.CONTINUE.value
     assert "Continue with the highest-priority remaining action" in state.last_decision["next_instruction"]
+
+
+def test_apply_decision_finish_runs_finish_gate_instead_of_direct_complete(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    state.top_state = TopState.GATING
+    loop = SupervisorLoop(store)
+
+    decision = SupervisorDecision.make(
+        decision=DecisionType.FINISH.value,
+        reason="judge thinks everything is done",
+        gate_type="continue",
+        confidence=0.9,
+    )
+
+    loop.apply_decision(spec, state, decision)
+
+    assert state.top_state == TopState.PAUSED_FOR_HUMAN
+    assert state.human_escalations
+    assert "nodes not done" in state.human_escalations[-1]["reason"]
+
+
+def test_handle_event_preserves_verifying_state_on_new_checkpoint(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    state.top_state = TopState.VERIFYING
+    loop = SupervisorLoop(store)
+
+    event = {
+        "type": "agent_output",
+        "payload": {
+            "checkpoint": {
+                "status": "working",
+                "current_node": "write_test",
+                "summary": "extra output during verify",
+            }
+        },
+    }
+
+    loop.handle_event(state, event)
+
+    assert state.last_agent_checkpoint["summary"] == "extra output during verify"
+    assert state.top_state == TopState.VERIFYING
 
 
 def test_apply_verification_success_advances_and_notifies(tmp_path):

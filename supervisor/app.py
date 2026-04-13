@@ -340,6 +340,7 @@ def cmd_run_foreground(args):
             spec, state, terminal,
             poll_interval=config.poll_interval_sec,
             read_lines=config.read_lines,
+            idle_timeout_sec=config.default_agent_timeout_sec,
         )
         print(f"\nRun finished: {final_state.top_state.value}")
     except KeyboardInterrupt:

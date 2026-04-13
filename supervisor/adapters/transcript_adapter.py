@@ -5,6 +5,7 @@ from pathlib import Path
 import yaml
 
 from supervisor.domain.models import Checkpoint
+from supervisor.protocol.checkpoints import sanitize_checkpoint_payload
 
 
 class TranscriptAdapter:
@@ -40,19 +41,24 @@ class TranscriptAdapter:
             pass
         if not raw:
             raw = self._parse_lines(block)
-        if "status" not in raw or "current_node" not in raw:
+        sanitized = sanitize_checkpoint_payload(
+            raw,
+            fallback_run_id=run_id,
+            fallback_surface_id=surface_id,
+        )
+        if sanitized is None:
             return None
         return Checkpoint(
-            status=raw.get("status", ""),
-            current_node=raw.get("current_node", ""),
-            summary=raw.get("summary", ""),
-            run_id=str(raw.get("run_id", "")) or run_id,
-            checkpoint_seq=self._safe_int(raw.get("checkpoint_seq", 0)),
-            surface_id=str(raw.get("surface_id", "")) or surface_id,
-            evidence=raw.get("evidence", []),
-            candidate_next_actions=raw.get("candidate_next_actions", []),
-            needs=raw.get("needs", []),
-            question_for_supervisor=raw.get("question_for_supervisor", []),
+            status=sanitized.get("status", ""),
+            current_node=sanitized.get("current_node", ""),
+            summary=sanitized.get("summary", ""),
+            run_id=sanitized.get("run_id", ""),
+            checkpoint_seq=sanitized.get("checkpoint_seq", 0),
+            surface_id=sanitized.get("surface_id", ""),
+            evidence=sanitized.get("evidence", []),
+            candidate_next_actions=sanitized.get("candidate_next_actions", []),
+            needs=sanitized.get("needs", []),
+            question_for_supervisor=sanitized.get("question_for_supervisor", []),
         )
 
     def _parse_lines(self, block: str) -> dict:

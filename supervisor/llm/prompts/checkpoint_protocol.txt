@@ -8,11 +8,11 @@ status: <working | blocked | step_done | workflow_done>
 current_node: <step_id>
 summary: <one-line description>
 evidence:
-  - modified: <file>
+  - modified: <file path>
   - ran: <command>
   - result: <short result>
 candidate_next_actions:
-  - <what to do next>
+  - <next action>
 needs:
   - none
 question_for_supervisor:
