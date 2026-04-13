@@ -896,6 +896,7 @@ def cmd_eval(args):
     from supervisor.eval import (
         compare_eval_policies,
         default_report_dir,
+        evaluate_candidate_gate,
         expand_eval_suite,
         list_bundled_suites,
         load_candidate_manifest,
@@ -1101,12 +1102,42 @@ def cmd_eval(args):
             print(f"Next action:  {review['next_action']}")
         return 0
 
+    if args.eval_action == "gate-candidate":
+        try:
+            manifest = load_candidate_manifest(
+                candidate_id=getattr(args, "candidate_id", ""),
+                manifest_path=getattr(args, "manifest", ""),
+                runtime_dir=runtime_dir,
+            )
+            review = review_candidate_manifest(manifest)
+            suite = load_eval_suite(review["suite"])
+            canary_report = None
+            if getattr(args, "run_id", []):
+                canary_report = run_canary_eval(
+                    args.run_id,
+                    runtime_dir=runtime_dir,
+                    max_mismatch_rate=args.max_mismatch_rate,
+                    max_friction_events=args.max_friction_events,
+                )
+            gate = evaluate_candidate_gate(review, suite=suite, canary_report=canary_report)
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(json.dumps(gate, ensure_ascii=False))
+        else:
+            print(f"Candidate:    {gate['candidate_id']}")
+            print(f"Decision:     {gate['decision']}")
+            print(f"Review:       {gate['review_status']}")
+            print(f"Next action:  {gate['next_action']}")
+        return 0
+
     if args.eval_action == "list":
         for name in list_bundled_suites():
             print(name)
         return 0
 
-    print("Usage: thin-supervisor eval {list,run,replay,compare,expand,propose,review-candidate} ...")
+    print("Usage: thin-supervisor eval {list,run,replay,compare,expand,propose,review-candidate,gate-candidate} ...")
     return 1
 
 
@@ -1651,6 +1682,14 @@ def main():
     p_eval_review.add_argument("--manifest", default="", help="Explicit candidate manifest path")
     p_eval_review.add_argument("--config", default=None, help="Config YAML path")
     p_eval_review.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    p_eval_gate = eval_sub.add_parser("gate-candidate", help="Run the bounded promotion gate for a candidate")
+    p_eval_gate.add_argument("--candidate-id", default="", help="Candidate id to load from .supervisor/evals/candidates/")
+    p_eval_gate.add_argument("--manifest", default="", help="Explicit candidate manifest path")
+    p_eval_gate.add_argument("--run-id", action="append", default=[], help="Optional canary run id (repeatable)")
+    p_eval_gate.add_argument("--max-mismatch-rate", type=float, default=0.25, help="Canary hold threshold for mismatch rate")
+    p_eval_gate.add_argument("--max-friction-events", type=int, default=0, help="Canary hold threshold for friction events")
+    p_eval_gate.add_argument("--config", default=None, help="Config YAML path")
+    p_eval_gate.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
     # session
     p_session = sub.add_parser("session", help="Session detection")
