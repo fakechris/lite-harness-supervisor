@@ -259,7 +259,7 @@ thin-supervisor learn friction list [--run-id <run_id>] [--kind <kind>] [--json]
 thin-supervisor learn prefs set --key <key> --value <value>
 thin-supervisor learn prefs show [--json]
 thin-supervisor eval list
-thin-supervisor eval run [--suite approval-core] [--json]
+thin-supervisor eval run [--suite approval-core|routing-core|escalation-core|finish-gate-core] [--json]
 thin-supervisor eval replay --run-id <run_id> [--json]
 thin-supervisor eval compare --suite approval-core --candidate-policy <policy> [--json]
 thin-supervisor eval expand --suite approval-core --output <path> [--variants-per-case 2]
@@ -288,7 +288,7 @@ thin-supervisor bridge <action> [args]                     # tmux bridge operati
 
 If a daemon-managed run pauses, `status` and `list` now show the human-readable reason and the suggested next command. For non-active persisted runs, the same hint appears under `Local state found:`.
 
-`thin-supervisor eval` is the first offline evaluation surface for the new skill-evolution work. The initial bundled suite is `approval-core`, which deterministically checks explicit-approval vs re-ask behavior. `thin-supervisor eval replay --run-id ...` wraps the existing history replay path into the same evaluation surface so policy candidates can be checked against real historical traces. `thin-supervisor eval compare ...` adds a blind `A/B`-style comparator over deterministic suite results so baseline and candidate policies can be compared without hard-coding one output format into the report consumer. `thin-supervisor eval expand ...` generates provenance-tagged synthetic variants from the golden suite so coverage can grow without mutating the original contract set. `thin-supervisor eval propose ...` is the first constrained candidate-generator surface: it summarizes failure cases, consults the advisory/self-review layer, and recommends a policy candidate for a stated objective without automatically changing shipped defaults.
+`thin-supervisor eval` is the first offline evaluation surface for the new skill-evolution work. Bundled suites now cover more than approval copy: `approval-core` checks explicit approval vs re-ask behavior, `routing-core` checks deterministic `step_done/workflow_done -> VERIFY_STEP` routing, `escalation-core` checks `blocked -> ESCALATE_TO_HUMAN`, and `finish-gate-core` checks reviewer and completion contracts. `thin-supervisor eval replay --run-id ...` wraps the existing history replay path into the same evaluation surface so policy candidates can be checked against real historical traces. `thin-supervisor eval compare ...` adds a blind `A/B`-style comparator over deterministic suite results so baseline and candidate policies can be compared without hard-coding one output format into the report consumer. `thin-supervisor eval expand ...` generates provenance-tagged synthetic variants from the golden suite so coverage can grow without mutating the original contract set. `thin-supervisor eval propose ...` is the first constrained candidate-generator surface: it summarizes failure cases, consults the advisory/self-review layer, and recommends a policy candidate for a stated objective without automatically changing shipped defaults.
 
 ### Real Canary Loop
 

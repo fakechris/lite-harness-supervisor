@@ -25,6 +25,7 @@ def compare_eval_policies(
 
     comparisons: list[dict] = []
     wins = {"baseline": 0, "candidate": 0, "tie": 0}
+    weighted_wins = {"baseline": 0.0, "candidate": 0.0, "tie": 0.0}
     candidate_by_id = {item["case_id"]: item for item in candidate["results"]}
 
     for baseline_case in baseline["results"]:
@@ -36,7 +37,12 @@ def compare_eval_policies(
             },
         )
         winner = _winner_for_case(baseline_case, candidate_case)
+        case_weight = max(
+            float(baseline_case.get("weight", 0.0) or 0.0),
+            float(candidate_case.get("weight", 0.0) or 0.0),
+        )
         wins[winner] += 1
+        weighted_wins[winner] += case_weight
         blind = {
             "A": {"policy": "baseline", "result": baseline_case},
             "B": {"policy": "candidate", "result": candidate_case},
@@ -57,6 +63,7 @@ def compare_eval_policies(
         "summary": {
             "total_cases": total_cases,
             "wins": wins,
+            "weighted_wins": weighted_wins,
         },
         "comparisons": comparisons,
     }

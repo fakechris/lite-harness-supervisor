@@ -1,0 +1,1 @@
+{"case_id":"escalation_blocked_routes_human","category":"gate_decision","conversation":[],"expected":{"decision":"ESCALATE_TO_HUMAN","needs_human":true},"severity":"critical","metadata":{"checkpoint_status":"blocked","current_node_id":"s1","step_ids":["s1"]}}

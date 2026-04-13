@@ -115,9 +115,12 @@ thin-supervisor run summarize <run_id>
 thin-supervisor run replay <run_id>
 thin-supervisor run postmortem <run_id>
 
-# Run the first offline eval suite
+# Run offline eval suites
 thin-supervisor eval list
 thin-supervisor eval run --suite approval-core --json
+thin-supervisor eval run --suite routing-core --json
+thin-supervisor eval run --suite escalation-core --json
+thin-supervisor eval run --suite finish-gate-core --json
 thin-supervisor eval replay --run-id <run_id> --json
 thin-supervisor eval compare --suite approval-core --candidate-policy builtin-approval-strict-v1 --json
 thin-supervisor eval expand --suite approval-core --output .supervisor/evals/approval-core-synth.jsonl
@@ -149,7 +152,21 @@ Agent receives instruction, starts step 2
 If verification fails, supervisor injects a retry instruction with failure details.
 If agent is blocked, supervisor escalates to you (pauses and waits).
 If you want to improve the system from past runs instead of only watching the live pane, use `run export`, `run summarize`, `run replay`, and `run postmortem` against the finished `run_id`.
-If you want to validate clarify/approval behavior offline before changing the skill, start with `thin-supervisor eval run --suite approval-core`. If you want to check whether a policy candidate would regress historical supervisor behavior, use `thin-supervisor eval replay --run-id <run_id>`. If you want a quick baseline-vs-candidate outcome summary on the golden suite, use `thin-supervisor eval compare`. If you want broader coverage without rewriting goldens by hand, use `thin-supervisor eval expand` to produce synthetic variants with provenance metadata. If you want the system to recommend a constrained candidate policy for a specific objective, use `thin-supervisor eval propose`; it now includes a failure-case-driven advisory/self-review summary instead of only picking from static rules.
+If you want to validate clarify/approval behavior offline before changing the skill, start with `thin-supervisor eval run --suite approval-core`.
+- `thin-supervisor eval run --suite routing-core`
+  Validate deterministic `step_done/workflow_done -> VERIFY_STEP` routing.
+- `thin-supervisor eval run --suite escalation-core`
+  Validate deterministic `blocked -> ESCALATE_TO_HUMAN` behavior.
+- `thin-supervisor eval run --suite finish-gate-core`
+  Validate finish-gate and reviewer-gate completion rules.
+- `thin-supervisor eval replay --run-id <run_id>`
+  Check whether a policy candidate would regress historical supervisor behavior.
+- `thin-supervisor eval compare --suite approval-core`
+  Get a quick baseline-vs-candidate summary on the golden suite.
+- `thin-supervisor eval expand --suite approval-core`
+  Generate synthetic variants with provenance metadata.
+- `thin-supervisor eval propose --suite approval-core`
+  Recommend a constrained candidate policy with failure-case advisory.
 
 ### 7.5 Real canary protocol
 

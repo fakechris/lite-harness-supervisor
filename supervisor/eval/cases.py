@@ -11,6 +11,12 @@ class EvalCase:
     category: str
     conversation: list[dict]
     expected: dict
+    severity: str = "medium"
+    weights: dict = field(default_factory=dict)
+    expected_decision: str = ""
+    allowed_alternatives: list[str] = field(default_factory=list)
+    source_run_id: str = ""
+    source_checkpoint_seq: int = 0
     user_profile: dict = field(default_factory=dict)
     anti_goals: list[str] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
@@ -22,6 +28,12 @@ class EvalCase:
             category=data["category"],
             conversation=list(data.get("conversation") or []),
             expected=dict(data.get("expected") or {}),
+            severity=str(data.get("severity") or "medium"),
+            weights=dict(data.get("weights") or {}),
+            expected_decision=str(data.get("expected_decision") or ""),
+            allowed_alternatives=list(data.get("allowed_alternatives") or []),
+            source_run_id=str(data.get("source_run_id") or ""),
+            source_checkpoint_seq=int(data.get("source_checkpoint_seq") or 0),
             user_profile=dict(data.get("user_profile") or {}),
             anti_goals=list(data.get("anti_goals") or []),
             metadata=dict(data.get("metadata") or {}),
@@ -85,6 +97,12 @@ def save_eval_suite(suite: EvalSuite, output_path: str | Path) -> Path:
                         "category": case.category,
                         "conversation": case.conversation,
                         "expected": case.expected,
+                        "severity": case.severity,
+                        "weights": case.weights,
+                        "expected_decision": case.expected_decision,
+                        "allowed_alternatives": case.allowed_alternatives,
+                        "source_run_id": case.source_run_id,
+                        "source_checkpoint_seq": case.source_checkpoint_seq,
                         "user_profile": case.user_profile,
                         "anti_goals": case.anti_goals,
                         "metadata": case.metadata,

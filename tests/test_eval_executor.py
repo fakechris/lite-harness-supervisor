@@ -57,3 +57,56 @@ def test_run_eval_suite_flags_ambiguous_approval_case():
     assert report["results"][0]["actual"]["should_approve"] is False
     assert report["results"][0]["actual"]["should_reask_confirmation"] is True
 
+
+def test_run_eval_suite_supports_gate_decision_cases():
+    suite = EvalSuite(
+        name="routing-core",
+        cases=[
+            EvalCase(
+                case_id="blocked",
+                category="gate_decision",
+                conversation=[],
+                expected={"decision": "ESCALATE_TO_HUMAN", "needs_human": True},
+                severity="critical",
+                metadata={"checkpoint_status": "blocked", "current_node_id": "s1", "step_ids": ["s1"]},
+            )
+        ],
+    )
+
+    report = run_eval_suite(suite)
+
+    assert report["counts"]["passed"] == 1
+    assert report["results"][0]["actual"]["decision"] == "ESCALATE_TO_HUMAN"
+    assert report["results"][0]["weight"] == 5.0
+
+
+def test_run_eval_suite_supports_finish_gate_cases():
+    suite = EvalSuite(
+        name="finish-gate-core",
+        cases=[
+            EvalCase(
+                case_id="review_required",
+                category="finish_gate",
+                conversation=[],
+                expected={
+                    "finish_ok": False,
+                    "risk_class": "standard",
+                    "reason_contains": "requires review by: human",
+                },
+                severity="high",
+                metadata={
+                    "step_ids": ["s1"],
+                    "current_node_id": "s1",
+                    "done_node_ids": ["s1"],
+                    "verification_ok": True,
+                    "must_review_by": "human",
+                },
+            )
+        ],
+    )
+
+    report = run_eval_suite(suite)
+
+    assert report["counts"]["passed"] == 1
+    assert report["results"][0]["actual"]["finish_ok"] is False
+    assert report["weighted"]["total"] == 3.0

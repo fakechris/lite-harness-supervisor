@@ -174,7 +174,7 @@ These files are intentionally advisory. They are input to hindsight, replay, and
 
 - `friction_event` and `user_preference_memory` act as the learning substrate
 - `run export`, `run summarize`, `run replay`, and `run postmortem` provide offline evidence
-- `thin-supervisor eval` now exposes the first deterministic golden-suite executor, starting with `approval-core`, plus a replay wrapper that converts historical run replays into eval-style reports, a blind comparator for baseline-vs-candidate suite outcomes, deterministic synthetic expansion with provenance tags, a constrained proposal surface that combines failure-case summaries with advisory/self-review guidance without auto-promoting candidates, and optional report persistence under `.supervisor/evals/reports/`
+- `thin-supervisor eval` now exposes deterministic golden-suite executors for `approval-core`, `routing-core`, `escalation-core`, and `finish-gate-core`, plus a replay wrapper that converts historical run replays into eval-style reports, a blind comparator for baseline-vs-candidate suite outcomes, deterministic synthetic expansion with provenance tags, a constrained proposal surface that combines failure-case summaries with advisory/self-review guidance without auto-promoting candidates, and optional report persistence under `.supervisor/evals/reports/`
 - Global behavior changes remain offline and human-reviewed; online adaptation stays scoped to the current run or user preference memory
 
 ### Not planned

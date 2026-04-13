@@ -528,6 +528,7 @@ def test_eval_run_outputs_json_summary(capsys):
     assert payload["suite"] == "approval-core"
     assert payload["counts"]["total"] >= 1
     assert "pass_rate" in payload["counts"]
+    assert "weighted" in payload
 
 
 def test_eval_replay_outputs_json_summary(tmp_path, monkeypatch, capsys):
@@ -672,6 +673,17 @@ def test_eval_propose_outputs_json_summary(capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["suite"] == "approval-core"
     assert payload["recommended_candidate_policy"] == "builtin-approval-strict-v1"
+
+
+def test_eval_list_includes_new_supervision_policy_suites(capsys):
+    result = app.cmd_eval(argparse.Namespace(eval_action="list"))
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert "approval-core" in out
+    assert "routing-core" in out
+    assert "escalation-core" in out
+    assert "finish-gate-core" in out
 
 
 def test_eval_run_can_save_report(tmp_path, monkeypatch, capsys):

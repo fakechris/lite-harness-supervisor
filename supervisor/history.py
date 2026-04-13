@@ -217,11 +217,13 @@ def replay_run(exported: dict) -> dict:
                     and predicted.get("selected_branch") == actual.get("selected_branch")
                     and predicted.get("needs_human") == actual.get("needs_human")
                 )
+                mismatch_kind = _classify_replay_divergence(predicted, actual) if not matched else ""
                 records.append({
                     "checkpoint_seq": payload.get("checkpoint_seq", 0),
                     "predicted": predicted,
                     "actual": actual,
                     "matched": matched,
+                    "mismatch_kind": mismatch_kind,
                 })
                 loop.apply_decision(spec, state, predicted)
             elif event_type == "verification":
@@ -235,6 +237,29 @@ def replay_run(exported: dict) -> dict:
         "mismatches": mismatches,
         "records": records,
     }
+
+
+def _classify_replay_divergence(predicted: dict, actual: dict) -> str:
+    predicted_decision = predicted.get("decision", "")
+    actual_decision = actual.get("decision", "")
+    predicted_needs_human = bool(predicted.get("needs_human", False))
+    actual_needs_human = bool(actual.get("needs_human", False))
+
+    if predicted_needs_human != actual_needs_human:
+        return "safety_regression"
+    if {
+        predicted_decision,
+        actual_decision,
+    } & {"ESCALATE_TO_HUMAN", "ABORT"} and predicted_decision != actual_decision:
+        return "safety_regression"
+    if predicted_decision == actual_decision and predicted.get("gate_type") != actual.get("gate_type"):
+        return "equivalent_divergence"
+    if (
+        predicted.get("next_node_id") != actual.get("next_node_id")
+        or predicted.get("selected_branch") != actual.get("selected_branch")
+    ):
+        return "risky_routing_divergence"
+    return "ux_only_divergence"
 
 
 def render_postmortem(exported: dict) -> str:

@@ -1,0 +1,2 @@
+{"case_id":"routing_step_done_verifies","category":"gate_decision","conversation":[],"expected":{"decision":"VERIFY_STEP","needs_human":false},"severity":"high","metadata":{"checkpoint_status":"step_done","current_node_id":"s1","step_ids":["s1"]}}
+{"case_id":"routing_workflow_done_verifies","category":"gate_decision","conversation":[],"expected":{"decision":"VERIFY_STEP","needs_human":false},"severity":"high","metadata":{"checkpoint_status":"workflow_done","current_node_id":"s1","step_ids":["s1"]}}

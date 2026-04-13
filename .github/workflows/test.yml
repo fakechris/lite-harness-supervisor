@@ -14,5 +14,4 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
-      - run: pytest -q --ignore=tests/test_daemon.py --ignore=tests/test_collaboration.py --ignore=tests/test_attach_script.py
-        # Skip tests that need real tmux/daemon/unix sockets (CI has no tmux)
+      - run: pytest -q
