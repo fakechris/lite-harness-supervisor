@@ -3,6 +3,7 @@ from .canary import run_canary_eval
 from .comparator import compare_eval_policies
 from .executor import run_eval_suite
 from .proposals import propose_candidate_policy
+from .promotion import evaluate_candidate_gate, run_candidate_gate
 from .reporting import (
     default_candidate_dir,
     default_report_dir,
@@ -23,11 +24,13 @@ __all__ = [
     "default_candidate_dir",
     "default_report_dir",
     "expand_eval_suite",
+    "evaluate_candidate_gate",
     "list_bundled_suites",
     "load_candidate_manifest",
     "load_eval_suite",
     "propose_candidate_policy",
     "review_candidate_manifest",
+    "run_candidate_gate",
     "run_eval_suite",
     "run_replay_eval",
     "save_candidate_manifest",
