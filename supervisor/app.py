@@ -897,6 +897,7 @@ def cmd_eval(args):
         build_candidate_dossier,
         compare_eval_policies,
         current_promotions,
+        current_rollouts,
         default_report_dir,
         evaluate_candidate_gate,
         expand_eval_suite,
@@ -904,8 +905,10 @@ def cmd_eval(args):
         load_candidate_manifest,
         load_eval_suite,
         list_promotions,
+        list_rollouts,
         propose_candidate_policy,
         promote_candidate,
+        record_rollout,
         review_candidate_manifest,
         run_eval_suite,
         run_canary_eval,
@@ -1008,6 +1011,13 @@ def cmd_eval(args):
                 max_mismatch_rate=args.max_mismatch_rate,
                 max_friction_events=args.max_friction_events,
             )
+            if getattr(args, "candidate_id", ""):
+                report["rollout_record"] = record_rollout(
+                    candidate_id=args.candidate_id,
+                    phase=getattr(args, "phase", "shadow"),
+                    canary_report=report,
+                    runtime_dir=runtime_dir,
+                )
             if getattr(args, "save_report", False) or getattr(args, "output", ""):
                 report_path = save_eval_report(
                     report,
@@ -1028,6 +1038,27 @@ def cmd_eval(args):
             print(f"Pass rate:  {summary['avg_pass_rate']:.0%}")
             print(f"Mismatch:   {summary['mismatch_count']}/{summary['decision_count']} ({summary['mismatch_rate']:.0%})")
             print(f"Friction:   {summary['friction']['total_events']}")
+        return 0
+
+    if args.eval_action == "rollout-history":
+        try:
+            history = list_rollouts(
+                runtime_dir=runtime_dir,
+                candidate_id=getattr(args, "candidate_id", ""),
+            )
+            payload = {
+                "history": history,
+                "current": current_rollouts(history),
+            }
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            print(f"Rollouts:     {len(payload['history'])}")
+            for candidate_id, item in payload["current"].items():
+                print(f"{candidate_id}: {item.get('phase', '?')} ({item.get('decision', '?')})")
         return 0
 
     if args.eval_action == "expand":
@@ -1229,7 +1260,7 @@ def cmd_eval(args):
             print(name)
         return 0
 
-    print("Usage: thin-supervisor eval {list,run,replay,compare,expand,propose,review-candidate,candidate-status,gate-candidate,promote-candidate,promotion-history} ...")
+    print("Usage: thin-supervisor eval {list,run,replay,compare,canary,rollout-history,expand,propose,review-candidate,candidate-status,gate-candidate,promote-candidate,promotion-history} ...")
     return 1
 
 
@@ -1773,12 +1804,18 @@ def main():
     p_eval_compare.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     p_eval_canary = eval_sub.add_parser("canary", help="Aggregate replay/friction over recent real runs")
     p_eval_canary.add_argument("--run-id", action="append", required=True, help="Run id to include (repeatable)")
+    p_eval_canary.add_argument("--candidate-id", default="", help="Optional candidate id to bind rollout bookkeeping")
+    p_eval_canary.add_argument("--phase", choices=["shadow", "limited"], default="shadow", help="Rollout phase when candidate-id is provided")
     p_eval_canary.add_argument("--max-mismatch-rate", type=float, default=0.25, help="Promotion hold threshold for mismatch rate")
     p_eval_canary.add_argument("--max-friction-events", type=int, default=0, help="Promotion hold threshold for friction events")
     p_eval_canary.add_argument("--output", default="", help="Optional report output path")
     p_eval_canary.add_argument("--save-report", action="store_true", help="Persist report under .supervisor/evals/reports/")
     p_eval_canary.add_argument("--config", default=None, help="Config YAML path")
     p_eval_canary.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    p_eval_rollouts = eval_sub.add_parser("rollout-history", help="Show candidate rollout history")
+    p_eval_rollouts.add_argument("--candidate-id", default="", help="Optional candidate id filter")
+    p_eval_rollouts.add_argument("--config", default=None, help="Config YAML path")
+    p_eval_rollouts.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     p_eval_expand = eval_sub.add_parser("expand", help="Generate synthetic variants from a suite")
     p_eval_expand.add_argument("--suite", default="approval-core", help="Bundled suite name")
     p_eval_expand.add_argument("--suite-file", default=None, help="Path to a JSONL eval suite")

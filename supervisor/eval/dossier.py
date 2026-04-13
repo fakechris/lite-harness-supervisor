@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from supervisor.eval.registry import current_promotions, list_promotions
+from supervisor.eval.rollouts import current_rollouts, list_rollouts
 from supervisor.eval.reporting import (
     list_eval_reports,
     load_candidate_manifest,
@@ -32,6 +33,8 @@ def build_candidate_dossier(
     current = current_promotions(list_promotions(runtime_dir=runtime_dir)).get(review["suite"])
     is_current = bool(current and current.get("candidate_id") == review["candidate_id"])
     latest_gate = reports["latest"].get("gate")
+    rollout_history = list_rollouts(runtime_dir=runtime_dir, candidate_id=review["candidate_id"])
+    current_rollout = current_rollouts(rollout_history).get(review["candidate_id"], {})
 
     return {
         "candidate": candidate,
@@ -47,7 +50,16 @@ def build_candidate_dossier(
             "current_record": current if is_current else {},
             "is_current": is_current,
         },
-        "next_action": _next_action(review=review, latest_gate=latest_gate, is_current=is_current),
+        "rollouts": {
+            "history": rollout_history,
+            "current": current_rollout,
+        },
+        "next_action": _next_action(
+            review=review,
+            latest_gate=latest_gate,
+            current_rollout=current_rollout,
+            is_current=is_current,
+        ),
     }
 
 
@@ -121,9 +133,14 @@ def _is_related_report(
     return False
 
 
-def _next_action(*, review: dict, latest_gate: dict | None, is_current: bool) -> str:
+def _next_action(*, review: dict, latest_gate: dict | None, current_rollout: dict, is_current: bool) -> str:
     if is_current:
         return "thin-supervisor eval promotion-history --json"
+    if current_rollout:
+        if current_rollout.get("decision") == "promote":
+            return f"thin-supervisor eval gate-candidate --candidate-id {review.get('candidate_id', '')} --run-id <recent_run>"
+        if current_rollout.get("decision") in {"hold", "rollback"}:
+            return f"thin-supervisor eval review-candidate --candidate-id {review.get('candidate_id', '')}"
     if latest_gate:
         payload = dict(latest_gate.get("payload") or {})
         if payload.get("next_action"):
