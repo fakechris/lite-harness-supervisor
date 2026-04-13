@@ -119,3 +119,23 @@ class TestLiteLLMIntegration:
             result = client.continue_or_escalate({"spec_id": "test"})
             assert result["decision"] == "continue"
             assert result.get("next_instruction") in (None, "")
+
+    def test_string_false_needs_human_is_not_treated_as_true(self):
+        client = JudgeClient(model="anthropic/claude-haiku-4-5-20251001")
+
+        mock_response = MagicMock()
+        mock_response.choices = [
+            MagicMock(
+                message=MagicMock(
+                    content='{"decision": "continue", "reason": "ok", "needs_human": "false"}'
+                )
+            )
+        ]
+
+        with patch.dict("sys.modules", {"litellm": MagicMock()}):
+            import sys
+            mock_litellm = sys.modules["litellm"]
+            mock_litellm.completion.return_value = mock_response
+
+            result = client.continue_or_escalate({"spec_id": "test"})
+            assert result["needs_human"] is False

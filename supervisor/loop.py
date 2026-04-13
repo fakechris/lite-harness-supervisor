@@ -567,11 +567,8 @@ class SupervisorLoop:
                         )
                         checkpoint.current_node = state.current_node_id
                     else:
-                        if checkpoint.current_node == state.last_mismatch_node_id:
-                            state.node_mismatch_count += 1
-                        else:
-                            state.last_mismatch_node_id = checkpoint.current_node
-                            state.node_mismatch_count = 1
+                        state.node_mismatch_count += 1
+                        state.last_mismatch_node_id = checkpoint.current_node
                         logger.warning("checkpoint node mismatch (%d/%d): cp=%s state=%s",
                                        state.node_mismatch_count, max_node_mismatch,
                                        checkpoint.current_node, state.current_node_id)
@@ -602,7 +599,7 @@ class SupervisorLoop:
                     state.checkpoint_seq = checkpoint.checkpoint_seq
                 logger.info("checkpoint: %s (id=%s)", checkpoint.summary, checkpoint.checkpoint_id)
                 if checkpoint.status in {"working", "step_done", "workflow_done"}:
-                    self._reset_recovery_tracking(state, clear_escalations=True)
+                    self._reset_recovery_tracking(state, clear_escalations=False)
 
                 # 3. Event
                 cp_dict = checkpoint.to_dict()

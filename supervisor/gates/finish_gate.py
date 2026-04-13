@@ -126,5 +126,8 @@ class FinishGate:
         if not required:
             return True
         if ":" in required:
-            return any(entry == required or entry.startswith(required) for entry in entries)
+            return any(
+                entry == required or entry.startswith(f"{required};")
+                for entry in entries
+            )
         return any(required in entry for entry in entries)

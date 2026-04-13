@@ -18,7 +18,7 @@ from supervisor.domain.enums import TopState
 from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
 from supervisor.gates.finish_gate import FinishGate
-from supervisor.domain.state_machine import transition_top_state
+from supervisor.domain.state_machine import FINAL_STATES, transition_top_state
 from supervisor.loop import SupervisorLoop
 from supervisor.adapters.surface_factory import create_surface
 from supervisor.config import RuntimeConfig
@@ -489,8 +489,9 @@ class DaemonServer:
 
             finish = FinishGate().evaluate(spec, state, cwd=state.workspace_root)
             if finish["ok"]:
-                transition_top_state(state, TopState.COMPLETED, reason="review acknowledged and finish gate passed")
-                store.append_session_event(run_id, "completed_after_review", {"reviewer": reviewer})
+                if state.top_state not in FINAL_STATES:
+                    transition_top_state(state, TopState.COMPLETED, reason="review acknowledged and finish gate passed")
+                    store.append_session_event(run_id, "completed_after_review", {"reviewer": reviewer})
             store.save(state)
             return {"ok": True, "run_id": run_id, "top_state": state.top_state.value}
 

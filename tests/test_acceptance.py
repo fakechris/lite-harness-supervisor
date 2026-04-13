@@ -172,3 +172,24 @@ class TestFinishGateWithContract:
         result = loop.finish_gate.evaluate(spec, state)
         assert result["ok"] is False
         assert "missing required evidence: tests pass" in result["reason"]
+
+    def test_required_colon_evidence_does_not_match_partial_value_prefix(self, tmp_path):
+        spec = load_spec("specs/examples/linear_plan.example.yaml")
+        spec.acceptance = AcceptanceContract(
+            goal="test",
+            required_evidence=["modified: src/app.py"],
+            require_all_steps_done=False,
+            require_verification_pass=False,
+        )
+
+        store = StateStore(str(tmp_path / "runtime"))
+        state = store.load_or_init(spec)
+        state.last_agent_checkpoint = {
+            "evidence": [{"modified": "src/app.py.bak", "ran": "pytest -q"}],
+        }
+
+        loop = SupervisorLoop(store)
+        result = loop.finish_gate.evaluate(spec, state)
+
+        assert result["ok"] is False
+        assert "missing required evidence: modified: src/app.py" in result["reason"]

@@ -160,7 +160,7 @@ class JudgeClient:
             "decision": (decision or "CONTINUE").lower(),
             "reason": " ".join(str(result.get("reason", "")).split())[:400].rstrip(),
             "confidence": _clamp_confidence(result.get("confidence", 0.5)),
-            "needs_human": bool(result.get("needs_human", False)),
+            "needs_human": _coerce_bool(result.get("needs_human", False)),
         }
         if allow_next_instruction:
             sanitized["next_instruction"] = sanitize_instruction_text(result.get("next_instruction"))
@@ -210,3 +210,22 @@ def _clamp_confidence(value) -> float:
     if parsed > 1:
         return 1.0
     return parsed
+
+
+def _coerce_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+        return False
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no", ""}:
+            return False
+        return False
+    return False

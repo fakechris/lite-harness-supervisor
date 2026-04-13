@@ -249,6 +249,48 @@ class TestDaemonReviewAck:
         assert updated.top_state == TopState.COMPLETED
         assert "human" in updated.completed_reviews
 
+    def test_ack_review_on_failed_run_does_not_raise_or_rewrite_terminal_state(self, tmp_path):
+        spec_path = tmp_path / "test.yaml"
+        spec_path.write_text(
+            "kind: linear_plan\n"
+            "id: test\n"
+            "goal: test\n"
+            "acceptance:\n"
+            "  must_review_by: human\n"
+            "  require_all_steps_done: false\n"
+            "  require_verification_pass: false\n"
+            "steps:\n"
+            "  - id: s1\n"
+            "    type: task\n"
+            "    objective: do something\n"
+            "    verify:\n"
+            "      - type: command\n"
+            "        run: echo ok\n"
+            "        expect: pass\n"
+        )
+        spec = load_spec(str(spec_path))
+        run_dir = tmp_path / "runs" / "run_failed"
+        store = StateStore(str(run_dir))
+        state = store.load_or_init(
+            spec,
+            spec_path=str(spec_path),
+            pane_target="%1",
+            workspace_root=str(tmp_path),
+        )
+        state.top_state = TopState.FAILED
+        state.done_node_ids = ["s1"]
+        state.verification = {"ok": True}
+        store.save(state)
+
+        server = DaemonServer(runs_dir=str(tmp_path / "runs"))
+        result = server._do_ack_review({"run_id": state.run_id, "reviewer": "human"})
+
+        assert result["ok"] is True
+        assert result["top_state"] == TopState.FAILED.value
+        updated = StateStore(str(run_dir)).load_or_init(spec)
+        assert updated.top_state == TopState.FAILED
+        assert "human" in updated.completed_reviews
+
     def test_ack_review_rejects_active_run(self, tmp_path):
         spec_path = tmp_path / "test.yaml"
         spec_path.write_text(

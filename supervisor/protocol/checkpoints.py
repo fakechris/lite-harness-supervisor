@@ -120,5 +120,5 @@ def _normalize_list_item(value) -> str:
             normalized_value = _sanitize_text(item, max_len=CHECKPOINT_LIST_ITEM_MAX)
             if normalized_key and normalized_value:
                 parts.append(f"{normalized_key}: {normalized_value}")
-        return "; ".join(parts)[:CHECKPOINT_LIST_ITEM_MAX].rstrip()
+        return "; ".join(parts)
     return _sanitize_text(value, max_len=CHECKPOINT_LIST_ITEM_MAX)

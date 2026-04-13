@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from supervisor.adapters.transcript_adapter import TranscriptAdapter
-from supervisor.protocol.checkpoints import checkpoint_example_block
+from supervisor.protocol.checkpoints import checkpoint_example_block, sanitize_checkpoint_payload
 
 
 def test_checkpoint_example_matches_runtime_prompt_template():
@@ -40,3 +40,22 @@ question_for_supervisor:
     checkpoint = adapter.parse_checkpoint(text)
     assert checkpoint is not None
     assert checkpoint.evidence == ["modified: src/app.py", "ran: pytest -q"]
+
+
+def test_sanitize_checkpoint_payload_preserves_multiple_structured_evidence_parts():
+    payload = sanitize_checkpoint_payload(
+        {
+            "status": "working",
+            "current_node": "step1",
+            "summary": "progress",
+            "evidence": [
+                {
+                    "modified": "src/app.py",
+                    "ran": "pytest -q",
+                }
+            ],
+        }
+    )
+
+    assert payload is not None
+    assert payload["evidence"] == ["modified: src/app.py; ran: pytest -q"]

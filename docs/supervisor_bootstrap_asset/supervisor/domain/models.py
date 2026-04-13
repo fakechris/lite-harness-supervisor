@@ -3,6 +3,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any
 
 from .enums import TopState
+from .state_machine import normalize_top_state
 
 @dataclass
 class VerifyCheck:
@@ -80,6 +81,8 @@ class SupervisorState:
     top_state: TopState
     current_node_id: str
     current_attempt: int = 0
+    node_mismatch_count: int = 0
+    last_mismatch_node_id: str = ""
     done_node_ids: list[str] = field(default_factory=list)
     branch_history: list[dict[str, Any]] = field(default_factory=list)
     human_escalations: list[dict[str, Any]] = field(default_factory=list)
@@ -99,9 +102,11 @@ class SupervisorState:
             run_id=data["run_id"],
             spec_id=data["spec_id"],
             mode=data["mode"],
-            top_state=TopState(data["top_state"]),
+            top_state=normalize_top_state(data["top_state"]),
             current_node_id=data["current_node_id"],
             current_attempt=data.get("current_attempt", 0),
+            node_mismatch_count=data.get("node_mismatch_count", 0),
+            last_mismatch_node_id=data.get("last_mismatch_node_id", ""),
             done_node_ids=data.get("done_node_ids", []),
             branch_history=data.get("branch_history", []),
             human_escalations=data.get("human_escalations", []),

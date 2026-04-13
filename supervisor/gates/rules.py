@@ -60,7 +60,14 @@ def classify_checkpoint(checkpoint: dict) -> str | None:
     evidence_parts: list[str] = []
     for item in evidence:
         if isinstance(item, dict):
-            evidence_parts.extend(str(v) for v in item.values())
+            parts = []
+            for key, value in item.items():
+                key_text = " ".join(str(key).split())
+                value_text = " ".join(str(value).split())
+                if key_text and value_text:
+                    parts.append(f"{key_text}: {value_text}")
+            if parts:
+                evidence_parts.append("; ".join(parts))
         else:
             evidence_parts.append(str(item))
 

@@ -475,6 +475,54 @@ def test_sidecar_persists_node_mismatch_count_across_loop_restarts(tmp_path):
     assert "node mismatch persisted for 5 checkpoints" in final.human_escalations[-1]["reason"]
 
 
+def test_sidecar_counts_flapping_wrong_nodes_toward_mismatch_threshold(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    terminal = MockTerminal([
+        _make_checkpoint("working", "final_verify", "wrong node 1"),
+        _make_checkpoint("working", "implement_feature", "wrong node 2"),
+        _make_checkpoint("working", "final_verify", "wrong node 3"),
+        _make_checkpoint("working", "implement_feature", "wrong node 4"),
+        _make_checkpoint("working", "final_verify", "wrong node 5"),
+    ])
+
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+
+    assert final.top_state == TopState.PAUSED_FOR_HUMAN
+    assert final.node_mismatch_count >= 5
+    assert final.last_mismatch_node_id == "final_verify"
+    assert "node mismatch persisted for 5 checkpoints" in final.human_escalations[-1]["reason"]
+
+
+def test_sidecar_progress_checkpoint_preserves_escalation_history(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    state.human_escalations = [{"reason": "earlier pause"}]
+    loop = SupervisorLoop(store)
+
+    class _StopAfterContinue:
+        def __init__(self, terminal):
+            self.terminal = terminal
+
+        def is_set(self):
+            return len(self.terminal.injected) >= 1
+
+    terminal = MockTerminal([
+        _make_checkpoint("working", "write_test", "resumed progress"),
+    ])
+
+    final = loop.run_sidecar(
+        spec, state, terminal, poll_interval=0, read_lines=50, stop_event=_StopAfterContinue(terminal)
+    )
+
+    assert final.top_state == TopState.RUNNING
+    assert final.human_escalations == [{"reason": "earlier pause"}]
+
+
 def test_sidecar_accepts_checkpoint_seq_reset_after_worker_restart(tmp_path):
     spec = load_spec("specs/examples/linear_plan.example.yaml")
     store = StateStore(str(tmp_path / "runtime"))
