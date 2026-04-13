@@ -60,6 +60,48 @@ def save_candidate_manifest(
     return path
 
 
+def load_candidate_manifest(
+    *,
+    candidate_id: str = "",
+    manifest_path: str = "",
+    runtime_dir: str = ".supervisor/runtime",
+) -> dict:
+    if manifest_path:
+        path = Path(manifest_path)
+    else:
+        if not candidate_id:
+            raise ValueError("candidate_id or manifest_path is required")
+        path = default_candidate_dir(runtime_dir) / f"{candidate_id}.json"
+    if not path.exists():
+        raise FileNotFoundError(f"candidate manifest not found: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def review_candidate_manifest(manifest: dict) -> dict:
+    candidate = dict(manifest.get("candidate") or {})
+    proposal = dict(manifest.get("proposal") or {})
+    candidate_id = str(manifest.get("candidate_id") or candidate.get("candidate_id") or "").strip()
+    touched = candidate.get("touched_fragments") or []
+    fragment_mutations = candidate.get("fragment_mutations") or []
+    next_action = (
+        f"thin-supervisor eval compare --suite {proposal.get('suite', 'approval-core')} "
+        f"--candidate-policy {candidate.get('candidate_policy', '')}"
+    ).strip()
+    return {
+        "candidate_id": candidate_id,
+        "candidate_policy": candidate.get("candidate_policy", ""),
+        "parent_id": candidate.get("parent_id", ""),
+        "objective": proposal.get("objective", candidate.get("objective", "")),
+        "suite": proposal.get("suite", ""),
+        "review_status": "needs_human_review",
+        "touched_fragments": touched,
+        "mutation_operator": candidate.get("mutation_operator", ""),
+        "fragment_mutation_count": len(fragment_mutations),
+        "next_action": next_action,
+        "rationale": proposal.get("rationale", ""),
+    }
+
+
 def _default_report_path(payload: dict, report_kind: str, runtime_dir: str) -> Path:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     unique = uuid4().hex[:8]

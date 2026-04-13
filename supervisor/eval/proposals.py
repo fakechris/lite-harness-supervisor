@@ -186,6 +186,7 @@ def _candidate_lineage(
     advisory_source: str,
 ) -> dict:
     touched_fragments = ["approval-boundary"]
+    mutation_operator, fragment_mutations = _fragment_mutations_for_objective(objective)
     basis = "|".join([suite_name, objective, baseline_policy, candidate_policy, ",".join(touched_fragments)])
     candidate_id = f"candidate_{hashlib.sha1(basis.encode('utf-8')).hexdigest()[:10]}"
     return {
@@ -194,6 +195,8 @@ def _candidate_lineage(
         "parent_id": baseline_policy,
         "objective": objective,
         "touched_fragments": touched_fragments,
+        "mutation_operator": mutation_operator,
+        "fragment_mutations": fragment_mutations,
         "originating_evidence": {
             "suite": suite_name,
             "failure_case_count": len(failure_cases),
@@ -201,3 +204,34 @@ def _candidate_lineage(
             "advisory_source": advisory_source,
         },
     }
+
+
+def _fragment_mutations_for_objective(objective: str) -> tuple[str, list[dict]]:
+    path = "skills/thin-supervisor/strategy/approval-boundary.md"
+    if objective == "reduce_false_approval":
+        return (
+            "tighten_positive_boundary",
+            [
+                {
+                    "fragment": "approval-boundary",
+                    "path": path,
+                    "instructions": [
+                        "Require explicit execution verbs when prior context is weak or ambiguous.",
+                        "Treat terse approvals as final approval only when the immediate prior turn explicitly asked for approval to run.",
+                    ],
+                }
+            ],
+        )
+    return (
+        "accept_repeated_approval",
+        [
+            {
+                "fragment": "approval-boundary",
+                "path": path,
+                "instructions": [
+                    "Accept the second approval utterance after friction without another re-ask.",
+                    "Bias terse approvals toward approve when the spec is already in draft approval state.",
+                ],
+            }
+        ],
+    )
