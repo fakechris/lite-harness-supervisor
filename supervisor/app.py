@@ -898,11 +898,14 @@ def cmd_eval(args):
         default_report_dir,
         expand_eval_suite,
         list_bundled_suites,
+        load_candidate_manifest,
         load_eval_suite,
         propose_candidate_policy,
+        review_candidate_manifest,
         run_eval_suite,
         run_canary_eval,
         run_replay_eval,
+        save_candidate_manifest,
         save_eval_report,
         save_eval_suite,
     )
@@ -1062,6 +1065,8 @@ def cmd_eval(args):
                     output_path=getattr(args, "output", ""),
                 )
                 proposal["report_path"] = str(report_path)
+                manifest_path = save_candidate_manifest(proposal, runtime_dir=runtime_dir)
+                proposal["candidate_manifest_path"] = str(manifest_path)
         except Exception as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
@@ -1075,12 +1080,33 @@ def cmd_eval(args):
             print(f"Rationale:    {proposal['rationale']}")
         return 0
 
+    if args.eval_action == "review-candidate":
+        try:
+            manifest = load_candidate_manifest(
+                candidate_id=getattr(args, "candidate_id", ""),
+                manifest_path=getattr(args, "manifest", ""),
+                runtime_dir=runtime_dir,
+            )
+            review = review_candidate_manifest(manifest)
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(json.dumps(review, ensure_ascii=False))
+        else:
+            print(f"Candidate:    {review['candidate_id']}")
+            print(f"Policy:       {review['candidate_policy']}")
+            print(f"Objective:    {review['objective']}")
+            print(f"Review:       {review['review_status']}")
+            print(f"Next action:  {review['next_action']}")
+        return 0
+
     if args.eval_action == "list":
         for name in list_bundled_suites():
             print(name)
         return 0
 
-    print("Usage: thin-supervisor eval {list,run,replay,compare,expand,propose} ...")
+    print("Usage: thin-supervisor eval {list,run,replay,compare,expand,propose,review-candidate} ...")
     return 1
 
 
@@ -1620,6 +1646,11 @@ def main():
     p_eval_propose.add_argument("--save-report", action="store_true", help="Persist report under .supervisor/evals/reports/")
     p_eval_propose.add_argument("--config", default=None, help="Config YAML path")
     p_eval_propose.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    p_eval_review = eval_sub.add_parser("review-candidate", help="Review a persisted candidate manifest")
+    p_eval_review.add_argument("--candidate-id", default="", help="Candidate id to load from .supervisor/evals/candidates/")
+    p_eval_review.add_argument("--manifest", default="", help="Explicit candidate manifest path")
+    p_eval_review.add_argument("--config", default=None, help="Config YAML path")
+    p_eval_review.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
     # session
     p_session = sub.add_parser("session", help="Session detection")

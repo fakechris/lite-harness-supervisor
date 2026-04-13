@@ -126,6 +126,7 @@ thin-supervisor eval compare --suite approval-core --candidate-policy builtin-ap
 thin-supervisor eval canary --run-id <run_id> --json
 thin-supervisor eval expand --suite approval-core --output .supervisor/evals/approval-core-synth.jsonl
 thin-supervisor eval propose --suite approval-core --objective reduce_false_approval --json
+thin-supervisor eval review-candidate --candidate-id <candidate_id> --json
 thin-supervisor learn friction summarize --run-id <run_id> --json
 thin-supervisor eval run --suite approval-core --save-report
 
@@ -135,6 +136,8 @@ tail -f .supervisor/runtime/daemon.log
 # Read what the agent is outputting
 thin-supervisor bridge read work:0 50
 ```
+
+`--save-report` writes eval artifacts under `.supervisor/evals/reports/`. With `thin-supervisor eval propose`, the same run also writes a candidate-lineage manifest under `.supervisor/evals/candidates/`. Use `thin-supervisor eval review-candidate` to turn that manifest into a human promotion-review summary.
 
 ### 7. What happens during execution
 
@@ -255,6 +258,12 @@ claude
 ```
 
 Then invoke `/thin-supervisor` or describe your task. Everything else works the same.
+
+The installed skill now separates:
+- immutable contract rules in `references/contract.md`
+- optimizable behavior hints in `strategy/*.md`
+
+If you are tuning the skill, change the strategy fragments first. Do not mutate the contract file unless the execution rules themselves changed.
 
 ---
 

@@ -20,12 +20,32 @@ You focus on execution. It handles the orchestration.
 
 ---
 
+## Contract vs Strategy Loading
+
+Always read `references/contract.md` before planning or execution. It is
+the frozen behavior contract and must not be optimized away.
+
+Strategy fragments are the only safe optimization surface:
+
+- `strategy/approval-boundary.md`
+- `strategy/finish-proof.md`
+- `strategy/escalation.md`
+- `strategy/pause-ux.md`
+
+Load strategy fragments only when they are relevant to the current step.
+
+---
+
 ## Context Loading
 
 - When writing or revising a spec, read `references/spec-writing-guide.md`
+- When deciding whether the user has approved execution, read `strategy/approval-boundary.md`
 - When deciding supervision style or worker trust posture, read `references/supervision-modes.md`
 - When verification fails or a retry plan is needed, read `references/debugging-playbook.md`
+- When shaping checkpoint evidence or deciding whether `workflow_done` is justified, read `strategy/finish-proof.md`
 - When deciding whether to escalate or continue, read `references/escalation-rules.md`
+- When blocked or choosing between continue / retry / escalate behavior, read `strategy/escalation.md`
+- When the supervisor pauses or completes and you need to explain that state to the user, read `strategy/pause-ux.md`
 - When a supervised run completes, read `references/improve.md`
 
 ---
@@ -56,6 +76,9 @@ Write clarification to `.supervisor/clarify/<slug>.md`.
 ---
 
 ## Stage 2: Plan + Self-Review
+
+Before generating the spec, re-check `references/contract.md` and
+`strategy/approval-boundary.md` so the planned approval flow is explicit.
 
 ### 2a. Generate spec
 
@@ -106,6 +129,9 @@ Write review to `.supervisor/plans/<slug>-review.md`.
 
 ## Stage 3: Approve + Attach
 
+Approval semantics are governed by `references/contract.md`. Do not ask
+for a second confirmation after the user has already approved.
+
 Show user: spec summary + acceptance criteria + self-review verdict.
 User chooses: Approve / Adjust / Reject.
 
@@ -153,6 +179,9 @@ scripts/thin-supervisor-attach.sh <slug>
 
 ### Checkpoint protocol
 
+When deciding whether a checkpoint contains enough finish evidence, load
+`strategy/finish-proof.md`.
+
 ```text
 <checkpoint>
 run_id: <run_id from thin-supervisor status>
@@ -177,6 +206,7 @@ question_for_supervisor:
 
 ## Rules
 
+- The immutable execution rules live in `references/contract.md`
 - Do NOT ask "should I continue?" — the supervisor decides
 - Do NOT skip verification
 - Do NOT begin implementation before the attach script succeeds
