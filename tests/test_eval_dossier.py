@@ -116,3 +116,42 @@ def test_build_candidate_dossier_uses_gate_next_action_when_not_promoted(tmp_pat
 
     assert dossier["promotion"]["is_current"] is False
     assert dossier["next_action"] == "thin-supervisor eval canary --run-id <recent_run>"
+
+
+def test_build_candidate_dossier_prefers_newer_gate_over_older_rollout(tmp_path):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    _write_manifest(tmp_path)
+    report_dir = runtime_dir.parent / "evals" / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    save_eval_report(
+        {
+            "candidate_id": "candidate_demo",
+            "candidate_policy": "builtin-approval-strict-v1",
+            "baseline_policy": "builtin-approval-v1",
+            "suite": "approval-core",
+            "review_status": "needs_human_review",
+            "decision": "needs_canary",
+            "compare": {"summary": {"weighted_wins": {"baseline": 0.0, "candidate": 3.0, "tie": 5.0}}},
+            "canary": None,
+            "next_action": "thin-supervisor eval review-candidate --candidate-id candidate_demo",
+        },
+        report_kind="gate",
+        runtime_dir=str(runtime_dir),
+    )
+    rollouts = runtime_dir.parent / "evals" / "rollouts.jsonl"
+    rollouts.parent.mkdir(parents=True, exist_ok=True)
+    rollouts.write_text(
+        json.dumps({
+            "candidate_id": "candidate_demo",
+            "phase": "shadow",
+            "decision": "promote",
+            "run_ids": ["run_a"],
+            "summary": {},
+            "saved_at": "2026-04-12T00:00:00+00:00",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    dossier = build_candidate_dossier(candidate_id="candidate_demo", runtime_dir=str(runtime_dir))
+
+    assert dossier["next_action"] == "thin-supervisor eval review-candidate --candidate-id candidate_demo"

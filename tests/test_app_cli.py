@@ -868,6 +868,109 @@ def test_eval_canary_json_output(monkeypatch, capsys):
     assert payload["summary"]["run_count"] == 2
 
 
+def test_eval_canary_allows_parser_default_shadow_without_candidate(monkeypatch, capsys):
+    monkeypatch.setattr("supervisor.eval.run_canary_eval", lambda run_ids, **kwargs: {
+        "decision": "hold",
+        "summary": {
+            "run_count": len(run_ids),
+            "avg_pass_rate": 0.75,
+            "mismatch_kinds": {"ux_only_divergence": 1},
+            "friction": {"total_events": 1, "by_kind": {"repeated_confirmation": 1}, "by_signal": {}},
+        },
+        "runs": [{"run_id": run_id} for run_id in run_ids],
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="canary",
+        run_id=["run_a"],
+        candidate_id="",
+        phase="shadow",
+        max_mismatch_rate=0.25,
+        max_friction_events=1,
+        output="",
+        save_report=False,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["decision"] == "hold"
+    assert payload["summary"]["run_count"] == 1
+
+
+def test_eval_canary_json_output_can_record_rollout(tmp_path, monkeypatch, capsys):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
+    monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: cfg)
+    monkeypatch.setattr("supervisor.eval.run_canary_eval", lambda *args, **kwargs: {
+        "run_ids": ["run_a"],
+        "decision": "promote",
+        "summary": {
+            "run_count": 1,
+            "decision_count": 4,
+            "mismatch_count": 0,
+            "mismatch_rate": 0.0,
+            "avg_pass_rate": 1.0,
+            "mismatch_kinds": {},
+            "friction": {"total_events": 0, "by_kind": {}, "by_signal": {}},
+        },
+        "runs": [],
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="canary",
+        run_id=["run_a"],
+        candidate_id="candidate_demo",
+        phase="shadow",
+        max_mismatch_rate=0.25,
+        max_friction_events=0,
+        output="",
+        save_report=False,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["rollout_record"]["candidate_id"] == "candidate_demo"
+    assert payload["rollout_record"]["phase"] == "shadow"
+
+
+def test_eval_canary_rejects_phase_without_candidate(monkeypatch, capsys):
+    monkeypatch.setattr("supervisor.eval.run_canary_eval", lambda *args, **kwargs: {
+        "run_ids": ["run_a"],
+        "decision": "promote",
+        "summary": {
+            "run_count": 1,
+            "decision_count": 4,
+            "mismatch_count": 0,
+            "mismatch_rate": 0.0,
+            "avg_pass_rate": 1.0,
+            "mismatch_kinds": {},
+            "friction": {"total_events": 0, "by_kind": {}, "by_signal": {}},
+        },
+        "runs": [],
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="canary",
+        run_id=["run_a"],
+        candidate_id="",
+        phase="limited",
+        max_mismatch_rate=0.25,
+        max_friction_events=0,
+        output="",
+        save_report=False,
+        config=None,
+        json=False,
+    ))
+
+    assert result == 1
+    err = capsys.readouterr().err
+    assert "--phase requires --candidate-id" in err
+
+
 def test_eval_propose_saves_candidate_manifest_when_report_persisted(tmp_path, monkeypatch, capsys):
     runtime_dir = tmp_path / ".supervisor" / "runtime"
     cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
@@ -983,6 +1086,18 @@ def test_eval_candidate_status_json_output(tmp_path, monkeypatch, capsys):
 
     cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
     monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: cfg)
+    monkeypatch.setattr("supervisor.eval.dossier.list_rollouts", lambda runtime_dir, candidate_id="": [
+        {
+            "candidate_id": "candidate_demo",
+            "phase": "shadow",
+            "decision": "promote",
+            "saved_at": "2026-04-13T00:00:00+00:00",
+            "run_ids": ["run_a"],
+        }
+    ])
+    monkeypatch.setattr("supervisor.eval.dossier.current_rollouts", lambda history: {
+        "candidate_demo": history[0]
+    })
 
     result = app.cmd_eval(argparse.Namespace(
         eval_action="candidate-status",
@@ -996,6 +1111,7 @@ def test_eval_candidate_status_json_output(tmp_path, monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["candidate"]["candidate_id"] == "candidate_demo"
     assert payload["review"]["review_status"] == "needs_human_review"
+    assert payload["rollouts"]["current"]["phase"] == "shadow"
 
 
 def test_eval_gate_candidate_json_output(tmp_path, monkeypatch, capsys):
@@ -1256,6 +1372,36 @@ def test_eval_promotion_history_json_output(tmp_path, monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["history"][0]["candidate_id"] == "candidate_a"
     assert payload["current"]["approval-core"]["status"] == "promoted"
+
+
+def test_eval_rollout_history_json_output(tmp_path, monkeypatch, capsys):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
+    monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: cfg)
+    monkeypatch.setattr("supervisor.eval.list_rollouts", lambda runtime_dir, candidate_id="": [
+        {
+            "candidate_id": "candidate_demo",
+            "phase": "shadow",
+            "decision": "promote",
+            "saved_at": "2026-04-13T00:00:00+00:00",
+            "run_ids": ["run_a"],
+        }
+    ])
+    monkeypatch.setattr("supervisor.eval.current_rollouts", lambda history: {
+        "candidate_demo": history[0]
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="rollout-history",
+        candidate_id="candidate_demo",
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["history"][0]["candidate_id"] == "candidate_demo"
+    assert payload["current"]["candidate_demo"]["phase"] == "shadow"
 
 
 def test_eval_promotion_history_plain_output_tolerates_sparse_records(tmp_path, monkeypatch, capsys):

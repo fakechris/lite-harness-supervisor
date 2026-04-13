@@ -125,7 +125,7 @@ thin-supervisor eval run --suite finish-gate-core --json
 thin-supervisor eval run --suite pause-ux-core --json
 thin-supervisor eval replay --run-id <run_id> --json
 thin-supervisor eval compare --suite approval-core --candidate-policy builtin-approval-strict-v1 --json
-thin-supervisor eval canary --run-id <run_id> --json
+thin-supervisor eval canary --run-id <run_id> [--candidate-id <candidate_id>] [--phase shadow|limited] --json
 thin-supervisor eval expand --suite approval-core --output .supervisor/evals/approval-core-synth.jsonl
 thin-supervisor eval propose --suite approval-core --objective reduce_false_approval --json
 thin-supervisor eval review-candidate --candidate-id <candidate_id> --json
@@ -133,6 +133,7 @@ thin-supervisor eval candidate-status --candidate-id <candidate_id> --json
 thin-supervisor eval gate-candidate --candidate-id <candidate_id> --run-id <run_id> --json
 thin-supervisor eval promote-candidate --candidate-id <candidate_id> --approved-by human --json
 thin-supervisor eval promotion-history --json
+thin-supervisor eval rollout-history --candidate-id <candidate_id> --json
 thin-supervisor learn friction summarize --run-id <run_id> --json
 thin-supervisor eval run --suite approval-core --save-report
 
@@ -143,7 +144,7 @@ tail -f .supervisor/runtime/daemon.log
 thin-supervisor bridge read work:0 50
 ```
 
-`--save-report` writes eval artifacts under `.supervisor/evals/reports/`. With `thin-supervisor eval propose`, the same run also writes a candidate-lineage manifest under `.supervisor/evals/candidates/`. Use `thin-supervisor eval review-candidate` to turn that manifest into a human promotion-review summary, `thin-supervisor eval candidate-status` to inspect the full lifecycle dossier, then `thin-supervisor eval gate-candidate` to combine compare and optional canary signals before promotion, and finally `thin-supervisor eval promote-candidate` to record the approved decision.
+`--save-report` writes eval artifacts under `.supervisor/evals/reports/`. With `thin-supervisor eval propose`, the same run also writes a candidate-lineage manifest under `.supervisor/evals/candidates/`. Use `thin-supervisor eval review-candidate` to turn that manifest into a human promotion-review summary, `thin-supervisor eval candidate-status` to inspect the full lifecycle dossier, `thin-supervisor eval canary --candidate-id ... --phase shadow|limited` to record real rollout attempts, then `thin-supervisor eval gate-candidate` to combine compare and optional canary signals before promotion, and finally `thin-supervisor eval promote-candidate` to record the approved decision.
 
 ### 7. What happens during execution
 
@@ -197,7 +198,8 @@ Offline eval is necessary but not sufficient. Once a candidate looks good offlin
    ```
    Once you have a small batch, aggregate it with:
    ```bash
-   thin-supervisor eval canary --run-id <run_a> --run-id <run_b> --save-report
+   thin-supervisor eval canary --run-id <run_a> --run-id <run_b> --candidate-id <candidate_id> --phase shadow --save-report
+   thin-supervisor eval rollout-history --candidate-id <candidate_id> --json
    ```
 3. If the shadow canaries stay clean, move to `10-20` limited rollout runs.
 
