@@ -224,3 +224,30 @@ def test_run_eval_suite_allows_explicit_mock_only_delivery():
 
     assert report["counts"]["passed"] == 1
     assert report["results"][0]["actual"]["delivery_target"] == "mock_dev_baseline"
+
+
+def test_run_eval_suite_matches_contract_scope_keywords_case_insensitively():
+    suite = EvalSuite(
+        name="clarify-contract-core",
+        cases=[
+            EvalCase(
+                case_id="uppercase_real_uat",
+                category="contract_scope",
+                conversation=[
+                    {"role": "assistant", "content": "I can wire a MOCK baseline first."},
+                    {"role": "user", "content": "目标是接上 TOKEN 之后就能做 UAT，不接受只做 MOCK。"},
+                ],
+                expected={
+                    "delivery_target": "real_integration_ready",
+                    "should_forbid_mock_only_delivery": True,
+                    "should_require_scope_clarification": False,
+                },
+                severity="high",
+            )
+        ],
+    )
+
+    report = run_eval_suite(suite)
+
+    assert report["counts"]["passed"] == 1
+    assert report["results"][0]["actual"]["delivery_target"] == "real_integration_ready"

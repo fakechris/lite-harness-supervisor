@@ -127,7 +127,6 @@ def test_run_replay_eval_returns_non_regression_summary(tmp_path, monkeypatch):
     assert report["summary"]["pass_rate"] == 1.0
     assert report["summary"]["mismatch_kinds"] == {}
     assert report["summary"]["friction"]["total_events"] == 0
-    assert report["summary"]["pass_rate"] == 1.0
 
 
 def test_run_replay_eval_classifies_mismatch_kinds(tmp_path, monkeypatch):

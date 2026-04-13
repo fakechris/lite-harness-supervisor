@@ -70,6 +70,14 @@ _MOCK_ONLY_PATTERNS = [
     r"不连真实",
 ]
 
+_NEGATED_MOCK_ONLY_PATTERNS = [
+    r"不接受.*\bmock\b",
+    r"不允许.*\bmock\b",
+    r"不能.*\bmock\b",
+    r"不要.*\bmock\b",
+    r"不是.*\bmock\b",
+]
+
 _SEVERITY_WEIGHTS = {
     "low": 1.0,
     "medium": 2.0,
@@ -96,10 +104,8 @@ def _last_user_message(case: EvalCase) -> str:
 
 
 def _matches_any(text: str, patterns: list[str]) -> bool:
-    lower = text.lower()
     for pattern in patterns:
-        haystack = lower if "\\b" in pattern else text
-        if re.search(pattern, haystack):
+        if re.search(pattern, text, re.IGNORECASE):
             return True
     return False
 
@@ -135,7 +141,10 @@ def _evaluate_contract_scope(case: EvalCase) -> dict:
     assistant_text = _conversation_text(case, role="assistant")
     combined = _conversation_text(case)
 
-    explicitly_allows_mock_only = _matches_any(user_text, _MOCK_ONLY_PATTERNS)
+    explicitly_rejects_mock_only = _matches_any(user_text, _NEGATED_MOCK_ONLY_PATTERNS)
+    explicitly_allows_mock_only = (
+        _matches_any(user_text, _MOCK_ONLY_PATTERNS) and not explicitly_rejects_mock_only
+    )
     wants_real_delivery = (
         not explicitly_allows_mock_only
         and (
