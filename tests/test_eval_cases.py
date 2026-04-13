@@ -16,3 +16,21 @@ def test_load_eval_suite_from_jsonl(tmp_path):
     assert isinstance(suite.cases[0], EvalCase)
     assert suite.cases[0].case_id == "approval_yes"
 
+
+def test_load_eval_suite_reports_line_context_on_invalid_json(tmp_path):
+    suite_path = tmp_path / "broken.jsonl"
+    suite_path.write_text(
+        '{"case_id":"approval_yes","category":"approval","conversation":[],"expected":{}}\n'
+        '{"case_id":"broken",\n',
+        encoding="utf-8",
+    )
+
+    try:
+        load_eval_suite(suite_path)
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+    assert "line 2" in message
+    assert "broken.jsonl" in message

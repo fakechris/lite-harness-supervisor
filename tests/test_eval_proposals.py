@@ -1,5 +1,5 @@
 from supervisor.eval.cases import load_eval_suite
-from supervisor.eval.proposals import propose_candidate_policy
+from supervisor.eval.proposals import _extract_policy_from_text, propose_candidate_policy
 
 
 def test_propose_candidate_policy_for_reduce_repeated_confirmation():
@@ -54,3 +54,12 @@ def test_propose_candidate_policy_can_follow_model_advice():
     assert proposal["recommended_candidate_policy"] == "builtin-approval-strict-v1"
     assert proposal["advisory_source"] == "advisor"
     assert "failure cases" in proposal["advisory_text"]
+
+
+def test_extract_policy_from_text_uses_exact_boundaries():
+    candidate = _extract_policy_from_text(
+        "Do not use builtin-approval-strict-v1ish here.",
+        ["builtin-approval-v1", "builtin-approval-strict-v1"],
+    )
+
+    assert candidate == ""

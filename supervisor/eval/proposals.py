@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 
 from supervisor.eval.cases import EvalSuite
@@ -36,6 +37,10 @@ def propose_candidate_policy(
         for candidate in candidate_pool
         if candidate != baseline_policy or objective == "reduce_repeated_confirmation"
     ]
+    if not comparisons:
+        raise ValueError(
+            f"no candidate comparisons available for objective={objective} baseline_policy={baseline_policy}"
+        )
 
     failure_cases = _failure_cases(comparisons)
     advisory_prompt = _build_advisory_prompt(
@@ -155,8 +160,8 @@ def _get_advisory_text(prompt: str, advisor: Callable[[str], str] | None) -> tup
 
 
 def _extract_policy_from_text(text: str, candidate_pool: list[str]) -> str:
-    lowered = text.lower()
     for candidate in candidate_pool:
-        if candidate.lower() in lowered:
+        pattern = re.compile(rf"(?<!\w){re.escape(candidate)}(?!\w)", re.IGNORECASE)
+        if pattern.search(text):
             return candidate
     return ""

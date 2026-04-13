@@ -25,9 +25,16 @@ def compare_eval_policies(
 
     comparisons: list[dict] = []
     wins = {"baseline": 0, "candidate": 0, "tie": 0}
+    candidate_by_id = {item["case_id"]: item for item in candidate["results"]}
 
-    for index, baseline_case in enumerate(baseline["results"]):
-        candidate_case = candidate["results"][index]
+    for baseline_case in baseline["results"]:
+        candidate_case = candidate_by_id.get(
+            baseline_case["case_id"],
+            {
+                "case_id": baseline_case["case_id"],
+                "mismatches": {"missing_candidate_result": True},
+            },
+        )
         winner = _winner_for_case(baseline_case, candidate_case)
         wins[winner] += 1
         blind = {

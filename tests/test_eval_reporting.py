@@ -19,3 +19,13 @@ def test_save_eval_report_writes_default_location(tmp_path, monkeypatch):
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["report_kind"] == "run"
     assert saved["payload"]["suite"] == "approval-core"
+
+
+def test_save_eval_report_uses_unique_default_paths(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    payload = {"suite": "approval-core"}
+
+    first = save_eval_report(payload, report_kind="run", runtime_dir=".supervisor/runtime")
+    second = save_eval_report(payload, report_kind="run", runtime_dir=".supervisor/runtime")
+
+    assert first != second

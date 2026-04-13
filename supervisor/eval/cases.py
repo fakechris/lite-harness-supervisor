@@ -58,10 +58,18 @@ def load_eval_suite(path_or_name: str | Path) -> EvalSuite:
         raise FileNotFoundError(f"eval suite not found: {path_or_name}")
 
     cases: list[EvalCase] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
-        cases.append(EvalCase.from_dict(json.loads(line)))
+        try:
+            cases.append(EvalCase.from_dict(json.loads(line)))
+        except Exception as exc:
+            snippet = line.strip()
+            if len(snippet) > 200:
+                snippet = snippet[:197] + "..."
+            raise ValueError(
+                f"invalid eval suite line {line_number} in {path_or_name}: {exc}; content={snippet}"
+            ) from exc
     return EvalSuite(name=path.stem, cases=cases, source_path=str(path))
 
 
