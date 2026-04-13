@@ -16,6 +16,13 @@ def record_rollout(
     canary_report: dict,
     runtime_dir: str = ".supervisor/runtime",
 ) -> dict:
+    candidate_id = str(candidate_id or "").strip()
+    phase = str(phase or "").strip()
+    if not candidate_id:
+        raise ValueError("candidate_id is required")
+    if not phase:
+        raise ValueError("phase is required")
+
     record = {
         "candidate_id": candidate_id,
         "phase": phase,
@@ -45,7 +52,10 @@ def list_rollouts(
             line = line.strip()
             if not line:
                 continue
-            item = json.loads(line)
+            try:
+                item = json.loads(line)
+            except Exception:
+                continue
             if candidate_id and item.get("candidate_id") != candidate_id:
                 continue
             records.append(item)

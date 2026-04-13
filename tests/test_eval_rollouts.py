@@ -60,3 +60,17 @@ def test_current_rollouts_returns_latest_per_candidate():
 
     assert current["candidate_a"]["phase"] == "limited"
     assert current["candidate_b"]["phase"] == "shadow"
+
+
+def test_list_rollouts_skips_malformed_jsonl_lines(tmp_path):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    record_rollout(candidate_id="candidate_a", phase="shadow", canary_report=_canary_report(), runtime_dir=str(runtime_dir))
+    path = runtime_dir.parent / "evals" / "rollouts.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("{not-json}\n")
+    record_rollout(candidate_id="candidate_b", phase="limited", canary_report=_canary_report(), runtime_dir=str(runtime_dir))
+
+    history = list_rollouts(runtime_dir=str(runtime_dir))
+
+    assert len(history) == 2
+    assert [item["candidate_id"] for item in history] == ["candidate_a", "candidate_b"]

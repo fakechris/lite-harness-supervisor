@@ -8,7 +8,7 @@
 
 **Tech Stack:** Existing `supervisor/eval/canary.py`, candidate dossier/reporting modules, JSONL registries under `.supervisor/evals/`, argparse CLI, pytest.
 
-### Task 1: Red tests for rollout bookkeeping
+## Task 1: Red tests for rollout bookkeeping
 
 **Files:**
 - Create: `tests/test_eval_rollouts.py`
@@ -35,7 +35,7 @@ Run:
 pytest -q tests/test_eval_rollouts.py tests/test_app_cli.py -k "rollout or canary"
 ```
 
-### Task 2: Implement rollout registry and CLI
+## Task 2: Implement rollout registry and CLI
 
 **Files:**
 - Create: `supervisor/eval/rollouts.py`
@@ -66,7 +66,7 @@ Expose:
 - latest rollout record
 - next-action bias based on rollout phase and decision
 
-### Task 3: Document and verify
+## Task 3: Document and verify
 
 **Files:**
 - Modify: `README.md`
@@ -93,4 +93,3 @@ Run:
 ```bash
 pytest -q
 ```
-

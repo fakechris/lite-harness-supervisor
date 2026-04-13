@@ -906,6 +906,40 @@ def test_eval_canary_json_output_can_record_rollout(tmp_path, monkeypatch, capsy
     assert payload["rollout_record"]["phase"] == "shadow"
 
 
+def test_eval_canary_rejects_phase_without_candidate(monkeypatch, capsys):
+    monkeypatch.setattr("supervisor.eval.run_canary_eval", lambda *args, **kwargs: {
+        "run_ids": ["run_a"],
+        "decision": "promote",
+        "summary": {
+            "run_count": 1,
+            "decision_count": 4,
+            "mismatch_count": 0,
+            "mismatch_rate": 0.0,
+            "avg_pass_rate": 1.0,
+            "mismatch_kinds": {},
+            "friction": {"total_events": 0, "by_kind": {}, "by_signal": {}},
+        },
+        "runs": [],
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="canary",
+        run_id=["run_a"],
+        candidate_id="",
+        phase="limited",
+        max_mismatch_rate=0.25,
+        max_friction_events=0,
+        output="",
+        save_report=False,
+        config=None,
+        json=False,
+    ))
+
+    assert result == 1
+    err = capsys.readouterr().err
+    assert "--phase requires --candidate-id" in err
+
+
 def test_eval_propose_saves_candidate_manifest_when_report_persisted(tmp_path, monkeypatch, capsys):
     runtime_dir = tmp_path / ".supervisor" / "runtime"
     cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()

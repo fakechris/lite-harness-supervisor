@@ -1005,16 +1005,21 @@ def cmd_eval(args):
 
     if args.eval_action == "canary":
         try:
+            candidate_id = str(getattr(args, "candidate_id", "") or "").strip()
+            phase = str(getattr(args, "phase", "") or "").strip()
+            if phase and not candidate_id:
+                print("Error: --phase requires --candidate-id", file=sys.stderr)
+                return 1
             report = run_canary_eval(
                 args.run_id,
                 runtime_dir=runtime_dir,
                 max_mismatch_rate=args.max_mismatch_rate,
                 max_friction_events=args.max_friction_events,
             )
-            if getattr(args, "candidate_id", ""):
+            if candidate_id:
                 report["rollout_record"] = record_rollout(
-                    candidate_id=args.candidate_id,
-                    phase=getattr(args, "phase", "shadow"),
+                    candidate_id=candidate_id,
+                    phase=phase,
                     canary_report=report,
                     runtime_dir=runtime_dir,
                 )
