@@ -120,6 +120,49 @@ class TestDaemonStatus:
         assert listed["runs"][0]["pause_reason"] == "node mismatch persisted for 5 checkpoints"
         assert "thin-supervisor run resume" in listed["runs"][0]["next_action"]
 
+    def test_recover_orphaned_running_state_pauses_it_for_explicit_resume(self, tmp_path):
+        spec_path = tmp_path / "test.yaml"
+        spec_path.write_text(
+            "kind: linear_plan\n"
+            "id: test\n"
+            "goal: test\n"
+            "steps:\n"
+            "  - id: s1\n"
+            "    type: task\n"
+            "    objective: do something\n"
+            "    verify:\n"
+            "      - type: command\n"
+            "        run: echo ok\n"
+            "        expect: pass\n"
+        )
+        spec = load_spec(str(spec_path))
+        run_dir = tmp_path / "runs" / "run_123"
+        store = StateStore(str(run_dir))
+        state = store.load_or_init(
+            spec,
+            spec_path=str(spec_path),
+            pane_target="%1",
+            workspace_root=str(tmp_path),
+        )
+        state.top_state = TopState.RUNNING
+        store.save(state)
+
+        server = DaemonServer(runs_dir=str(tmp_path / "runs"))
+
+        server._recover_orphaned_runs()
+
+        recovered = StateStore(str(run_dir)).load_or_init(
+            spec,
+            spec_path=str(spec_path),
+            pane_target="%1",
+            workspace_root=str(tmp_path),
+        )
+        assert recovered.top_state == TopState.PAUSED_FOR_HUMAN
+        assert recovered.human_escalations
+        assert "daemon restarted while the run was in progress" in recovered.human_escalations[-1]["reason"]
+        session_events = (run_dir / "session_log.jsonl").read_text(encoding="utf-8")
+        assert "orphaned_run_recovered" in session_events
+
 
 class TestDaemonRegister:
     def test_register_missing_fields(self, client):

@@ -523,6 +523,22 @@ def _find_local_run_summaries() -> list[dict]:
     return summaries
 
 
+def _summarize_local_state_for_hint(state: dict) -> dict:
+    summary = summarize_state(state)
+    if summary.get("top_state") in {"RUNNING", "GATING", "VERIFYING"}:
+        orphaned_reason = "persisted run was left in progress without an active daemon worker"
+        paused_view = dict(summary)
+        paused_view["top_state"] = "PAUSED_FOR_HUMAN"
+        paused_view["human_escalations"] = [{"reason": orphaned_reason}]
+        paused_summary = summarize_state(paused_view)
+        summary["pause_reason"] = paused_summary.get("pause_reason", orphaned_reason)
+        summary["status_reason"] = ""
+        summary["next_action"] = paused_summary.get("next_action", "")
+        summary["is_waiting_for_review"] = False
+        summary["orphaned_local_state"] = True
+    return summary
+
+
 def _print_local_state_hint() -> None:
     summaries = _find_local_run_summaries()
     if not summaries:
@@ -530,19 +546,20 @@ def _print_local_state_hint() -> None:
 
     print("Local state found:")
     for state in summaries:
+        display = _summarize_local_state_for_hint(state)
         print(
             "  "
-            f"{state.get('run_id', '?')} "
-            f"{state.get('top_state', '?')} "
-            f"node={state.get('current_node_id', '') or '?'} "
-            f"pane={state.get('pane_target', '?')}"
+            f"{display.get('run_id', '?')} "
+            f"{display.get('top_state', '?')} "
+            f"node={display.get('current_node_id', '') or '?'} "
+            f"pane={display.get('pane_target', '?')}"
         )
-        if state.get("status_reason"):
-            print(f"    status: {state['status_reason']}")
-        if state.get("pause_reason"):
-            print(f"    reason: {state['pause_reason']}")
-        if state.get("next_action"):
-            print(f"    next:   {state['next_action']}")
+        if display.get("status_reason"):
+            print(f"    status: {display['status_reason']}")
+        if display.get("pause_reason"):
+            print(f"    reason: {display['pause_reason']}")
+        if display.get("next_action"):
+            print(f"    next:   {display['next_action']}")
     print("  These are persisted local state files, not daemon-managed active runs.")
 
 

@@ -66,6 +66,19 @@ def _write_paused_state(tmp_path, *, run_id: str = "run_paused") -> None:
     }))
 
 
+def _write_running_state(tmp_path, *, run_id: str = "run_running") -> None:
+    runtime_dir = tmp_path / ".supervisor" / "runtime" / "runs" / run_id
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / "state.json").write_text(json.dumps({
+        "run_id": run_id,
+        "top_state": "RUNNING",
+        "current_node_id": "step_1",
+        "pane_target": "%9",
+        "spec_path": "/tmp/spec.yaml",
+        "surface_type": "tmux",
+    }))
+
+
 def test_status_mentions_local_completed_state_when_daemon_has_no_runs(
     tmp_path, monkeypatch, capsys,
 ):
@@ -134,6 +147,23 @@ def test_list_prints_pause_reason_and_next_action_for_local_state(
     assert "run_paused" in out
     assert "node mismatch persisted for 5 checkpoints" in out
     assert "thin-supervisor run resume --spec /tmp/spec.yaml --pane %7 --surface tmux" in out
+
+
+def test_status_marks_local_running_state_as_orphaned_when_daemon_has_no_runs(
+    tmp_path, monkeypatch, capsys,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonWithNoRuns)
+    _write_running_state(tmp_path)
+
+    result = app.cmd_status(argparse.Namespace(config=None))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "run_running" in out
+    assert "RUNNING" in out
+    assert "persisted run was left in progress without an active daemon worker" in out
+    assert "thin-supervisor run resume --spec /tmp/spec.yaml --pane %9 --surface tmux" in out
 
 
 def test_legacy_run_requires_explicit_register_or_foreground(capsys):
