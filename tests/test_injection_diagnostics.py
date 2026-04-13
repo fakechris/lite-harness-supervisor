@@ -131,6 +131,93 @@ def test_terminal_adapter_retries_enter_when_submit_is_not_confirmed(mock_run, _
     assert len(enter_calls) == 2
 
 
+@patch("time.sleep", return_value=None)
+@patch("subprocess.run")
+def test_terminal_adapter_raises_when_prompt_prefix_is_still_visible(mock_run, _sleep):
+    instruction = (
+        "Replace in-memory business-state dependencies with persistent "
+        "database-backed services and real browser-facing write closures. "
+        "Stay on current_node: step_2_persistence_and_write_closure. "
+        "After meaningful progress, output a checkpoint block exactly like: "
+        "<checkpoint> status: working | blocked | step_done | workflow_done "
+        "current_node: step_2_persistence_and_write_closure summary: "
+        "<one-line description> evidence: ... candidate_next_actions: ... "
+        "needs: - none question_for_supervisor: - none </checkpoint>"
+    )
+    partial_prompt_snapshot = _mock_run(
+        stdout=(
+            "previous output\n"
+            "› Replace in-memory business-state dependencies with persistent\n"
+            "  database-backed services and real browser-facing write closures.\n"
+            "  Stay on current_node: step_2_persistence_and_write_closure.\n"
+            "\n"
+            "  gpt-5.4 high\n"
+        )
+    )
+    snapshots = iter([
+        _mock_run(stdout="before\n"),
+        *([partial_prompt_snapshot] * 20),
+    ])
+
+    def side_effect(cmd, **kwargs):
+        if "capture-pane" in cmd:
+            return next(snapshots, partial_prompt_snapshot)
+        return _mock_run(stdout="")
+
+    mock_run.side_effect = side_effect
+
+    adapter = TerminalAdapter("%0")
+    adapter.read()
+    with pytest.raises(InjectionConfirmationError):
+        adapter.inject(instruction)
+
+
+@patch("time.sleep", return_value=None)
+@patch("subprocess.run")
+def test_terminal_adapter_rejects_delayed_prompt_reappearance(mock_run, _sleep):
+    instruction = (
+        "Replace in-memory business-state dependencies with persistent "
+        "database-backed services and real browser-facing write closures. "
+        "Continue with the highest-priority remaining action in the current node. "
+        "Stay on current_node: step_2_persistence_and_write_closure."
+    )
+    partial_prompt_snapshot = _mock_run(
+        stdout=(
+            "previous output\n"
+            "› Replace in-memory business-state dependencies with persistent\n"
+            "  database-backed services and real browser-facing write closures.\n"
+            "  Continue with the highest-priority remaining action in the current node.\n"
+            "  Stay on current_node: step_2_persistence_and_write_closure.\n"
+        )
+    )
+    snapshots = iter([
+        _mock_run(stdout="before\n"),
+        _mock_run(stdout="before\n"),  # too-early clean read should not end confirmation
+        partial_prompt_snapshot,
+        partial_prompt_snapshot,
+        partial_prompt_snapshot,
+        partial_prompt_snapshot,
+        partial_prompt_snapshot,
+        partial_prompt_snapshot,
+        partial_prompt_snapshot,
+        partial_prompt_snapshot,
+        partial_prompt_snapshot,
+        partial_prompt_snapshot,
+    ])
+
+    def side_effect(cmd, **kwargs):
+        if "capture-pane" in cmd:
+            return next(snapshots, partial_prompt_snapshot)
+        return _mock_run(stdout="")
+
+    mock_run.side_effect = side_effect
+
+    adapter = TerminalAdapter("%0")
+    adapter.read()
+    with pytest.raises(InjectionConfirmationError):
+        adapter.inject(instruction)
+
+
 class _FailingInjectTerminal:
     def __init__(self):
         self._read_done = False

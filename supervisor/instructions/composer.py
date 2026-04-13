@@ -36,7 +36,7 @@ class InstructionComposer:
         next_inst = state.last_decision.get("next_instruction") if isinstance(state.last_decision, dict) else getattr(state.last_decision, "next_instruction", None)
         if next_inst and next_inst != node.objective:
             generic = ["Continue with the highest-priority", "Do not ask the user"]
-            if not any(p in next_inst for p in generic):
+            if trigger_type == "continue" or not any(p in next_inst for p in generic):
                 parts.append(next_inst)
 
         # Append verification failure details on retry
@@ -50,6 +50,8 @@ class InstructionComposer:
                 )
                 parts.append(f"Previous verification failed: {details}")
 
+        parts.append(self._checkpoint_protocol_suffix(node.id))
+
         content = " ".join(parts)
 
         return HandoffInstruction.make(
@@ -58,4 +60,15 @@ class InstructionComposer:
             current_attempt=state.current_attempt,
             triggered_by_decision_id=triggered_by_decision_id,
             trigger_type=trigger_type,
+        )
+
+    @staticmethod
+    def _checkpoint_protocol_suffix(node_id: str) -> str:
+        return (
+            f"Stay on current_node: {node_id}. "
+            "After meaningful progress, output a checkpoint block exactly like: "
+            f"<checkpoint> status: working | blocked | step_done | workflow_done "
+            f"current_node: {node_id} "
+            "summary: <one-line description> evidence: ... candidate_next_actions: ... "
+            "needs: - none question_for_supervisor: - none </checkpoint>"
         )

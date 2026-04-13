@@ -75,9 +75,35 @@ class TestHandoffInstruction:
             trigger_type="init",
         )
         assert isinstance(inst, HandoffInstruction)
-        assert inst.content == "write a failing test"
+        assert inst.content.startswith("write a failing test")
+        assert "current_node: write_test" in inst.content
+        assert "<checkpoint>" in inst.content
         assert inst.trigger_type == "init"
         assert inst.triggered_by_decision_id == "dec_xyz"
+
+    def test_composer_preserves_continue_guidance_for_continue_trigger(self, tmp_path):
+        spec = load_spec("specs/examples/linear_plan.example.yaml")
+        store = StateStore(str(tmp_path / "runtime"))
+        state = store.load_or_init(spec)
+        state.last_decision = {
+            "decision": "CONTINUE",
+            "decision_id": "dec_continue",
+            "next_instruction": (
+                "Continue with the highest-priority remaining action in the current node. "
+                "Do not ask the user for confirmation unless blocked by missing authority, "
+                "missing external input, or destructive irreversible action."
+            ),
+        }
+        composer = InstructionComposer()
+
+        node = spec.get_node("write_test")
+        inst = composer.build(
+            node, state,
+            triggered_by_decision_id="dec_continue",
+            trigger_type="continue",
+        )
+
+        assert "Continue with the highest-priority remaining action" in inst.content
 
 
 class TestCausalityChain:
