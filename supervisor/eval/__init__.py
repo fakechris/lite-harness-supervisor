@@ -1,4 +1,5 @@
 from .cases import EvalCase, EvalSuite, bundled_suite_path, list_bundled_suites, load_eval_suite, save_eval_suite
+from .canary import run_canary_eval
 from .comparator import compare_eval_policies
 from .executor import run_eval_suite
 from .proposals import propose_candidate_policy
@@ -10,6 +11,7 @@ __all__ = [
     "EvalCase",
     "EvalSuite",
     "bundled_suite_path",
+    "run_canary_eval",
     "compare_eval_policies",
     "default_report_dir",
     "expand_eval_suite",

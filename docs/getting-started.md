@@ -123,6 +123,7 @@ thin-supervisor eval run --suite escalation-core --json
 thin-supervisor eval run --suite finish-gate-core --json
 thin-supervisor eval replay --run-id <run_id> --json
 thin-supervisor eval compare --suite approval-core --candidate-policy builtin-approval-strict-v1 --json
+thin-supervisor eval canary --run-id <run_id> --json
 thin-supervisor eval expand --suite approval-core --output .supervisor/evals/approval-core-synth.jsonl
 thin-supervisor eval propose --suite approval-core --objective reduce_false_approval --json
 thin-supervisor learn friction summarize --run-id <run_id> --json
@@ -184,6 +185,10 @@ Offline eval is necessary but not sufficient. Once a candidate looks good offlin
    thin-supervisor run summarize <run_id>
    thin-supervisor run postmortem <run_id>
    thin-supervisor eval replay --run-id <run_id> --save-report
+   ```
+   Once you have a small batch, aggregate it with:
+   ```bash
+   thin-supervisor eval canary --run-id <run_a> --run-id <run_b> --save-report
    ```
 3. If the shadow canaries stay clean, move to `10-20` limited rollout runs.
 

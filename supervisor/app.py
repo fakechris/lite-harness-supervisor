@@ -901,6 +901,7 @@ def cmd_eval(args):
         load_eval_suite,
         propose_candidate_policy,
         run_eval_suite,
+        run_canary_eval,
         run_replay_eval,
         save_eval_report,
         save_eval_suite,
@@ -989,6 +990,36 @@ def cmd_eval(args):
             print(f"Baseline:   {report['baseline_policy']}")
             print(f"Candidate:  {report['candidate_policy']}")
             print(f"Wins:       baseline={wins['baseline']} candidate={wins['candidate']} tie={wins['tie']}")
+        return 0
+
+    if args.eval_action == "canary":
+        try:
+            report = run_canary_eval(
+                args.run_id,
+                runtime_dir=runtime_dir,
+                max_mismatch_rate=args.max_mismatch_rate,
+                max_friction_events=args.max_friction_events,
+            )
+            if getattr(args, "save_report", False) or getattr(args, "output", ""):
+                report_path = save_eval_report(
+                    report,
+                    report_kind="canary",
+                    runtime_dir=runtime_dir,
+                    output_path=getattr(args, "output", ""),
+                )
+                report["report_path"] = str(report_path)
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(json.dumps(report, ensure_ascii=False))
+        else:
+            summary = report["summary"]
+            print(f"Runs:       {summary['run_count']}")
+            print(f"Decision:   {report['decision']}")
+            print(f"Pass rate:  {summary['avg_pass_rate']:.0%}")
+            print(f"Mismatch:   {summary['mismatch_count']}/{summary['decision_count']} ({summary['mismatch_rate']:.0%})")
+            print(f"Friction:   {summary['friction']['total_events']}")
         return 0
 
     if args.eval_action == "expand":
@@ -1561,6 +1592,14 @@ def main():
     p_eval_compare.add_argument("--save-report", action="store_true", help="Persist report under .supervisor/evals/reports/")
     p_eval_compare.add_argument("--config", default=None, help="Config YAML path")
     p_eval_compare.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    p_eval_canary = eval_sub.add_parser("canary", help="Aggregate replay/friction over recent real runs")
+    p_eval_canary.add_argument("--run-id", action="append", required=True, help="Run id to include (repeatable)")
+    p_eval_canary.add_argument("--max-mismatch-rate", type=float, default=0.25, help="Promotion hold threshold for mismatch rate")
+    p_eval_canary.add_argument("--max-friction-events", type=int, default=0, help="Promotion hold threshold for friction events")
+    p_eval_canary.add_argument("--output", default="", help="Optional report output path")
+    p_eval_canary.add_argument("--save-report", action="store_true", help="Persist report under .supervisor/evals/reports/")
+    p_eval_canary.add_argument("--config", default=None, help="Config YAML path")
+    p_eval_canary.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     p_eval_expand = eval_sub.add_parser("expand", help="Generate synthetic variants from a suite")
     p_eval_expand.add_argument("--suite", default="approval-core", help="Bundled suite name")
     p_eval_expand.add_argument("--suite-file", default=None, help="Path to a JSONL eval suite")
