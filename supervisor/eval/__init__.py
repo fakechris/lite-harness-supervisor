@@ -4,6 +4,7 @@ from .comparator import compare_eval_policies
 from .executor import run_eval_suite
 from .proposals import propose_candidate_policy
 from .promotion import evaluate_candidate_gate, run_candidate_gate
+from .registry import current_promotions, list_promotions, promote_candidate, registry_path
 from .reporting import (
     default_candidate_dir,
     default_report_dir,
@@ -21,6 +22,7 @@ __all__ = [
     "bundled_suite_path",
     "run_canary_eval",
     "compare_eval_policies",
+    "current_promotions",
     "default_candidate_dir",
     "default_report_dir",
     "expand_eval_suite",
@@ -29,6 +31,8 @@ __all__ = [
     "load_candidate_manifest",
     "load_eval_suite",
     "propose_candidate_policy",
+    "promote_candidate",
+    "registry_path",
     "review_candidate_manifest",
     "run_candidate_gate",
     "run_eval_suite",

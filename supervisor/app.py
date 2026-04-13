@@ -895,13 +895,16 @@ def cmd_eval(args):
     """Run deterministic eval suites for skill and policy behavior."""
     from supervisor.eval import (
         compare_eval_policies,
+        current_promotions,
         default_report_dir,
         evaluate_candidate_gate,
         expand_eval_suite,
         list_bundled_suites,
         load_candidate_manifest,
         load_eval_suite,
+        list_promotions,
         propose_candidate_policy,
+        promote_candidate,
         review_candidate_manifest,
         run_eval_suite,
         run_canary_eval,
@@ -1132,12 +1135,65 @@ def cmd_eval(args):
             print(f"Next action:  {gate['next_action']}")
         return 0
 
+    if args.eval_action == "promote-candidate":
+        try:
+            manifest = load_candidate_manifest(
+                candidate_id=getattr(args, "candidate_id", ""),
+                manifest_path=getattr(args, "manifest", ""),
+                runtime_dir=runtime_dir,
+            )
+            review = review_candidate_manifest(manifest)
+            suite = load_eval_suite(review["suite"])
+            canary_report = None
+            if getattr(args, "run_id", []):
+                canary_report = run_canary_eval(
+                    args.run_id,
+                    runtime_dir=runtime_dir,
+                    max_mismatch_rate=args.max_mismatch_rate,
+                    max_friction_events=args.max_friction_events,
+                )
+            gate = evaluate_candidate_gate(review, suite=suite, canary_report=canary_report)
+            record = promote_candidate(
+                gate,
+                runtime_dir=runtime_dir,
+                approved_by=args.approved_by,
+                force=args.force,
+            )
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(json.dumps(record, ensure_ascii=False))
+        else:
+            print(f"Candidate:    {record['candidate_id']}")
+            print(f"Status:       {record['status']}")
+            print(f"Approved by:  {record['approved_by']}")
+        return 0
+
+    if args.eval_action == "promotion-history":
+        try:
+            history = list_promotions(runtime_dir=runtime_dir)
+            payload = {
+                "history": history,
+                "current": current_promotions(history),
+            }
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            print(f"Promotions:   {len(payload['history'])}")
+            for suite, item in payload["current"].items():
+                print(f"{suite}: {item['candidate_id']} ({item['status']})")
+        return 0
+
     if args.eval_action == "list":
         for name in list_bundled_suites():
             print(name)
         return 0
 
-    print("Usage: thin-supervisor eval {list,run,replay,compare,expand,propose,review-candidate,gate-candidate} ...")
+    print("Usage: thin-supervisor eval {list,run,replay,compare,expand,propose,review-candidate,gate-candidate,promote-candidate,promotion-history} ...")
     return 1
 
 
@@ -1690,6 +1746,19 @@ def main():
     p_eval_gate.add_argument("--max-friction-events", type=int, default=0, help="Canary hold threshold for friction events")
     p_eval_gate.add_argument("--config", default=None, help="Config YAML path")
     p_eval_gate.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    p_eval_promote = eval_sub.add_parser("promote-candidate", help="Record a manually approved promotion decision")
+    p_eval_promote.add_argument("--candidate-id", default="", help="Candidate id to load from .supervisor/evals/candidates/")
+    p_eval_promote.add_argument("--manifest", default="", help="Explicit candidate manifest path")
+    p_eval_promote.add_argument("--approved-by", required=True, help="Approver identity, e.g. human")
+    p_eval_promote.add_argument("--force", action="store_true", help="Allow promotion even if gate says hold/rollback")
+    p_eval_promote.add_argument("--run-id", action="append", default=[], help="Optional canary run id (repeatable)")
+    p_eval_promote.add_argument("--max-mismatch-rate", type=float, default=0.25, help="Canary hold threshold for mismatch rate")
+    p_eval_promote.add_argument("--max-friction-events", type=int, default=0, help="Canary hold threshold for friction events")
+    p_eval_promote.add_argument("--config", default=None, help="Config YAML path")
+    p_eval_promote.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    p_eval_history = eval_sub.add_parser("promotion-history", help="Show promotion registry history")
+    p_eval_history.add_argument("--config", default=None, help="Config YAML path")
+    p_eval_history.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
     # session
     p_session = sub.add_parser("session", help="Session detection")
