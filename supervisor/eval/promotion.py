@@ -20,15 +20,15 @@ def evaluate_candidate_gate(
     )
     decision = _decision_from_compare(compare)
     next_action = (
-        f"thin-supervisor eval canary --run-id <recent_run> --run-id <recent_run>"
+        f"thin-supervisor-dev eval canary --run-id <recent_run> --run-id <recent_run>"
         if decision == "needs_canary"
-        else f"thin-supervisor eval review-candidate --candidate-id {review.get('candidate_id', '')}"
+        else f"thin-supervisor-dev eval review-candidate --candidate-id {review.get('candidate_id', '')}"
     )
 
     if canary_report is not None:
         decision = canary_report.get("decision", decision)
         next_action = (
-            f"thin-supervisor eval review-candidate --candidate-id {review.get('candidate_id', '')}"
+            f"thin-supervisor-dev eval review-candidate --candidate-id {review.get('candidate_id', '')}"
             if decision == "promote"
             else next_action
         )

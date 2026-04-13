@@ -181,6 +181,18 @@ def test_pane_owner_reports_global_lock(monkeypatch, capsys):
     assert "/tmp/project-c" in out
 
 
+def test_runtime_parser_does_not_expose_devtime_commands():
+    parser = app.build_runtime_parser()
+
+    help_text = parser.format_help()
+
+    assert " eval " not in f" {help_text} "
+    assert " learn " not in f" {help_text} "
+    assert " oracle " not in f" {help_text} "
+    assert " run " in f" {help_text} "
+    assert " daemon " in f" {help_text} "
+
+
 def test_session_jsonl_prefers_current_session_path(monkeypatch, capsys):
     monkeypatch.setattr("supervisor.session_detect.detect_agent", lambda: "codex")
     monkeypatch.setattr("supervisor.session_detect.detect_session_id", lambda agent="": "thread-123")
@@ -1056,7 +1068,7 @@ def test_eval_review_candidate_json_output(tmp_path, monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["candidate_id"] == "candidate_demo"
     assert payload["review_status"] == "needs_human_review"
-    assert payload["next_action"].startswith("thin-supervisor eval compare")
+    assert payload["next_action"].startswith("thin-supervisor-dev eval compare")
 
 
 def test_eval_candidate_status_json_output(tmp_path, monkeypatch, capsys):
@@ -1148,7 +1160,7 @@ def test_eval_gate_candidate_json_output(tmp_path, monkeypatch, capsys):
         "review_status": review["review_status"],
         "compare": {"summary": {"weighted_wins": {"baseline": 2.0, "candidate": 0.0, "tie": 0.0}}},
         "canary": None,
-        "next_action": "thin-supervisor eval canary --run-id <recent_run>",
+        "next_action": "thin-supervisor-dev eval canary --run-id <recent_run>",
     })
 
     result = app.cmd_eval(argparse.Namespace(
@@ -1207,7 +1219,7 @@ def test_eval_promote_candidate_json_output(tmp_path, monkeypatch, capsys):
         "decision": "needs_canary",
         "compare": {},
         "canary": None,
-        "next_action": "thin-supervisor eval canary --run-id <recent_run>",
+        "next_action": "thin-supervisor-dev eval canary --run-id <recent_run>",
     })
 
     result = app.cmd_eval(argparse.Namespace(
@@ -1268,7 +1280,7 @@ def test_eval_gate_candidate_can_save_report(tmp_path, monkeypatch, capsys):
         "decision": "needs_canary",
         "compare": {},
         "canary": None,
-        "next_action": "thin-supervisor eval canary --run-id <recent_run>",
+        "next_action": "thin-supervisor-dev eval canary --run-id <recent_run>",
     })
 
     result = app.cmd_eval(argparse.Namespace(
@@ -1327,7 +1339,7 @@ def test_eval_promote_candidate_can_save_report(tmp_path, monkeypatch, capsys):
         "decision": "needs_canary",
         "compare": {},
         "canary": None,
-        "next_action": "thin-supervisor eval canary --run-id <recent_run>",
+        "next_action": "thin-supervisor-dev eval canary --run-id <recent_run>",
     })
 
     result = app.cmd_eval(argparse.Namespace(

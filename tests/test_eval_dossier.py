@@ -67,7 +67,7 @@ def test_build_candidate_dossier_collects_related_evidence(tmp_path):
         "decision": "needs_canary",
         "compare": {"summary": {"weighted_wins": {"baseline": 0.0, "candidate": 3.0, "tie": 5.0}}},
         "canary": None,
-        "next_action": "thin-supervisor eval canary --run-id <recent_run>",
+        "next_action": "thin-supervisor-dev eval canary --run-id <recent_run>",
     }
     save_eval_report(gate, report_kind="gate", runtime_dir=str(runtime_dir))
 
@@ -106,7 +106,7 @@ def test_build_candidate_dossier_uses_gate_next_action_when_not_promoted(tmp_pat
             "decision": "needs_canary",
             "compare": {"summary": {"weighted_wins": {"baseline": 0.0, "candidate": 3.0, "tie": 5.0}}},
             "canary": None,
-            "next_action": "thin-supervisor eval canary --run-id <recent_run>",
+            "next_action": "thin-supervisor-dev eval canary --run-id <recent_run>",
         },
         report_kind="gate",
         runtime_dir=str(runtime_dir),
@@ -115,7 +115,7 @@ def test_build_candidate_dossier_uses_gate_next_action_when_not_promoted(tmp_pat
     dossier = build_candidate_dossier(candidate_id="candidate_demo", runtime_dir=str(runtime_dir))
 
     assert dossier["promotion"]["is_current"] is False
-    assert dossier["next_action"] == "thin-supervisor eval canary --run-id <recent_run>"
+    assert dossier["next_action"] == "thin-supervisor-dev eval canary --run-id <recent_run>"
 
 
 def test_build_candidate_dossier_prefers_newer_gate_over_older_rollout(tmp_path):
@@ -133,7 +133,7 @@ def test_build_candidate_dossier_prefers_newer_gate_over_older_rollout(tmp_path)
             "decision": "needs_canary",
             "compare": {"summary": {"weighted_wins": {"baseline": 0.0, "candidate": 3.0, "tie": 5.0}}},
             "canary": None,
-            "next_action": "thin-supervisor eval review-candidate --candidate-id candidate_demo",
+            "next_action": "thin-supervisor-dev eval review-candidate --candidate-id candidate_demo",
         },
         report_kind="gate",
         runtime_dir=str(runtime_dir),
@@ -154,4 +154,4 @@ def test_build_candidate_dossier_prefers_newer_gate_over_older_rollout(tmp_path)
 
     dossier = build_candidate_dossier(candidate_id="candidate_demo", runtime_dir=str(runtime_dir))
 
-    assert dossier["next_action"] == "thin-supervisor eval review-candidate --candidate-id candidate_demo"
+    assert dossier["next_action"] == "thin-supervisor-dev eval review-candidate --candidate-id candidate_demo"

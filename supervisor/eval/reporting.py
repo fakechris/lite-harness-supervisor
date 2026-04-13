@@ -108,7 +108,7 @@ def review_candidate_manifest(manifest: dict) -> dict:
     touched = candidate.get("touched_fragments") or []
     fragment_mutations = candidate.get("fragment_mutations") or []
     next_action = (
-        f"thin-supervisor eval compare --suite {proposal.get('suite', 'approval-core')} "
+        f"thin-supervisor-dev eval compare --suite {proposal.get('suite', 'approval-core')} "
         f"--candidate-policy {candidate.get('candidate_policy', '')}"
     ).strip()
     return {

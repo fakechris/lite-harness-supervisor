@@ -710,7 +710,7 @@ def cmd_oracle(args):
     from supervisor.oracle.client import OracleClient
 
     if args.oracle_action != "consult":
-        print("Usage: thin-supervisor oracle consult --question <text> [--file path ...]")
+        print("Usage: thin-supervisor-dev oracle consult --question <text> [--file path ...]")
         return 1
     if not args.question:
         print("Error: --question is required.")
@@ -887,7 +887,7 @@ def cmd_learn(args):
                     print(f"{key}: {value}")
             return 0
 
-    print("Usage: thin-supervisor learn {friction,prefs} ...")
+    print("Usage: thin-supervisor-dev learn {friction,prefs} ...")
     return 1
 
 
@@ -1267,7 +1267,7 @@ def cmd_eval(args):
             print(name)
         return 0
 
-    print("Usage: thin-supervisor eval {list,run,replay,compare,canary,rollout-history,expand,propose,review-candidate,candidate-status,gate-candidate,promote-candidate,promotion-history} ...")
+    print("Usage: thin-supervisor-dev eval {list,run,replay,compare,canary,rollout-history,expand,propose,review-candidate,candidate-status,gate-candidate,promote-candidate,promotion-history} ...")
     return 1
 
 
@@ -1607,116 +1607,7 @@ def _run_event_file(event_file, spec, state, store, loop):
 # ------------------------------------------------------------------
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        prog="thin-supervisor",
-        description="Thin tmux sidecar supervisor for AI coding agent workflows",
-    )
-    sub = parser.add_subparsers(dest="command")
-
-    # init
-    p_init = sub.add_parser("init", help="Initialize .supervisor/ in current project")
-    p_init.add_argument("--force", action="store_true")
-    p_init.add_argument("--repair", action="store_true", help="Repair a partial .supervisor/ scaffold without overwriting config")
-
-    # deinit
-    p_deinit = sub.add_parser("deinit", help="Remove .supervisor/ directory")
-    p_deinit.add_argument("--force", action="store_true")
-
-    # daemon
-    p_daemon = sub.add_parser("daemon", help="Manage the supervisor daemon")
-    daemon_sub = p_daemon.add_subparsers(dest="daemon_action")
-    p_daemon_start = daemon_sub.add_parser("start", help="Start daemon")
-    p_daemon_start.add_argument("--config", default=None)
-    daemon_sub.add_parser("stop", help="Stop daemon")
-
-    # run (with subcommands)
-    p_run = sub.add_parser("run", help="Manage supervisor runs")
-    run_sub = p_run.add_subparsers(dest="run_action")
-
-    p_register = run_sub.add_parser("register", help="Register a new run with the daemon")
-    p_register.add_argument("--spec", required=True, help="Path to spec YAML")
-    p_register.add_argument("--pane", default=None, help="Surface target (tmux pane, oly session, or jsonl path)")
-    p_register.add_argument("--target", default=None, help="Alias for --pane")
-    p_register.add_argument("--surface", default=None, help="Override surface type (tmux|open_relay|jsonl)")
-    p_register.add_argument("--config", default=None)
-
-    p_foreground = run_sub.add_parser("foreground", help="Run sidecar in foreground")
-    p_foreground.add_argument("--spec", required=True, help="Path to spec YAML")
-    p_foreground.add_argument("--pane", default=None, help="Surface target")
-    p_foreground.add_argument("--target", default=None, help="Alias for --pane")
-    p_foreground.add_argument("--surface", default=None, help="Override surface type")
-    p_foreground.add_argument("--config", default=None)
-
-    p_run_stop = run_sub.add_parser("stop", help="Stop a specific run")
-    p_run_stop.add_argument("run_id", help="Run ID to stop")
-
-    p_resume = run_sub.add_parser("resume", help="Resume a paused/crashed run")
-    p_resume.add_argument("--spec", required=True, help="Path to spec YAML")
-    p_resume.add_argument("--pane", default=None, help="Surface target")
-    p_resume.add_argument("--target", default=None, help="Alias for --pane")
-    p_resume.add_argument("--surface", default=None, help="Surface type override")
-    p_resume.add_argument("--config", default=None)
-
-    p_review = run_sub.add_parser("review", help="Record reviewer acknowledgement")
-    p_review.add_argument("run_id", help="Run ID to mark as reviewed")
-    p_review.add_argument("--by", required=True, choices=["human", "stronger_reviewer"])
-
-    p_export = run_sub.add_parser("export", help="Export a run's durable history as JSON")
-    p_export.add_argument("run_id", help="Run ID to export")
-    p_export.add_argument("--output", default="", help="Optional file path for exported JSON")
-    p_export.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
-    p_export.add_argument("--config", default=None, help="Optional config file")
-
-    p_summarize = run_sub.add_parser("summarize", help="Summarize a historical run")
-    p_summarize.add_argument("run_id", help="Run ID to summarize")
-    p_summarize.add_argument("--json", action="store_true", help="Print JSON output")
-    p_summarize.add_argument("--config", default=None, help="Optional config file")
-
-    p_replay = run_sub.add_parser("replay", help="Replay historical gate decisions without execution")
-    p_replay.add_argument("run_id", help="Run ID to replay")
-    p_replay.add_argument("--json", action="store_true", help="Print JSON output")
-    p_replay.add_argument("--config", default=None, help="Optional config file")
-
-    p_postmortem = run_sub.add_parser("postmortem", help="Write a markdown postmortem for a run")
-    p_postmortem.add_argument("run_id", help="Run ID to analyze")
-    p_postmortem.add_argument("--output", default="", help="Optional markdown output path")
-    p_postmortem.add_argument("--config", default=None, help="Optional config file")
-
-    # Removed legacy syntax is still parsed so we can print a migration error.
-    p_run.add_argument("spec_path", nargs="?", default=None, help=argparse.SUPPRESS)
-    p_run.add_argument("--pane", default=None, help=argparse.SUPPRESS)
-    p_run.add_argument("--config", default=None, help=argparse.SUPPRESS)
-    p_run.add_argument("--event-file", default=None, help=argparse.SUPPRESS)
-    p_run.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
-    p_run.add_argument("--daemon", "-d", action="store_true", help=argparse.SUPPRESS)
-
-    # list
-    sub.add_parser("list", help="List all active runs (detailed)")
-
-    # ps
-    sub.add_parser("ps", help="List all registered daemons across worktrees")
-
-    # pane-owner
-    p_pane_owner = sub.add_parser("pane-owner", help="Show which run owns a pane")
-    p_pane_owner.add_argument("pane", help="tmux pane target")
-
-    # observe
-    p_observe = sub.add_parser("observe", help="Read-only observation of a run")
-    p_observe.add_argument("run_id", help="Run ID to observe")
-
-    # note
-    p_note = sub.add_parser("note", help="Shared notes for cross-run collaboration")
-    note_sub = p_note.add_subparsers(dest="note_action")
-    p_note_add = note_sub.add_parser("add", help="Add a note")
-    p_note_add.add_argument("content", nargs="*", help="Note content")
-    p_note_add.add_argument("--type", default="context", help="Note type: context|finding|handoff|warning|question")
-    p_note_add.add_argument("--run", default="", help="Author run ID")
-    p_note_list = note_sub.add_parser("list", help="List notes")
-    p_note_list.add_argument("--type", default="", help="Filter by type")
-    p_note_list.add_argument("--run", default="", help="Filter by author run ID")
-
-    # oracle
+def _add_oracle_parser(sub) -> None:
     p_oracle = sub.add_parser("oracle", help="Consult an external or fallback oracle")
     oracle_sub = p_oracle.add_subparsers(dest="oracle_action")
     p_oracle_consult = oracle_sub.add_parser("consult", help="Get an advisory second opinion")
@@ -1727,19 +1618,8 @@ def main():
     p_oracle_consult.add_argument("--run", default="", help="Optional run ID to persist as a shared oracle note")
     p_oracle_consult.add_argument("--json", action="store_true", help="Print JSON output")
 
-    # skill
-    p_skill = sub.add_parser("skill", help="Skill management")
-    skill_sub = p_skill.add_subparsers(dest="skill_action")
-    skill_sub.add_parser("install", help="Auto-detect agent and install skill")
 
-    # spec
-    p_spec = sub.add_parser("spec", help="Manage spec lifecycle state")
-    spec_sub = p_spec.add_subparsers(dest="spec_action")
-    p_spec_approve = spec_sub.add_parser("approve", help="Mark a draft spec approved for execution")
-    p_spec_approve.add_argument("--spec", required=True, help="Path to spec YAML")
-    p_spec_approve.add_argument("--by", default="human", help="Approver label")
-
-    # learn
+def _add_learn_parser(sub) -> None:
     p_learn = sub.add_parser("learn", help="Persist learning signals for future skill evolution")
     learn_sub = p_learn.add_subparsers(dest="learn_action")
 
@@ -1782,7 +1662,8 @@ def main():
     p_prefs_show.add_argument("--json", action="store_true", help="Print JSON output")
     p_prefs_show.add_argument("--config", default=None, help="Config YAML path")
 
-    # eval
+
+def _add_eval_parser(sub) -> None:
     p_eval = sub.add_parser("eval", help="Run deterministic skill/policy eval suites")
     eval_sub = p_eval.add_subparsers(dest="eval_action")
     eval_sub.add_parser("list", help="List bundled eval suites")
@@ -1833,12 +1714,7 @@ def main():
     p_eval_propose.add_argument("--suite", default="approval-core", help="Bundled suite name")
     p_eval_propose.add_argument("--suite-file", default=None, help="Path to a JSONL eval suite")
     p_eval_propose.add_argument("--baseline-policy", default="builtin-approval-v1", help="Baseline policy id")
-    p_eval_propose.add_argument(
-        "--objective",
-        required=True,
-        choices=["reduce_repeated_confirmation", "reduce_false_approval"],
-        help="Optimization objective",
-    )
+    p_eval_propose.add_argument("--objective", required=True, choices=["reduce_repeated_confirmation", "reduce_false_approval"], help="Optimization objective")
     p_eval_propose.add_argument("--output", default="", help="Optional report output path")
     p_eval_propose.add_argument("--save-report", action="store_true", help="Persist report under .supervisor/evals/reports/")
     p_eval_propose.add_argument("--config", default=None, help="Config YAML path")
@@ -1881,26 +1757,135 @@ def main():
     p_eval_history.add_argument("--config", default=None, help="Config YAML path")
     p_eval_history.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
-    # session
+
+def build_runtime_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="thin-supervisor",
+        description="Thin tmux sidecar supervisor for AI coding agent workflows",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    p_init = sub.add_parser("init", help="Initialize .supervisor/ in current project")
+    p_init.add_argument("--force", action="store_true")
+    p_init.add_argument("--repair", action="store_true", help="Repair a partial .supervisor/ scaffold without overwriting config")
+
+    p_deinit = sub.add_parser("deinit", help="Remove .supervisor/ directory")
+    p_deinit.add_argument("--force", action="store_true")
+
+    p_daemon = sub.add_parser("daemon", help="Manage the supervisor daemon")
+    daemon_sub = p_daemon.add_subparsers(dest="daemon_action")
+    p_daemon_start = daemon_sub.add_parser("start", help="Start daemon")
+    p_daemon_start.add_argument("--config", default=None)
+    daemon_sub.add_parser("stop", help="Stop daemon")
+
+    p_run = sub.add_parser("run", help="Manage supervisor runs")
+    run_sub = p_run.add_subparsers(dest="run_action")
+    p_register = run_sub.add_parser("register", help="Register a new run with the daemon")
+    p_register.add_argument("--spec", required=True, help="Path to spec YAML")
+    p_register.add_argument("--pane", default=None, help="Surface target (tmux pane, oly session, or jsonl path)")
+    p_register.add_argument("--target", default=None, help="Alias for --pane")
+    p_register.add_argument("--surface", default=None, help="Override surface type (tmux|open_relay|jsonl)")
+    p_register.add_argument("--config", default=None)
+
+    p_foreground = run_sub.add_parser("foreground", help="Run sidecar in foreground")
+    p_foreground.add_argument("--spec", required=True, help="Path to spec YAML")
+    p_foreground.add_argument("--pane", default=None, help="Surface target")
+    p_foreground.add_argument("--target", default=None, help="Alias for --pane")
+    p_foreground.add_argument("--surface", default=None, help="Override surface type")
+    p_foreground.add_argument("--config", default=None)
+
+    p_run_stop = run_sub.add_parser("stop", help="Stop a specific run")
+    p_run_stop.add_argument("run_id", help="Run ID to stop")
+
+    p_resume = run_sub.add_parser("resume", help="Resume a paused/crashed run")
+    p_resume.add_argument("--spec", required=True, help="Path to spec YAML")
+    p_resume.add_argument("--pane", default=None, help="Surface target")
+    p_resume.add_argument("--target", default=None, help="Alias for --pane")
+    p_resume.add_argument("--surface", default=None, help="Surface type override")
+    p_resume.add_argument("--config", default=None)
+
+    p_review = run_sub.add_parser("review", help="Record reviewer acknowledgement")
+    p_review.add_argument("run_id", help="Run ID to mark as reviewed")
+    p_review.add_argument("--by", required=True, choices=["human", "stronger_reviewer"])
+
+    p_export = run_sub.add_parser("export", help="Export a run's durable history as JSON")
+    p_export.add_argument("run_id", help="Run ID to export")
+    p_export.add_argument("--output", default="", help="Optional file path for exported JSON")
+    p_export.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+    p_export.add_argument("--config", default=None, help="Optional config file")
+
+    p_summarize = run_sub.add_parser("summarize", help="Summarize a historical run")
+    p_summarize.add_argument("run_id", help="Run ID to summarize")
+    p_summarize.add_argument("--json", action="store_true", help="Print JSON output")
+    p_summarize.add_argument("--config", default=None, help="Optional config file")
+
+    p_replay = run_sub.add_parser("replay", help="Replay historical gate decisions without execution")
+    p_replay.add_argument("run_id", help="Run ID to replay")
+    p_replay.add_argument("--json", action="store_true", help="Print JSON output")
+    p_replay.add_argument("--config", default=None, help="Optional config file")
+
+    p_postmortem = run_sub.add_parser("postmortem", help="Write a markdown postmortem for a run")
+    p_postmortem.add_argument("run_id", help="Run ID to analyze")
+    p_postmortem.add_argument("--output", default="", help="Optional markdown output path")
+    p_postmortem.add_argument("--config", default=None, help="Optional config file")
+
+    p_run.add_argument("spec_path", nargs="?", default=None, help=argparse.SUPPRESS)
+    p_run.add_argument("--pane", default=None, help=argparse.SUPPRESS)
+    p_run.add_argument("--config", default=None, help=argparse.SUPPRESS)
+    p_run.add_argument("--event-file", default=None, help=argparse.SUPPRESS)
+    p_run.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
+    p_run.add_argument("--daemon", "-d", action="store_true", help=argparse.SUPPRESS)
+
+    sub.add_parser("list", help="List all active runs (detailed)")
+    sub.add_parser("ps", help="List all registered daemons across worktrees")
+
+    p_pane_owner = sub.add_parser("pane-owner", help="Show which run owns a pane")
+    p_pane_owner.add_argument("pane", help="tmux pane target")
+
+    p_observe = sub.add_parser("observe", help="Read-only observation of a run")
+    p_observe.add_argument("run_id", help="Run ID to observe")
+
+    p_note = sub.add_parser("note", help="Shared notes for cross-run collaboration")
+    note_sub = p_note.add_subparsers(dest="note_action")
+    p_note_add = note_sub.add_parser("add", help="Add a note")
+    p_note_add.add_argument("content", nargs="*", help="Note content")
+    p_note_add.add_argument("--type", default="context", help="Note type: context|finding|handoff|warning|question")
+    p_note_add.add_argument("--run", default="", help="Author run ID")
+    p_note_list = note_sub.add_parser("list", help="List notes")
+    p_note_list.add_argument("--type", default="", help="Filter by type")
+    p_note_list.add_argument("--run", default="", help="Filter by author run ID")
+
+    p_skill = sub.add_parser("skill", help="Skill management")
+    skill_sub = p_skill.add_subparsers(dest="skill_action")
+    skill_sub.add_parser("install", help="Auto-detect agent and install skill")
+
+    p_spec = sub.add_parser("spec", help="Manage spec lifecycle state")
+    spec_sub = p_spec.add_subparsers(dest="spec_action")
+    p_spec_approve = spec_sub.add_parser("approve", help="Mark a draft spec approved for execution")
+    p_spec_approve.add_argument("--spec", required=True, help="Path to spec YAML")
+    p_spec_approve.add_argument("--by", default="human", help="Approver label")
+
     p_session = sub.add_parser("session", help="Session detection")
     session_sub = p_session.add_subparsers(dest="session_action")
     session_sub.add_parser("detect", help="Detect current session ID")
     session_sub.add_parser("jsonl", help="Find current session JSONL path")
     session_sub.add_parser("list", help="List all discoverable sessions")
 
-    # status (legacy, still works)
     p_status = sub.add_parser("status", help="Show all run states")
     p_status.add_argument("--config", default=None)
 
-    # stop (legacy alias for daemon stop)
     sub.add_parser("stop", help="Stop the supervisor daemon (alias for daemon stop)")
 
-    # bridge
     p_bridge = sub.add_parser("bridge", help="Tmux pane operations")
     p_bridge.add_argument("bridge_action", choices=["read", "type", "keys", "list", "id", "doctor", "name"])
     p_bridge.add_argument("target", nargs="?", default=None)
     p_bridge.add_argument("extra", nargs="*")
 
+    return parser
+
+
+def main():
+    parser = build_runtime_parser()
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -1940,7 +1925,6 @@ def main():
         elif args.run_action == "postmortem":
             sys.exit(cmd_run_postmortem(args))
         elif args.spec_path:
-            # Legacy mode
             sys.exit(cmd_run_legacy(args))
         else:
             print("Usage: thin-supervisor run {register|foreground|stop|resume|review|export|summarize|replay|postmortem}")
@@ -1961,12 +1945,6 @@ def main():
         else:
             print("Usage: thin-supervisor note {add|list}")
             sys.exit(1)
-    elif args.command == "oracle":
-        if args.oracle_action == "consult":
-            sys.exit(cmd_oracle(args))
-        else:
-            print("Usage: thin-supervisor oracle consult --question <text>")
-            sys.exit(1)
     elif args.command == "skill":
         if args.skill_action == "install":
             sys.exit(cmd_skill_install(args))
@@ -1975,10 +1953,6 @@ def main():
             sys.exit(1)
     elif args.command == "spec":
         sys.exit(cmd_spec(args))
-    elif args.command == "learn":
-        sys.exit(cmd_learn(args))
-    elif args.command == "eval":
-        sys.exit(cmd_eval(args))
     elif args.command == "session":
         if args.session_action in ("detect", "jsonl", "list"):
             sys.exit(cmd_session(args))

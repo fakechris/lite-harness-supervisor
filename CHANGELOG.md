@@ -2,9 +2,14 @@
 
 ## Unreleased
 
+### CLI Boundaries
+
+- Split runtime and operator workflows into separate entrypoints: `thin-supervisor` is now runtime-only, while `thin-supervisor-dev` owns oracle, learning, eval, canary, and promotion commands.
+- Updated user-facing next actions and documentation so local policy tuning flows point to `thin-supervisor-dev ...` instead of leaking devtime commands through the runtime CLI.
+
 ### Advisory Consultation
 
-- Added `thin-supervisor oracle consult`, a lightweight second-opinion path that can call an external reasoning provider or fall back to a self-adversarial review scaffold.
+- Added `thin-supervisor-dev oracle consult`, a lightweight second-opinion path that can call an external reasoning provider or fall back to a self-adversarial review scaffold.
 - Introduced first-class `OracleOpinion` records so advisory consultations can be audited and persisted into the collaboration plane as shared notes.
 
 ### Observation & Session Binding
