@@ -52,7 +52,7 @@ class InstructionComposer:
 
         parts.append(self._checkpoint_protocol_suffix(node.id))
 
-        content = " ".join(parts)
+        content = "\n\n".join(parts)
 
         return HandoffInstruction.make(
             content=content,
@@ -65,10 +65,23 @@ class InstructionComposer:
     @staticmethod
     def _checkpoint_protocol_suffix(node_id: str) -> str:
         return (
-            f"Stay on current_node: {node_id}. "
-            "After meaningful progress, output a checkpoint block exactly like: "
-            f"<checkpoint> status: working | blocked | step_done | workflow_done "
-            f"current_node: {node_id} "
-            "summary: <one-line description> evidence: ... candidate_next_actions: ... "
-            "needs: - none question_for_supervisor: - none </checkpoint>"
+            f"Stay on current_node: {node_id}.\n"
+            "After meaningful progress, output a checkpoint block exactly like:\n"
+            "<checkpoint>\n"
+            "run_id: <run_id>\n"
+            "checkpoint_seq: <incrementing integer>\n"
+            "status: <working | blocked | step_done | workflow_done>\n"
+            f"current_node: {node_id}\n"
+            "summary: <one-line description>\n"
+            "evidence:\n"
+            "  - modified: <file path>\n"
+            "  - ran: <command>\n"
+            "  - result: <short result>\n"
+            "candidate_next_actions:\n"
+            "  - <next action>\n"
+            "needs:\n"
+            "  - none\n"
+            "question_for_supervisor:\n"
+            "  - none\n"
+            "</checkpoint>"
         )

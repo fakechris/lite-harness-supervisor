@@ -1884,9 +1884,43 @@ def build_runtime_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _parse_runtime_argv(argv: list[str] | None = None) -> argparse.Namespace:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    legacy_run_actions = {
+        "register",
+        "foreground",
+        "stop",
+        "resume",
+        "review",
+        "export",
+        "summarize",
+        "replay",
+        "postmortem",
+    }
+    if (
+        len(argv) >= 2
+        and argv[0] == "run"
+        and argv[1] not in legacy_run_actions
+        and not argv[1].startswith("-")
+    ):
+        legacy = argparse.ArgumentParser(prog="thin-supervisor run", add_help=False)
+        legacy.add_argument("spec_path")
+        legacy.add_argument("--pane", default=None)
+        legacy.add_argument("--config", default=None)
+        legacy.add_argument("--event-file", default=None)
+        legacy.add_argument("--dry-run", action="store_true")
+        legacy.add_argument("--daemon", "-d", action="store_true")
+        parsed = legacy.parse_args(argv[1:])
+        setattr(parsed, "command", "run")
+        setattr(parsed, "run_action", None)
+        return parsed
+    parser = build_runtime_parser()
+    return parser.parse_args(argv)
+
+
 def main():
     parser = build_runtime_parser()
-    args = parser.parse_args()
+    args = _parse_runtime_argv()
 
     logging.basicConfig(
         level=logging.INFO,

@@ -78,6 +78,10 @@ class TestHandoffInstruction:
         assert inst.content.startswith("write a failing test")
         assert "current_node: write_test" in inst.content
         assert "<checkpoint>" in inst.content
+        assert "run_id: <run_id>" in inst.content
+        assert "checkpoint_seq: <incrementing integer>" in inst.content
+        assert "status: <working | blocked | step_done | workflow_done>" in inst.content
+        assert "\n\n" in inst.content
         assert inst.trigger_type == "init"
         assert inst.triggered_by_decision_id == "dec_xyz"
 

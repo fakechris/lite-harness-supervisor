@@ -2,7 +2,9 @@ After completing meaningful work, you MUST output a checkpoint block
 in exactly this format:
 
 <checkpoint>
-status: working | blocked | step_done | workflow_done
+run_id: <run_id>
+checkpoint_seq: <incrementing integer>
+status: <working | blocked | step_done | workflow_done>
 current_node: <step_id>
 summary: <one-line description>
 evidence:
@@ -18,8 +20,6 @@ question_for_supervisor:
 </checkpoint>
 
 Notes:
-- You do NOT need to include run_id or checkpoint_seq — the supervisor
-  fills these automatically.
 - Emit "step_done" when you believe the current step is complete.
 - Emit "blocked" when you need external input you cannot obtain yourself.
   The supervisor will escalate to a human.

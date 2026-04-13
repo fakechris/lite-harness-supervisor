@@ -20,7 +20,7 @@ Both are state-transition bugs, not just UX bugs.
 
 ## Current Machine
 
-The effective control flow lives in [supervisor/loop.py](/Users/chris/workspace/lite-harness-supervisor/supervisor/loop.py:1):
+The effective control flow lives in [supervisor/loop.py](../../supervisor/loop.py):
 
 - `READY -> RUNNING` via initial injection
 - `RUNNING + checkpoint -> GATING`
@@ -30,7 +30,7 @@ The effective control flow lives in [supervisor/loop.py](/Users/chris/workspace/
 - `VERIFYING + ok -> RUNNING | COMPLETED`
 - `VERIFYING + failed -> RUNNING | PAUSED_FOR_HUMAN`
 
-The enum definitions in [supervisor/domain/enums.py](/Users/chris/workspace/lite-harness-supervisor/supervisor/domain/enums.py:1)
+The enum definitions in [supervisor/domain/enums.py](../../supervisor/domain/enums.py)
 also include `AWAITING_AGENT_EVENT` and `ADVANCE_STEP`, but the main loop does
 not meaningfully exercise them. That is a sign that the declared machine and the
 executed machine have drifted.
@@ -68,14 +68,14 @@ invariants such as:
 ## Changes Landed In This Review
 
 - Added explicit transition tests in
-  [tests/test_state_machine_transitions.py](/Users/chris/workspace/lite-harness-supervisor/tests/test_state_machine_transitions.py:1)
+  [tests/test_state_machine_transitions.py](../../tests/test_state_machine_transitions.py)
 - Strengthened the sidecar loop test to assert a persisted `continue`
   injection event in
-  [tests/test_sidecar_loop.py](/Users/chris/workspace/lite-harness-supervisor/tests/test_sidecar_loop.py:1)
+  [tests/test_sidecar_loop.py](../../tests/test_sidecar_loop.py)
 - Tightened prompt-stuck detection in
-  [supervisor/terminal/adapter.py](/Users/chris/workspace/lite-harness-supervisor/supervisor/terminal/adapter.py:1)
+  [supervisor/terminal/adapter.py](../../supervisor/terminal/adapter.py)
 - Fixed `CONTINUE` reinjection in
-  [supervisor/loop.py](/Users/chris/workspace/lite-harness-supervisor/supervisor/loop.py:590)
+  [supervisor/loop.py](../../supervisor/loop.py)
 
 ## Remaining Gaps
 

@@ -13,28 +13,27 @@ def evaluate_candidate_gate(
 ) -> dict:
     baseline_policy = review.get("parent_id", "")
     candidate_policy = review.get("candidate_policy", "")
+    candidate_id = review.get("candidate_id", "")
     compare = compare_eval_policies(
         suite,
         baseline_policy=baseline_policy,
         candidate_policy=candidate_policy,
     )
     decision = _decision_from_compare(compare)
-    next_action = (
-        f"thin-supervisor-dev eval canary --run-id <recent_run> --run-id <recent_run>"
-        if decision == "needs_canary"
-        else f"thin-supervisor-dev eval review-candidate --candidate-id {review.get('candidate_id', '')}"
-    )
+
+    def _next_action_for(final_decision: str) -> str:
+        if final_decision == "needs_canary":
+            return "thin-supervisor-dev eval canary --run-id <recent_run>"
+        return f"thin-supervisor-dev eval review-candidate --candidate-id {candidate_id}"
+
+    next_action = _next_action_for(decision)
 
     if canary_report is not None:
         decision = canary_report.get("decision", decision)
-        next_action = (
-            f"thin-supervisor-dev eval review-candidate --candidate-id {review.get('candidate_id', '')}"
-            if decision == "promote"
-            else next_action
-        )
+        next_action = _next_action_for(decision)
 
     return {
-        "candidate_id": review.get("candidate_id", ""),
+        "candidate_id": candidate_id,
         "candidate_policy": candidate_policy,
         "baseline_policy": baseline_policy,
         "suite": review.get("suite", suite.name),

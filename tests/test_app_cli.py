@@ -21,6 +21,24 @@ class _DaemonWithNoRuns:
         return {"ok": True, "runs": []}
 
 
+def test_parse_runtime_argv_supports_legacy_run_shim():
+    args = app._parse_runtime_argv(["run", "plan.yaml", "--pane", "%0"])
+
+    assert args.command == "run"
+    assert args.run_action is None
+    assert args.spec_path == "plan.yaml"
+    assert args.pane == "%0"
+
+
+def test_parse_runtime_argv_keeps_run_subcommands():
+    args = app._parse_runtime_argv(["run", "register", "--spec", "plan.yaml", "--pane", "%0"])
+
+    assert args.command == "run"
+    assert args.run_action == "register"
+    assert args.spec == "plan.yaml"
+    assert args.pane == "%0"
+
+
 def _write_completed_state(tmp_path, *, run_id: str = "run_completed") -> None:
     runtime_dir = tmp_path / ".supervisor" / "runtime"
     runtime_dir.mkdir(parents=True)
