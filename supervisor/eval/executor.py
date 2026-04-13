@@ -202,11 +202,15 @@ def _evaluate_case(case: EvalCase, detector) -> dict:
     raise ValueError(f"unsupported eval category: {case.category}")
 
 
-def _mismatches_for_case(case: EvalCase, actual: dict) -> dict:
+def _expected_result_map(case: EvalCase) -> dict:
     expected = dict(case.expected)
     if case.expected_decision and "decision" not in expected:
         expected["decision"] = case.expected_decision
+    return expected
 
+
+def _mismatches_for_case(case: EvalCase, actual: dict) -> dict:
+    expected = _expected_result_map(case)
     mismatches: dict[str, dict] = {}
     for key, expected_value in expected.items():
         actual_value = actual.get(key)
@@ -250,14 +254,7 @@ def run_eval_suite(suite: EvalSuite, *, policy: str = "builtin-approval-v1") -> 
                 "severity": case.severity,
                 "weight": weight,
                 "passed": case_passed,
-                "expected": {
-                    **case.expected,
-                    **(
-                        {"decision": case.expected_decision}
-                        if case.expected_decision and "decision" not in case.expected
-                        else {}
-                    ),
-                },
+                "expected": _expected_result_map(case),
                 "actual": actual,
                 "mismatches": mismatches,
             }
