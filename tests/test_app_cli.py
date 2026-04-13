@@ -868,6 +868,44 @@ def test_eval_canary_json_output(monkeypatch, capsys):
     assert payload["summary"]["run_count"] == 2
 
 
+def test_eval_propose_saves_candidate_manifest_when_report_persisted(tmp_path, monkeypatch, capsys):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
+
+    monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: cfg)
+    monkeypatch.setattr("supervisor.eval.load_eval_suite", lambda ref: object())
+    monkeypatch.setattr("supervisor.eval.propose_candidate_policy", lambda *args, **kwargs: {
+        "suite": "approval-core",
+        "objective": "reduce_false_approval",
+        "recommended_candidate_policy": "builtin-approval-strict-v1",
+        "candidate": {
+            "candidate_id": "candidate_demo",
+            "candidate_policy": "builtin-approval-strict-v1",
+            "parent_id": "builtin-approval-v1",
+            "objective": "reduce_false_approval",
+            "touched_fragments": ["approval-boundary"],
+            "originating_evidence": {"suite": "approval-core", "failure_case_count": 1},
+        },
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="propose",
+        suite="approval-core",
+        suite_file=None,
+        baseline_policy="builtin-approval-v1",
+        objective="reduce_false_approval",
+        output="",
+        save_report=True,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_manifest_path"].endswith("candidate_demo.json")
+    assert Path(payload["candidate_manifest_path"]).exists()
+
+
 def test_run_postmortem_writes_default_report(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("supervisor.history.export_run", lambda run_id, runtime_dir=".supervisor/runtime": {"run_id": run_id})

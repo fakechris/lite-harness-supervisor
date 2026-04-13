@@ -903,6 +903,7 @@ def cmd_eval(args):
         run_eval_suite,
         run_canary_eval,
         run_replay_eval,
+        save_candidate_manifest,
         save_eval_report,
         save_eval_suite,
     )
@@ -1062,6 +1063,8 @@ def cmd_eval(args):
                     output_path=getattr(args, "output", ""),
                 )
                 proposal["report_path"] = str(report_path)
+                manifest_path = save_candidate_manifest(proposal, runtime_dir=runtime_dir)
+                proposal["candidate_manifest_path"] = str(manifest_path)
         except Exception as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1

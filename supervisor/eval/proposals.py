@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Callable
 
@@ -90,6 +91,14 @@ def propose_candidate_policy(
         "failure_cases": failure_cases,
         "advisory_source": advisory_source,
         "advisory_text": advisory_text,
+        "candidate": _candidate_lineage(
+            suite_name=suite.name,
+            objective=objective,
+            baseline_policy=baseline_policy,
+            candidate_policy=recommended,
+            failure_cases=failure_cases,
+            advisory_source=advisory_source,
+        ),
     }
 
 
@@ -165,3 +174,30 @@ def _extract_policy_from_text(text: str, candidate_pool: list[str]) -> str:
         if pattern.search(text):
             return candidate
     return ""
+
+
+def _candidate_lineage(
+    *,
+    suite_name: str,
+    objective: str,
+    baseline_policy: str,
+    candidate_policy: str,
+    failure_cases: list[dict],
+    advisory_source: str,
+) -> dict:
+    touched_fragments = ["approval-boundary"]
+    basis = "|".join([suite_name, objective, baseline_policy, candidate_policy, ",".join(touched_fragments)])
+    candidate_id = f"candidate_{hashlib.sha1(basis.encode('utf-8')).hexdigest()[:10]}"
+    return {
+        "candidate_id": candidate_id,
+        "candidate_policy": candidate_policy,
+        "parent_id": baseline_policy,
+        "objective": objective,
+        "touched_fragments": touched_fragments,
+        "originating_evidence": {
+            "suite": suite_name,
+            "failure_case_count": len(failure_cases),
+            "failure_case_ids": [item.get("case_id", "") for item in failure_cases],
+            "advisory_source": advisory_source,
+        },
+    }

@@ -3,7 +3,7 @@ from .canary import run_canary_eval
 from .comparator import compare_eval_policies
 from .executor import run_eval_suite
 from .proposals import propose_candidate_policy
-from .reporting import default_report_dir, save_eval_report
+from .reporting import default_candidate_dir, default_report_dir, save_candidate_manifest, save_eval_report
 from .replay import run_replay_eval
 from .synthetic import expand_eval_suite
 
@@ -13,6 +13,7 @@ __all__ = [
     "bundled_suite_path",
     "run_canary_eval",
     "compare_eval_policies",
+    "default_candidate_dir",
     "default_report_dir",
     "expand_eval_suite",
     "list_bundled_suites",
@@ -20,6 +21,7 @@ __all__ = [
     "propose_candidate_policy",
     "run_eval_suite",
     "run_replay_eval",
+    "save_candidate_manifest",
     "save_eval_report",
     "save_eval_suite",
 ]

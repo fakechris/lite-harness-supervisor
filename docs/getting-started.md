@@ -136,6 +136,8 @@ tail -f .supervisor/runtime/daemon.log
 thin-supervisor bridge read work:0 50
 ```
 
+`--save-report` writes eval artifacts under `.supervisor/evals/reports/`. With `thin-supervisor eval propose`, the same run also writes a candidate-lineage manifest under `.supervisor/evals/candidates/`.
+
 ### 7. What happens during execution
 
 ```

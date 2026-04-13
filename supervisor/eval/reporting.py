@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -8,6 +9,10 @@ from uuid import uuid4
 
 def default_report_dir(runtime_dir: str = ".supervisor/runtime") -> Path:
     return Path(runtime_dir).parent / "evals" / "reports"
+
+
+def default_candidate_dir(runtime_dir: str = ".supervisor/runtime") -> Path:
+    return Path(runtime_dir).parent / "evals" / "candidates"
 
 
 def save_eval_report(
@@ -28,6 +33,33 @@ def save_eval_report(
     return path
 
 
+def save_candidate_manifest(
+    payload: dict,
+    *,
+    runtime_dir: str = ".supervisor/runtime",
+    output_path: str = "",
+) -> Path:
+    candidate = dict(payload.get("candidate") or {})
+    candidate_id = str(candidate.get("candidate_id") or "").strip() or _candidate_id_from_payload(payload)
+    candidate["candidate_id"] = candidate_id
+    path = Path(output_path) if output_path else default_candidate_dir(runtime_dir) / f"{candidate_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wrapped = {
+        "candidate_id": candidate_id,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "proposal": {
+            "suite": payload.get("suite", ""),
+            "objective": payload.get("objective", ""),
+            "baseline_policy": payload.get("baseline_policy", ""),
+            "recommended_candidate_policy": payload.get("recommended_candidate_policy", ""),
+            "rationale": payload.get("rationale", ""),
+        },
+        "candidate": candidate,
+    }
+    path.write_text(json.dumps(wrapped, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def _default_report_path(payload: dict, report_kind: str, runtime_dir: str) -> Path:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     unique = uuid4().hex[:8]
@@ -39,3 +71,16 @@ def _default_report_path(payload: dict, report_kind: str, runtime_dir: str) -> P
     )
     safe_stem = str(stem).replace("/", "-").replace(" ", "-")
     return default_report_dir(runtime_dir) / f"{timestamp}-{unique}-{report_kind}-{safe_stem}.json"
+
+
+def _candidate_id_from_payload(payload: dict) -> str:
+    basis = "|".join(
+        [
+            str(payload.get("suite", "")),
+            str(payload.get("objective", "")),
+            str(payload.get("baseline_policy", "")),
+            str(payload.get("recommended_candidate_policy", "")),
+        ]
+    )
+    digest = hashlib.sha1(basis.encode("utf-8")).hexdigest()[:10]
+    return f"candidate_{digest}"
