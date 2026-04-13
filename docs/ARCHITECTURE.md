@@ -177,6 +177,13 @@ These files are intentionally advisory. They are input to hindsight, replay, and
 - `thin-supervisor eval` now exposes deterministic golden-suite executors for `approval-core`, `routing-core`, `escalation-core`, and `finish-gate-core`, plus a replay wrapper that converts historical run replays into eval-style reports, a blind comparator for baseline-vs-candidate suite outcomes, a canary runner that aggregates replay plus friction over real runs into a promote/hold/rollback signal, deterministic synthetic expansion with provenance tags, a constrained proposal surface that combines failure-case summaries with advisory/self-review guidance without auto-promoting candidates, and optional report persistence under `.supervisor/evals/reports/`
 - Global behavior changes remain offline and human-reviewed; online adaptation stays scoped to the current run or user preference memory
 
+### Skill Optimization Boundary
+
+- `skills/thin-supervisor*/references/contract.md` is the frozen execution contract
+- `skills/thin-supervisor*/strategy/*.md` are the allowed optimization surfaces
+- `SKILL.md` is now the coordinator that points agents at the right contract and strategy documents
+- policy optimization work should mutate strategy fragments, not the full skill document
+
 ### Not planned
 
 - Full provider-native orchestration

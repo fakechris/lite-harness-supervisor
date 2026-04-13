@@ -20,12 +20,32 @@ You focus on execution. It handles the orchestration.
 
 ---
 
+## Contract vs Strategy Loading
+
+Always read `references/contract.md` before planning or execution. It is
+the frozen behavior contract and must not be optimized away.
+
+Strategy fragments are the only safe optimization surface:
+
+- `strategy/approval-boundary.md`
+- `strategy/finish-proof.md`
+- `strategy/escalation.md`
+- `strategy/pause-ux.md`
+
+Load strategy fragments only when they are relevant to the current step.
+
+---
+
 ## Context Loading
 
 - When writing or revising a spec, read `references/spec-writing-guide.md`
+- When deciding whether the user has approved execution, read `strategy/approval-boundary.md`
 - When deciding supervision style or worker trust posture, read `references/supervision-modes.md`
 - When verification fails or a retry plan is needed, read `references/debugging-playbook.md`
+- When shaping checkpoint evidence or deciding whether `workflow_done` is justified, read `strategy/finish-proof.md`
 - When deciding whether to escalate or continue, read `references/escalation-rules.md`
+- When blocked or choosing between continue / retry / escalate behavior, read `strategy/escalation.md`
+- When the supervisor pauses or completes and you need to explain that state to the user, read `strategy/pause-ux.md`
 - When a supervised run completes, read `references/improve.md`
 
 ---
@@ -37,7 +57,6 @@ time than a thorough question.
 
 **Default behavior**: always do a clarify pass before planning or
 attaching. Do not jump directly from user intent to execution.
-
 ### Clarify loop (when needed)
 
 Ask ONE question per round. Target the weakest clarity dimension:
@@ -53,6 +72,7 @@ Rules:
 - Explore the codebase FIRST. Never ask users for facts you can discover.
 - Stay on one thread until it's clear. Don't rotate dimensions for breadth.
 - Exit when all dimensions have clear answers, or user says "enough".
+- Even when the request is concrete, still clarify if outcome/scope/acceptance is ambiguous.
 
 If the request is already concrete, do a **contract confirmation** pass
 instead of skipping clarify: summarize your inferred goal, scope,
@@ -99,6 +119,9 @@ Write to `.supervisor/clarify/<slug>.md`:
 **Goal**: Generate a spec that will work on the first try.
 
 ### 2a. Generate the spec
+
+Before generating the spec, re-check `references/contract.md` and
+`strategy/approval-boundary.md` so the planned approval flow is explicit.
 
 Break the task into 3-10 sequential steps. Each step needs a concrete
 objective and at least one verification check.
@@ -198,6 +221,9 @@ APPROVED / NEEDS_USER_INPUT: <specific questions>
 
 ## Stage 3: Approve + Attach
 
+Approval semantics are governed by `references/contract.md`. Do not ask
+for a second confirmation after the user has already approved.
+
 Present to the user:
 
 ```
@@ -266,6 +292,9 @@ scripts/thin-supervisor-attach.sh <slug>
 
 ### Follow the checkpoint protocol
 
+When deciding whether a checkpoint contains enough finish evidence, load
+`strategy/finish-proof.md`.
+
 After completing meaningful work, output a checkpoint block:
 
 ```text
@@ -308,6 +337,7 @@ After a checkpoint, the supervisor will:
 
 ## Rules
 
+- The immutable execution rules live in `references/contract.md`
 - Do NOT ask "should I continue?" — the supervisor decides
 - Do NOT skip verification — every step must pass its verify checks
 - Do NOT begin implementation before the attach script succeeds

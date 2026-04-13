@@ -380,8 +380,17 @@ Install for Codex:
 cp -r skills/thin-supervisor-codex ~/.codex/skills/thin-supervisor
 ```
 
-Invoke with `/thin-supervisor` to run the default clarify-first flow:
-clarify -> draft spec -> user approval -> attach -> supervised execution.
+Invoke with `/thin-supervisor` to start the default flow:
+- clarify ambiguous goals
+- generate a draft spec
+- wait for approval
+- attach and execute only after approval
+
+The skill is now split into two layers:
+- frozen contract: `skills/thin-supervisor*/references/contract.md`
+- optimizable strategy fragments under `skills/thin-supervisor*/strategy/`
+
+Future policy optimization should target the strategy fragments, not the whole `SKILL.md`.
 
 ## Oracle Consultation
 

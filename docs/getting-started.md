@@ -256,6 +256,12 @@ claude
 
 Then invoke `/thin-supervisor` or describe your task. Everything else works the same.
 
+The installed skill now separates:
+- immutable contract rules in `references/contract.md`
+- optimizable behavior hints in `strategy/*.md`
+
+If you are tuning the skill, change the strategy fragments first. Do not mutate the contract file unless the execution rules themselves changed.
+
 ---
 
 ## Part C: open-relay + Any Agent
