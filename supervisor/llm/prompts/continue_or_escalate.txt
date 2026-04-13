@@ -16,7 +16,6 @@ Decide one of:
    or agent is repeating the same approach without progress)
 - ESCALATE_TO_HUMAN — missing authority, missing external input,
   dangerous irreversible action, spec ambiguity, or retry budget exhausted
-- FINISH — all steps done and verified (rare; usually driven by verifier)
 
 Policy:
 - Prefer CONTINUE by default unless clear evidence of completion or failure.
@@ -26,7 +25,7 @@ Policy:
 
 Return exactly one JSON object:
 {
-  "decision": "CONTINUE|VERIFY_STEP|RETRY|ESCALATE_TO_HUMAN|FINISH",
+  "decision": "CONTINUE|VERIFY_STEP|RETRY|ESCALATE_TO_HUMAN",
   "reason": "<one sentence>",
   "confidence": <0.0-1.0>,
   "needs_human": <true|false>,

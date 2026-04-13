@@ -152,3 +152,23 @@ class TestFinishGateWithContract:
         loop = SupervisorLoop(store)
         result = loop.finish_gate.evaluate(spec, state)
         assert result["risk_class"] == "critical"
+
+    def test_required_evidence_does_not_match_across_multiple_entries(self, tmp_path):
+        spec = load_spec("specs/examples/linear_plan.example.yaml")
+        spec.acceptance = AcceptanceContract(
+            goal="test",
+            required_evidence=["tests pass"],
+            require_all_steps_done=False,
+            require_verification_pass=False,
+        )
+
+        store = StateStore(str(tmp_path / "runtime"))
+        state = store.load_or_init(spec)
+        state.last_agent_checkpoint = {
+            "evidence": ["tests", "pass"],
+        }
+
+        loop = SupervisorLoop(store)
+        result = loop.finish_gate.evaluate(spec, state)
+        assert result["ok"] is False
+        assert "missing required evidence: tests pass" in result["reason"]

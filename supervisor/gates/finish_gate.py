@@ -84,16 +84,9 @@ class FinishGate:
         if contract.required_evidence:
             cp = state.last_agent_checkpoint or {}
             provided = cp.get("evidence", [])
-            # Flatten evidence items to searchable strings
-            evidence_strings: list[str] = []
-            for e in provided:
-                if isinstance(e, dict):
-                    evidence_strings.extend(str(v) for v in e.values())
-                else:
-                    evidence_strings.append(str(e))
-            evidence_text = " ".join(evidence_strings).lower()
+            evidence_strings = self._normalize_evidence_entries(provided)
             for req in contract.required_evidence:
-                if req.lower() not in evidence_text:
+                if not self._evidence_requirement_met(req, evidence_strings):
                     failures.append(f"missing required evidence: {req}")
 
         # Check must_review_by
@@ -108,3 +101,30 @@ class FinishGate:
             "failures": failures,
             "risk_class": contract.risk_class,
         }
+
+    @staticmethod
+    def _normalize_evidence_entries(provided) -> list[str]:
+        entries: list[str] = []
+        for item in provided:
+            if isinstance(item, dict):
+                parts = []
+                for key, value in item.items():
+                    key_text = " ".join(str(key).split()).lower()
+                    value_text = " ".join(str(value).split()).lower()
+                    if key_text and value_text:
+                        parts.append(f"{key_text}: {value_text}")
+                text = "; ".join(parts)
+            else:
+                text = " ".join(str(item).split()).lower()
+            if text:
+                entries.append(text)
+        return entries
+
+    @staticmethod
+    def _evidence_requirement_met(requirement: str, entries: list[str]) -> bool:
+        required = " ".join(str(requirement).split()).lower()
+        if not required:
+            return True
+        if ":" in required:
+            return any(entry == required or entry.startswith(required) for entry in entries)
+        return any(required in entry for entry in entries)

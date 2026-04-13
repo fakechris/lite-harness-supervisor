@@ -18,6 +18,7 @@ from supervisor.domain.enums import TopState
 from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
 from supervisor.gates.finish_gate import FinishGate
+from supervisor.domain.state_machine import transition_top_state
 from supervisor.loop import SupervisorLoop
 from supervisor.adapters.surface_factory import create_surface
 from supervisor.config import RuntimeConfig
@@ -275,6 +276,7 @@ class DaemonServer:
                 poll_interval=self.config.poll_interval_sec,
                 read_lines=self.config.read_lines,
                 stop_event=entry.stop_event,
+                idle_timeout_sec=self.config.default_agent_timeout_sec,
             )
             logger.info("run %s finished: %s", entry.run_id, state.top_state.value)
         except Exception:
@@ -335,8 +337,25 @@ class DaemonServer:
                     and state_data.get("pane_target", "") == pane_target
                     and state_data.get("top_state") in ("PAUSED_FOR_HUMAN", "RUNNING", "READY", "GATING", "VERIFYING")):
                 run_id = state_data["run_id"]
+                resumable_state = state_data.get("top_state", "")
+                if resumable_state in {"GATING", "VERIFYING"}:
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"run {run_id} is in {resumable_state} and cannot safely resume. "
+                            "Stop or inspect the run before restarting it."
+                        ),
+                    }
                 current_spec_hash = StateStore._hash_spec(spec_path)
                 saved_spec_hash = state_data.get("spec_hash", "")
+                if current_spec_hash and not saved_spec_hash:
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"run {run_id} has no persisted spec hash. "
+                            "Legacy runs must be re-registered instead of resumed."
+                        ),
+                    }
                 if current_spec_hash and saved_spec_hash and current_spec_hash != saved_spec_hash:
                     return {
                         "ok": False,
@@ -371,7 +390,11 @@ class DaemonServer:
                     if not acquired:
                         return {"ok": False, "error": f"pane {pane_target} locked by {existing_owner}"}
                     if state.top_state == TopState.PAUSED_FOR_HUMAN:
-                        state.top_state = TopState.RUNNING
+                        transition_top_state(state, TopState.RUNNING, reason="resume requested")
+                        state.auto_intervention_count = 0
+                        state.node_mismatch_count = 0
+                        state.last_mismatch_node_id = ""
+                        state.human_escalations = []
                         store.append_session_event(
                             run_id,
                             "resume_requested",
@@ -410,67 +433,66 @@ class DaemonServer:
                         "stop it or wait for it to pause before acknowledging review"
                     ),
                 }
-
-        if active_entry is not None:
-            store = active_entry.store
-            try:
-                state_data = json.loads(store.state_path.read_text())
-            except (OSError, json.JSONDecodeError):
-                return {"ok": False, "error": f"could not read state for {run_id}"}
-        else:
-            store = None
-            state_data = None
-            for run_dir in sorted(Path(self.runs_dir).iterdir()):
-                state_path = run_dir / "state.json"
-                if not state_path.exists():
-                    continue
+            if active_entry is not None:
+                store = active_entry.store
                 try:
-                    candidate = json.loads(state_path.read_text())
+                    state_data = json.loads(store.state_path.read_text())
                 except (OSError, json.JSONDecodeError):
-                    continue
-                if candidate.get("run_id") == run_id:
-                    store = StateStore(str(run_dir))
-                    state_data = candidate
-                    break
-            if store is None or state_data is None:
-                return {"ok": False, "error": f"run {run_id} not found"}
+                    return {"ok": False, "error": f"could not read state for {run_id}"}
+            else:
+                store = None
+                state_data = None
+                for run_dir in sorted(Path(self.runs_dir).iterdir()):
+                    state_path = run_dir / "state.json"
+                    if not state_path.exists():
+                        continue
+                    try:
+                        candidate = json.loads(state_path.read_text())
+                    except (OSError, json.JSONDecodeError):
+                        continue
+                    if candidate.get("run_id") == run_id:
+                        store = StateStore(str(run_dir))
+                        state_data = candidate
+                        break
+                if store is None or state_data is None:
+                    return {"ok": False, "error": f"run {run_id} not found"}
 
-        spec_path = state_data.get("spec_path", "")
-        if not spec_path:
-            return {"ok": False, "error": f"run {run_id} has no spec_path"}
-        current_spec_hash = StateStore._hash_spec(spec_path)
-        saved_spec_hash = state_data.get("spec_hash", "")
-        if current_spec_hash and saved_spec_hash and current_spec_hash != saved_spec_hash:
-            return {
-                "ok": False,
-                "error": (
-                    "spec was modified since the run was created. "
-                    "Revert the spec to acknowledge the review for this run."
-                ),
-            }
-        try:
-            spec = load_spec(spec_path)
-        except Exception as e:
-            return {"ok": False, "error": f"spec load failed: {e}"}
+            spec_path = state_data.get("spec_path", "")
+            if not spec_path:
+                return {"ok": False, "error": f"run {run_id} has no spec_path"}
+            current_spec_hash = StateStore._hash_spec(spec_path)
+            saved_spec_hash = state_data.get("spec_hash", "")
+            if current_spec_hash and saved_spec_hash and current_spec_hash != saved_spec_hash:
+                return {
+                    "ok": False,
+                    "error": (
+                        "spec was modified since the run was created. "
+                        "Revert the spec to acknowledge the review for this run."
+                    ),
+                }
+            try:
+                spec = load_spec(spec_path)
+            except Exception as e:
+                return {"ok": False, "error": f"spec load failed: {e}"}
 
-        state = store.load_or_init(
-            spec,
-            spec_path=spec_path,
-            pane_target=state_data.get("pane_target", ""),
-            surface_type=state_data.get("surface_type", "tmux"),
-            workspace_root=state_data.get("workspace_root", os.getcwd()),
-        )
-        completed_reviews = set(getattr(state, "completed_reviews", []) or [])
-        completed_reviews.add(reviewer)
-        state.completed_reviews = sorted(completed_reviews)
-        store.append_session_event(run_id, "review_acknowledged", {"reviewer": reviewer})
+            state = store.load_or_init(
+                spec,
+                spec_path=spec_path,
+                pane_target=state_data.get("pane_target", ""),
+                surface_type=state_data.get("surface_type", "tmux"),
+                workspace_root=state_data.get("workspace_root", os.getcwd()),
+            )
+            completed_reviews = set(getattr(state, "completed_reviews", []) or [])
+            completed_reviews.add(reviewer)
+            state.completed_reviews = sorted(completed_reviews)
+            store.append_session_event(run_id, "review_acknowledged", {"reviewer": reviewer})
 
-        finish = FinishGate().evaluate(spec, state, cwd=state.workspace_root)
-        if finish["ok"]:
-            state.top_state = TopState.COMPLETED
-            store.append_session_event(run_id, "completed_after_review", {"reviewer": reviewer})
-        store.save(state)
-        return {"ok": True, "run_id": run_id, "top_state": state.top_state.value}
+            finish = FinishGate().evaluate(spec, state, cwd=state.workspace_root)
+            if finish["ok"]:
+                transition_top_state(state, TopState.COMPLETED, reason="review acknowledged and finish gate passed")
+                store.append_session_event(run_id, "completed_after_review", {"reviewer": reviewer})
+            store.save(state)
+            return {"ok": True, "run_id": run_id, "top_state": state.top_state.value}
 
     # ------------------------------------------------------------------
     # P0: list + observe

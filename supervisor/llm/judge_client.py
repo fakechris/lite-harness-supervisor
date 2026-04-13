@@ -11,6 +11,8 @@ import json
 import logging
 from pathlib import Path
 
+from supervisor.protocol.checkpoints import sanitize_instruction_text
+
 logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).parent / "prompts"
@@ -75,7 +77,12 @@ class JudgeClient:
         if self.model is None:
             return self._stub_continue()
         prompt = _load_prompt("continue_or_escalate.txt")
-        return self._call(prompt, context)
+        return self._call(
+            prompt,
+            context,
+            allowed_decisions={"CONTINUE", "VERIFY_STEP", "RETRY", "ESCALATE_TO_HUMAN"},
+            allow_next_instruction=True,
+        )
 
     def choose_branch(self, context: dict) -> dict:
         if self.model is None:
@@ -88,13 +95,25 @@ class JudgeClient:
             return self._stub_finish()
         prompt = _load_prompt("continue_or_escalate.txt")
         context = {**context, "_hint": "check if workflow can finish"}
-        return self._call(prompt, context)
+        return self._call(
+            prompt,
+            context,
+            allowed_decisions={"CONTINUE", "VERIFY_STEP", "RETRY", "ESCALATE_TO_HUMAN"},
+            allow_next_instruction=True,
+        )
 
     # ------------------------------------------------------------------
     # LLM call
     # ------------------------------------------------------------------
 
-    def _call(self, system_prompt: str, context: dict) -> dict:
+    def _call(
+        self,
+        system_prompt: str,
+        context: dict,
+        *,
+        allowed_decisions: set[str] | None = None,
+        allow_next_instruction: bool = False,
+    ) -> dict:
         try:
             import litellm
         except ImportError:
@@ -113,14 +132,39 @@ class JudgeClient:
                 max_tokens=self.max_tokens,
             )
             text = response.choices[0].message.content
-            result = _parse_json(text)
-            # Normalise keys
-            result.setdefault("confidence", 0.5)
-            result.setdefault("needs_human", False)
+            result = self._sanitize_result(
+                _parse_json(text),
+                allowed_decisions=allowed_decisions,
+                allow_next_instruction=allow_next_instruction,
+            )
             return result
         except Exception:
             logger.exception("LLM judge call failed, falling back to stub")
             return self._stub_continue()
+
+    def _sanitize_result(
+        self,
+        result: dict,
+        *,
+        allowed_decisions: set[str] | None = None,
+        allow_next_instruction: bool = False,
+    ) -> dict:
+        if not isinstance(result, dict):
+            raise ValueError("judge result must be an object")
+
+        decision = str(result.get("decision", "")).strip().upper()
+        if allowed_decisions is not None and decision not in allowed_decisions:
+            raise ValueError(f"invalid judge decision: {decision!r}")
+
+        sanitized = {
+            "decision": (decision or "CONTINUE").lower(),
+            "reason": " ".join(str(result.get("reason", "")).split())[:400].rstrip(),
+            "confidence": _clamp_confidence(result.get("confidence", 0.5)),
+            "needs_human": bool(result.get("needs_human", False)),
+        }
+        if allow_next_instruction:
+            sanitized["next_instruction"] = sanitize_instruction_text(result.get("next_instruction"))
+        return sanitized
 
     # ------------------------------------------------------------------
     # Stubs (used when model is None or on error)
@@ -154,3 +198,15 @@ class JudgeClient:
             "confidence": 0.5,
             "needs_human": False,
         }
+
+
+def _clamp_confidence(value) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.5
+    if parsed < 0:
+        return 0.0
+    if parsed > 1:
+        return 1.0
+    return parsed

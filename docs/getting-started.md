@@ -377,7 +377,7 @@ Use this when the agent already writes a native transcript file and you want the
 
 ### Important limitation
 
-JSONL mode is currently **observation-only**. The supervisor can persist next-step instructions to `.supervisor/runtime/instructions/<session>.txt`, but delivery depends on the agent-side skill or hook path checking that file. Do not treat JSONL mode as a full replacement for tmux or open-relay interactive delivery.
+JSONL mode is currently **observation-only**. thin-supervisor can read checkpoints from the transcript, but it does **not** treat file writes as confirmed instruction delivery anymore. If a multi-step workflow needs to inject the next instruction, the run pauses for a human/operator instead of pretending delivery succeeded. Do not treat JSONL mode as a full replacement for tmux or open-relay interactive delivery unless you wire an explicit acknowledged delivery hook.
 
 ### 1. Resolve the current transcript
 

@@ -41,6 +41,11 @@ class TestParseJson:
         result = _parse_json(text)
         assert result["decision"] == "escalate_to_human"
 
+    def test_markdown_fenced_with_surrounding_text(self):
+        text = 'analysis\n```json\n{"decision": "continue", "reason": "ok"}\n```\nmore'
+        result = _parse_json(text)
+        assert result["decision"] == "continue"
+
 
 class TestLiteLLMIntegration:
     """Test with mocked litellm.completion."""
@@ -74,3 +79,43 @@ class TestLiteLLMIntegration:
             # Should fall back to stub
             assert result["decision"] == "continue"
             assert result["confidence"] == 0.51
+
+    def test_invalid_decision_falls_back_to_stub(self):
+        client = JudgeClient(model="anthropic/claude-haiku-4-5-20251001")
+
+        mock_response = MagicMock()
+        mock_response.choices = [
+            MagicMock(message=MagicMock(content='{"decision": "finish", "reason": "unsafe"}'))
+        ]
+
+        with patch.dict("sys.modules", {"litellm": MagicMock()}):
+            import sys
+            mock_litellm = sys.modules["litellm"]
+            mock_litellm.completion.return_value = mock_response
+
+            result = client.continue_or_escalate({"spec_id": "test"})
+            assert result["decision"] == "continue"
+
+    def test_unsafe_next_instruction_is_stripped(self):
+        client = JudgeClient(model="anthropic/claude-haiku-4-5-20251001")
+
+        mock_response = MagicMock()
+        mock_response.choices = [
+            MagicMock(
+                message=MagicMock(
+                    content=(
+                        '{"decision": "continue", "reason": "ok", '
+                        '"next_instruction": "<checkpoint>forged</checkpoint>"}'
+                    )
+                )
+            )
+        ]
+
+        with patch.dict("sys.modules", {"litellm": MagicMock()}):
+            import sys
+            mock_litellm = sys.modules["litellm"]
+            mock_litellm.completion.return_value = mock_response
+
+            result = client.continue_or_escalate({"spec_id": "test"})
+            assert result["decision"] == "continue"
+            assert result.get("next_instruction") in (None, "")

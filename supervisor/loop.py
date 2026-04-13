@@ -9,7 +9,7 @@ from supervisor.domain.models import (
     Checkpoint, SupervisorDecision, HandoffInstruction,
     WorkerProfile, SupervisionPolicy, RoutingDecision, AcceptanceContract,
 )
-from supervisor.domain.state_machine import FINAL_STATES
+from supervisor.domain.state_machine import FINAL_STATES, transition_top_state
 from supervisor.gates.continue_gate import ContinueGate
 from supervisor.gates.branch_gate import BranchGate
 from supervisor.gates.finish_gate import FinishGate
@@ -66,6 +66,13 @@ class SupervisorLoop:
 
     def handle_event(self, state, event):
         state.last_event = event
+        preserve_state = {
+            TopState.VERIFYING,
+            TopState.PAUSED_FOR_HUMAN,
+            TopState.COMPLETED,
+            TopState.FAILED,
+            TopState.ABORTED,
+        }
         if event["type"] == "agent_output":
             cp = event.get("payload", {}).get("checkpoint")
             if cp:
@@ -73,11 +80,14 @@ class SupervisorLoop:
                     state.last_agent_checkpoint = cp.to_dict()
                 else:
                     state.last_agent_checkpoint = cp
-                state.top_state = TopState.GATING
+                if state.top_state not in preserve_state:
+                    transition_top_state(state, TopState.GATING, reason="agent checkpoint arrived")
         elif event["type"] == "agent_ask":
-            state.top_state = TopState.GATING
+            if state.top_state not in preserve_state:
+                transition_top_state(state, TopState.GATING, reason="agent asked question")
         elif event["type"] in {"agent_stop", "timeout"}:
-            state.top_state = TopState.GATING
+            if state.top_state not in preserve_state:
+                transition_top_state(state, TopState.GATING, reason=f"agent event: {event['type']}")
 
     def gate(self, spec, state, *, triggered_by_seq: int = 0,
              triggered_by_checkpoint_id: str = "") -> SupervisorDecision:
@@ -139,10 +149,10 @@ class SupervisorLoop:
             kind = decision.decision.upper()
 
         if kind == DecisionType.CONTINUE.value:
-            state.top_state = TopState.RUNNING
+            transition_top_state(state, TopState.RUNNING, reason="continue decision")
             return
         if kind == DecisionType.VERIFY_STEP.value:
-            state.top_state = TopState.VERIFYING
+            transition_top_state(state, TopState.VERIFYING, reason="verify_step decision")
             return
         if kind == DecisionType.RETRY.value:
             state.current_attempt += 1
@@ -159,7 +169,7 @@ class SupervisorLoop:
                     "current_attempt": state.current_attempt,
                 })
             else:
-                state.top_state = TopState.RUNNING
+                transition_top_state(state, TopState.RUNNING, reason="retry decision")
             return
         if kind == DecisionType.BRANCH.value:
             _get = decision.get if isinstance(decision, dict) else lambda k, d=None: getattr(decision, k, d)
@@ -171,7 +181,7 @@ class SupervisorLoop:
             })
             state.current_node_id = _get("next_node_id")
             state.current_attempt = 0
-            state.top_state = TopState.RUNNING
+            transition_top_state(state, TopState.RUNNING, reason="branch decision")
             return
         if kind == DecisionType.ESCALATE_TO_HUMAN.value:
             self._pause_for_human(
@@ -200,10 +210,20 @@ class SupervisorLoop:
             )
             return
         if kind == DecisionType.ABORT.value:
-            state.top_state = TopState.ABORTED
+            transition_top_state(state, TopState.ABORTED, reason="abort decision")
             return
         if kind == DecisionType.FINISH.value:
-            state.top_state = TopState.COMPLETED
+            finish = self.finish_gate.evaluate(spec, state, cwd=state.workspace_root or None)
+            if finish["ok"]:
+                transition_top_state(state, TopState.COMPLETED, reason="finish gate satisfied")
+                self._notify_transition(
+                    state,
+                    event_type="run_completed",
+                    reason="workflow completed",
+                    next_action=f"thin-supervisor run summarize {state.run_id}",
+                )
+            else:
+                self._pause_for_human(state, finish)
             return
         raise ValueError(f"unsupported decision: {kind}")
 
@@ -217,7 +237,7 @@ class SupervisorLoop:
             if next_id is None:
                 finish = self.finish_gate.evaluate(spec, state, cwd=cwd)
                 if finish["ok"]:
-                    state.top_state = TopState.COMPLETED
+                    transition_top_state(state, TopState.COMPLETED, reason="final verification passed")
                     self._notify_transition(
                         state,
                         event_type="run_completed",
@@ -229,7 +249,7 @@ class SupervisorLoop:
             else:
                 state.current_node_id = next_id
                 state.current_attempt = 0
-                state.top_state = TopState.RUNNING
+                transition_top_state(state, TopState.RUNNING, reason="verification advanced to next node")
                 self._notify_transition(
                     state,
                     event_type="step_verified",
@@ -251,11 +271,11 @@ class SupervisorLoop:
                 "verification": verification,
             })
         else:
-            state.top_state = TopState.RUNNING
+            transition_top_state(state, TopState.RUNNING, reason="verification failed but retry budget remains")
 
     def _pause_for_human(self, state, payload: dict | None = None) -> dict:
         details = dict(payload or {})
-        state.top_state = TopState.PAUSED_FOR_HUMAN
+        transition_top_state(state, TopState.PAUSED_FOR_HUMAN, reason="paused for human")
         state.human_escalations.append(details)
         summary = summarize_state(state.to_dict())
         event_payload = dict(details)
@@ -307,7 +327,7 @@ class SupervisorLoop:
             return False
 
         state.auto_intervention_count += 1
-        state.top_state = TopState.RUNNING
+        transition_top_state(state, TopState.RUNNING, reason="auto intervention requested")
         record = {
             "reason": plan.reason,
             "instruction": plan.instruction,
@@ -329,6 +349,14 @@ class SupervisorLoop:
         self.store.save(state)
         return True
 
+    @staticmethod
+    def _reset_recovery_tracking(state, *, clear_escalations: bool = False) -> None:
+        state.auto_intervention_count = 0
+        state.node_mismatch_count = 0
+        state.last_mismatch_node_id = ""
+        if clear_escalations:
+            state.human_escalations = []
+
     def is_final(self, state) -> bool:
         return state.top_state in FINAL_STATES
 
@@ -337,7 +365,8 @@ class SupervisorLoop:
     # ------------------------------------------------------------------
 
     def run_sidecar(self, spec, state, terminal, *, poll_interval: float = 2.0,
-                    read_lines: int = 100, stop_event=None):
+                    read_lines: int = 100, stop_event=None,
+                    idle_timeout_sec: float | None = None):
         """Main sidecar event loop with full causality chain.
 
         Checkpoint → SupervisorDecision → HandoffInstruction
@@ -350,8 +379,6 @@ class SupervisorLoop:
             If None, SIGTERM handler is installed (foreground mode).
         """
         adapter = TranscriptAdapter()
-        pending_text = None
-        node_mismatch_count = 0
         max_node_mismatch = 5
         interrupted = False
 
@@ -382,9 +409,9 @@ class SupervisorLoop:
             self._run_sidecar_inner(
                 spec, state, terminal, adapter, surface_id,
                 poll_interval=poll_interval, read_lines=read_lines,
-                node_mismatch_count=node_mismatch_count,
                 max_node_mismatch=max_node_mismatch,
                 interrupted_ref=interrupted_ref,
+                idle_timeout_sec=idle_timeout_sec,
             )
         except Exception:
             logger.exception("sidecar loop error")
@@ -402,9 +429,10 @@ class SupervisorLoop:
     def _run_sidecar_inner(
         self, spec, state, terminal, adapter, surface_id, *,
         poll_interval, read_lines,
-        node_mismatch_count, max_node_mismatch, interrupted_ref,
+        max_node_mismatch, interrupted_ref, idle_timeout_sec,
     ):
         pending_text = None
+        last_activity_at = time.monotonic()
 
         # Compute supervision policy based on worker + contract + state
         contract = spec.acceptance or AcceptanceContract.from_finish_policy(spec.finish_policy, goal=spec.goal)
@@ -413,7 +441,7 @@ class SupervisorLoop:
 
         # READY → RUNNING: inject first instruction
         if state.top_state == TopState.READY:
-            state.top_state = TopState.RUNNING
+            transition_top_state(state, TopState.RUNNING, reason="initial handoff")
             self.store.save(state)
             pending_text = terminal.read(lines=read_lines)
             cp = adapter.parse_checkpoint(pending_text, run_id=state.run_id, surface_id=surface_id)
@@ -456,15 +484,37 @@ class SupervisorLoop:
                 time.sleep(poll_interval)
                 continue
             pending_text = None
+            if text:
+                last_activity_at = time.monotonic()
 
             # 2. Parse checkpoint with identity
             checkpoints = adapter.parse_checkpoints(text, run_id=state.run_id, surface_id=surface_id)
             if not checkpoints:
+                if idle_timeout_sec and idle_timeout_sec > 0:
+                    idle_for = time.monotonic() - last_activity_at
+                    if idle_for >= idle_timeout_sec:
+                        payload = {
+                            "reason": f"agent idle timeout after {int(idle_for)}s without checkpoint or visible output",
+                            "idle_timeout_sec": idle_timeout_sec,
+                            "node_id": state.current_node_id,
+                        }
+                        self.store.append_event({"type": "timeout", "payload": payload})
+                        self.store.append_session_event(state.run_id, "agent_idle_timeout", payload)
+                        self.handle_event(state, {"type": "timeout", "payload": payload})
+                        pause_payload = self._pause_for_human(state, payload)
+                        if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
+                            last_activity_at = time.monotonic()
+                            self.store.save(state)
+                            time.sleep(poll_interval)
+                            continue
+                        self.store.save(state)
+                        return
                 time.sleep(poll_interval)
                 continue
 
             restart_loop = False
-            deferred_continue_instruction = None
+            deferred_continue = None
+            preserve_checkpoint_buffer = False
             for checkpoint in checkpoints:
                 # #2: reject checkpoints from wrong run
                 if checkpoint.run_id and checkpoint.run_id != state.run_id:
@@ -473,8 +523,9 @@ class SupervisorLoop:
                 # #7: seq-based dedup with reset tolerance
                 if checkpoint.checkpoint_seq > 0:
                     if checkpoint.checkpoint_seq <= state.checkpoint_seq:
-                        # Allow seq reset if gap is large (agent restarted)
-                        if state.checkpoint_seq - checkpoint.checkpoint_seq < 100:
+                        seq_reset = checkpoint.checkpoint_seq == 1 and state.checkpoint_seq > 0
+                        large_gap_reset = state.checkpoint_seq - checkpoint.checkpoint_seq >= 100
+                        if not seq_reset and not large_gap_reset:
                             continue
                 # Content-based dedup
                 last_cp = state.last_agent_checkpoint
@@ -516,33 +567,42 @@ class SupervisorLoop:
                         )
                         checkpoint.current_node = state.current_node_id
                     else:
-                        node_mismatch_count += 1
+                        if checkpoint.current_node == state.last_mismatch_node_id:
+                            state.node_mismatch_count += 1
+                        else:
+                            state.last_mismatch_node_id = checkpoint.current_node
+                            state.node_mismatch_count = 1
                         logger.warning("checkpoint node mismatch (%d/%d): cp=%s state=%s",
-                                       node_mismatch_count, max_node_mismatch,
+                                       state.node_mismatch_count, max_node_mismatch,
                                        checkpoint.current_node, state.current_node_id)
                         self.store.append_session_event(
                             state.run_id, "checkpoint_mismatch",
                             {"checkpoint_node": checkpoint.current_node, "state_node": state.current_node_id,
-                             "count": node_mismatch_count},
+                             "count": state.node_mismatch_count},
                         )
-                        if node_mismatch_count >= max_node_mismatch:
+                        self.store.save(state)
+                        if state.node_mismatch_count >= max_node_mismatch:
                             pause_payload = self._pause_for_human(state, {
-                                "reason": f"node mismatch persisted for {node_mismatch_count} checkpoints",
+                                "reason": f"node mismatch persisted for {state.node_mismatch_count} checkpoints",
                                 "checkpoint_node": checkpoint.current_node,
                                 "state_node": state.current_node_id,
                             })
                             if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
-                                node_mismatch_count = 0
                                 restart_loop = True
                                 break
                             self.store.save(state)
                             return
+                        preserve_checkpoint_buffer = True
                         continue
-                node_mismatch_count = 0  # reset on match
+                state.node_mismatch_count = 0
+                state.last_mismatch_node_id = ""
+                preserve_checkpoint_buffer = False
 
                 if checkpoint.checkpoint_seq > 0:
                     state.checkpoint_seq = checkpoint.checkpoint_seq
                 logger.info("checkpoint: %s (id=%s)", checkpoint.summary, checkpoint.checkpoint_id)
+                if checkpoint.status in {"working", "step_done", "workflow_done"}:
+                    self._reset_recovery_tracking(state, clear_escalations=True)
 
                 # 3. Event
                 cp_dict = checkpoint.to_dict()
@@ -617,7 +677,7 @@ class SupervisorLoop:
                             policy=policy,
                         )
                         if continue_guidance:
-                            deferred_continue_instruction = instruction
+                            deferred_continue = (instruction, state.current_node_id, state.current_attempt)
                             continue
                         # Persist the selected next node before delivery so a
                         # crash cannot replay the previous instruction.
@@ -635,11 +695,15 @@ class SupervisorLoop:
                         break
 
             # 7. Persist + progress
-            if (
-                deferred_continue_instruction is not None
-                and state.top_state == TopState.RUNNING
-                and not restart_loop
-            ):
+            if deferred_continue is not None and state.top_state == TopState.RUNNING and not restart_loop:
+                deferred_continue_instruction, expected_node_id, expected_attempt = deferred_continue
+                if (
+                    state.current_node_id != expected_node_id
+                    or state.current_attempt != expected_attempt
+                ):
+                    deferred_continue = None
+            if deferred_continue is not None and state.top_state == TopState.RUNNING and not restart_loop:
+                deferred_continue_instruction, _expected_node_id, _expected_attempt = deferred_continue
                 state.last_injected_node_id = state.current_node_id
                 state.last_injected_attempt = state.current_attempt
                 self.store.save(state)
@@ -652,7 +716,7 @@ class SupervisorLoop:
                     deferred_continue_instruction.trigger_type,
                 )
             self.store.save(state)
-            if hasattr(terminal, "consume_checkpoint"):
+            if hasattr(terminal, "consume_checkpoint") and not preserve_checkpoint_buffer:
                 try:
                     terminal.consume_checkpoint()
                 except Exception as exc:
@@ -679,7 +743,9 @@ class SupervisorLoop:
 
     def _inject_or_pause(self, state, terminal, instruction) -> bool:
         # Observation-only surfaces (e.g., JSONL) — write instruction but don't
-        # expect it to be delivered. Log it and continue observing.
+        # pretend delivery succeeded. Record the undelivered instruction and
+        # pause so a human/operator can move the run onto a delivery-capable
+        # surface or wire the required hook.
         if getattr(terminal, "is_observation_only", False):
             try:
                 terminal.inject(instruction.content)  # writes file, logs warning
@@ -688,7 +754,16 @@ class SupervisorLoop:
             self.store.append_session_event(
                 state.run_id, "injection_observation_only", instruction.to_dict()
             )
-            return True  # don't pause — keep observing
+            self._pause_for_human(state, {
+                "reason": (
+                    "observation-only surface cannot confirm instruction delivery; "
+                    "resume on an interactive surface or wire delivery hooks"
+                ),
+                "node_id": state.current_node_id,
+                "instruction_id": instruction.instruction_id,
+            })
+            self.store.save(state)
+            return False
 
         try:
             terminal.inject(instruction.content)

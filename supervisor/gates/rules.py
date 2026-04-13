@@ -15,6 +15,7 @@ MISSING_EXTERNAL_INPUT_PATTERNS = [
     r"需要你提供",
     r"缺少.*(账号|密钥|token|权限|文件|图片|截图|链接)",
     r"need.*(access|credentials|input)",
+    r"waiting for.*(access|credentials|input|token|approval|permission)",
 ]
 
 DANGEROUS_ACTION_PATTERNS = [
@@ -28,7 +29,6 @@ DANGEROUS_ACTION_PATTERNS = [
 BLOCKED_PATTERNS = [
     r"\bblocked\b",
     r"cannot proceed",
-    r"waiting for",
     r"无法继续",
     r"等待.*输入",
 ]
@@ -52,8 +52,25 @@ def classify_text(text: str) -> str | None:
 
 def classify_checkpoint(checkpoint: dict) -> str | None:
     status = checkpoint.get("status")
+    summary = checkpoint.get("summary", "")
     needs = checkpoint.get("needs", [])
     question = checkpoint.get("question_for_supervisor", [])
+    evidence = checkpoint.get("evidence", [])
 
-    joined = " ".join([str(status), " ".join(map(str, needs)), " ".join(map(str, question))])
+    evidence_parts: list[str] = []
+    for item in evidence:
+        if isinstance(item, dict):
+            evidence_parts.extend(str(v) for v in item.values())
+        else:
+            evidence_parts.append(str(item))
+
+    joined = " ".join(
+        [
+            str(status),
+            str(summary),
+            " ".join(map(str, needs)),
+            " ".join(map(str, question)),
+            " ".join(evidence_parts),
+        ]
+    )
     return classify_text(joined)
