@@ -47,11 +47,12 @@ def list_promotions(runtime_dir: str = ".supervisor/runtime") -> list[dict]:
     if not path.exists():
         return []
     records: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        records.append(json.loads(line))
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            records.append(json.loads(line))
     return records
 
 

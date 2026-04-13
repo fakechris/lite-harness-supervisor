@@ -1258,6 +1258,31 @@ def test_eval_promotion_history_json_output(tmp_path, monkeypatch, capsys):
     assert payload["current"]["approval-core"]["status"] == "promoted"
 
 
+def test_eval_promotion_history_plain_output_tolerates_sparse_records(tmp_path, monkeypatch, capsys):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
+    monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: cfg)
+    monkeypatch.setattr("supervisor.eval.list_promotions", lambda runtime_dir: [
+        {"suite": "approval-core", "candidate_id": "candidate_a", "status": "promoted"},
+        {"suite": "routing-core"},
+    ])
+    monkeypatch.setattr("supervisor.eval.current_promotions", lambda history: {
+        "approval-core": history[0],
+        "routing-core": history[1],
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="promotion-history",
+        config=None,
+        json=False,
+    ))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "approval-core: candidate_a (promoted)" in out
+    assert "routing-core: ? (?)" in out
+
+
 def test_run_postmortem_writes_default_report(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("supervisor.history.export_run", lambda run_id, runtime_dir=".supervisor/runtime": {"run_id": run_id})

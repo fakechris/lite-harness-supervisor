@@ -1139,23 +1139,15 @@ def cmd_eval(args):
 
     if args.eval_action == "gate-candidate":
         try:
-            manifest = load_candidate_manifest(
-                candidate_id=getattr(args, "candidate_id", ""),
-                manifest_path=getattr(args, "manifest", ""),
+            review, gate = _prepare_candidate_gate(
+                args,
                 runtime_dir=runtime_dir,
+                load_candidate_manifest=load_candidate_manifest,
+                review_candidate_manifest=review_candidate_manifest,
+                load_eval_suite=load_eval_suite,
+                run_canary_eval=run_canary_eval,
+                evaluate_candidate_gate=evaluate_candidate_gate,
             )
-            review = review_candidate_manifest(manifest)
-            suite = load_eval_suite(review["suite"])
-            canary_report = None
-            if getattr(args, "run_id", []):
-                canary_report = run_canary_eval(
-                    args.run_id,
-                    runtime_dir=runtime_dir,
-                    max_mismatch_rate=args.max_mismatch_rate,
-                    max_friction_events=args.max_friction_events,
-                )
-            gate = evaluate_candidate_gate(review, suite=suite, canary_report=canary_report)
-            gate["manifest_path"] = getattr(args, "manifest", "")
             if getattr(args, "save_report", False) or getattr(args, "output", ""):
                 report_path = save_eval_report(
                     gate,
@@ -1178,25 +1170,17 @@ def cmd_eval(args):
 
     if args.eval_action == "promote-candidate":
         try:
-            manifest = load_candidate_manifest(
-                candidate_id=getattr(args, "candidate_id", ""),
-                manifest_path=getattr(args, "manifest", ""),
+            review, gate = _prepare_candidate_gate(
+                args,
                 runtime_dir=runtime_dir,
+                load_candidate_manifest=load_candidate_manifest,
+                review_candidate_manifest=review_candidate_manifest,
+                load_eval_suite=load_eval_suite,
+                run_canary_eval=run_canary_eval,
+                evaluate_candidate_gate=evaluate_candidate_gate,
             )
-            review = review_candidate_manifest(manifest)
-            suite = load_eval_suite(review["suite"])
-            canary_report = None
-            if getattr(args, "run_id", []):
-                canary_report = run_canary_eval(
-                    args.run_id,
-                    runtime_dir=runtime_dir,
-                    max_mismatch_rate=args.max_mismatch_rate,
-                    max_friction_events=args.max_friction_events,
-                )
-            gate = evaluate_candidate_gate(review, suite=suite, canary_report=canary_report)
             gate["objective"] = review.get("objective", "")
             gate["touched_fragments"] = list(review.get("touched_fragments", []) or [])
-            gate["manifest_path"] = getattr(args, "manifest", "")
             record = promote_candidate(
                 gate,
                 runtime_dir=runtime_dir,
@@ -1237,7 +1221,7 @@ def cmd_eval(args):
         else:
             print(f"Promotions:   {len(payload['history'])}")
             for suite, item in payload["current"].items():
-                print(f"{suite}: {item['candidate_id']} ({item['status']})")
+                print(f"{suite}: {item.get('candidate_id', '?')} ({item.get('status', '?')})")
         return 0
 
     if args.eval_action == "list":
@@ -1247,6 +1231,36 @@ def cmd_eval(args):
 
     print("Usage: thin-supervisor eval {list,run,replay,compare,expand,propose,review-candidate,candidate-status,gate-candidate,promote-candidate,promotion-history} ...")
     return 1
+
+
+def _prepare_candidate_gate(
+    args,
+    *,
+    runtime_dir,
+    load_candidate_manifest,
+    review_candidate_manifest,
+    load_eval_suite,
+    run_canary_eval,
+    evaluate_candidate_gate,
+):
+    manifest = load_candidate_manifest(
+        candidate_id=getattr(args, "candidate_id", ""),
+        manifest_path=getattr(args, "manifest", ""),
+        runtime_dir=runtime_dir,
+    )
+    review = review_candidate_manifest(manifest)
+    suite = load_eval_suite(review["suite"])
+    canary_report = None
+    if getattr(args, "run_id", []):
+        canary_report = run_canary_eval(
+            args.run_id,
+            runtime_dir=runtime_dir,
+            max_mismatch_rate=args.max_mismatch_rate,
+            max_friction_events=args.max_friction_events,
+        )
+    gate = evaluate_candidate_gate(review, suite=suite, canary_report=canary_report)
+    gate["manifest_path"] = getattr(args, "manifest", "")
+    return review, gate
 
 
 # ------------------------------------------------------------------
