@@ -9,7 +9,11 @@ from pathlib import Path
 
 from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
-from supervisor.learning import list_friction_events, load_user_preferences
+from supervisor.learning import (
+    list_friction_events,
+    load_user_preferences,
+    summarize_friction_events,
+)
 
 
 SCHEMA_VERSION = "run_export.v1"
@@ -107,6 +111,7 @@ def export_run(run_id: str, runtime_dir: str = ".supervisor/runtime") -> dict:
         "session_log": _read_jsonl(run_dir / "session_log.jsonl"),
         "notes": related_notes(run_id, runtime_dir),
         "friction_events": list_friction_events(runtime_dir, run_id=run_id, user_id=user_id),
+        "friction_summary": summarize_friction_events(runtime_dir, run_id=run_id, user_id=user_id),
         "user_preferences": load_user_preferences(runtime_dir, user_id=user_id),
     }
 
@@ -115,6 +120,11 @@ def summarize_run(exported: dict) -> dict:
     session_log = exported.get("session_log", [])
     notes = exported.get("notes", [])
     friction_events = exported.get("friction_events", [])
+    friction_summary = exported.get("friction_summary") or {
+        "total_events": len(friction_events),
+        "by_kind": {},
+        "by_signal": {},
+    }
     event_counts = Counter(event.get("event_type", "") for event in session_log)
     friction_kinds = sorted({event.get("kind", "") for event in friction_events if event.get("kind", "")})
     verification_ok = 0
@@ -159,6 +169,7 @@ def summarize_run(exported: dict) -> dict:
         },
         "oracle_consultation_ids": oracle_ids,
         "friction_kinds": friction_kinds,
+        "friction_summary": friction_summary,
     }
 
 

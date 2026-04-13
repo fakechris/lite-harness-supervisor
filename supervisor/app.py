@@ -26,6 +26,7 @@ from supervisor.learning import (
     list_friction_events,
     load_user_preferences,
     save_user_preferences,
+    summarize_friction_events,
 )
 
 
@@ -430,6 +431,8 @@ def cmd_run_summarize(args):
     print(f"Checkpoints: {payload['counts']['checkpoints']}")
     print(f"Verifications ok: {payload['counts']['verifications_ok']}")
     print(f"Routing events: {payload['counts']['routing_events']}")
+    print(f"Friction events: {payload['friction_summary']['total_events']}")
+    print(f"Friction kinds: {', '.join(payload['friction_kinds']) or '(none)'}")
     print(f"Oracle consultations: {', '.join(payload['oracle_consultation_ids']) or '(none)'}")
     return 0
 
@@ -833,6 +836,25 @@ def cmd_learn(args):
             else:
                 for event in events:
                     print(f"{event['event_id']} {event['kind']} run={event.get('run_id', '') or '-'}")
+            return 0
+
+        if args.friction_action == "summarize":
+            try:
+                summary = summarize_friction_events(
+                    runtime_dir,
+                    run_id=args.run_id or "",
+                    kind=args.kind or "",
+                    user_id=args.user_id or "",
+                )
+            except Exception as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+            if getattr(args, "json", False):
+                print(json.dumps(summary, ensure_ascii=False))
+            else:
+                print(f"Total events: {summary['total_events']}")
+                print(f"By kind: {json.dumps(summary['by_kind'], ensure_ascii=False)}")
+                print(f"By signal: {json.dumps(summary['by_signal'], ensure_ascii=False)}")
             return 0
 
     if args.learn_action == "prefs":
@@ -1490,6 +1512,13 @@ def main():
     p_friction_list.add_argument("--user-id", default="", help="Filter by user id")
     p_friction_list.add_argument("--json", action="store_true", help="Print JSON output")
     p_friction_list.add_argument("--config", default=None, help="Config YAML path")
+
+    p_friction_summarize = friction_sub.add_parser("summarize", help="Summarize friction events")
+    p_friction_summarize.add_argument("--kind", default="", help="Filter by kind")
+    p_friction_summarize.add_argument("--run-id", default="", help="Filter by run id")
+    p_friction_summarize.add_argument("--user-id", default="", help="Filter by user id")
+    p_friction_summarize.add_argument("--json", action="store_true", help="Print JSON output")
+    p_friction_summarize.add_argument("--config", default=None, help="Config YAML path")
 
     p_learn_prefs = learn_sub.add_parser("prefs", help="Set or show user preference memory")
     prefs_sub = p_learn_prefs.add_subparsers(dest="prefs_action")

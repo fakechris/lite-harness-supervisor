@@ -256,6 +256,7 @@ thin-supervisor run postmortem <run_id> [--output file]
 thin-supervisor spec approve --spec <spec> [--by human]
 thin-supervisor learn friction add --kind <kind> --message "..." [--run-id <run_id>] [--signal <signal>]
 thin-supervisor learn friction list [--run-id <run_id>] [--kind <kind>] [--json]
+thin-supervisor learn friction summarize [--run-id <run_id>] [--kind <kind>] [--json]
 thin-supervisor learn prefs set --key <key> --value <value>
 thin-supervisor learn prefs show [--json]
 thin-supervisor eval list
@@ -312,6 +313,12 @@ thin-supervisor learn friction add \
   --message "user had to approve twice" \
   --run-id <run_id> \
   --signal user_repeated_approval
+```
+
+Then summarize what actually accumulated for a run:
+
+```bash
+thin-supervisor learn friction summarize --run-id <run_id> --json
 ```
 
 ### Bridge subcommands

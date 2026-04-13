@@ -125,6 +125,7 @@ def test_run_replay_eval_returns_non_regression_summary(tmp_path, monkeypatch):
     assert report["summary"]["matched_count"] == 1
     assert report["summary"]["mismatch_count"] == 0
     assert report["summary"]["mismatch_kinds"] == {}
+    assert report["summary"]["friction"]["total_events"] == 0
     assert report["summary"]["pass_rate"] == 1.0
 
 
@@ -181,3 +182,31 @@ def test_run_replay_eval_classifies_mismatch_kinds(tmp_path, monkeypatch):
 
     assert report["summary"]["mismatch_count"] == 1
     assert report["summary"]["mismatch_kinds"]["safety_regression"] == 1
+
+
+def test_run_replay_eval_includes_friction_summary(tmp_path, monkeypatch):
+    workspace, run_id = _build_replay_workspace(tmp_path)
+    shared = workspace / ".supervisor" / "runtime" / "shared"
+    (shared / "friction_events.jsonl").write_text(
+        json.dumps(
+            {
+                "event_id": "friction_1",
+                "timestamp": "2026-04-12T00:00:02Z",
+                "kind": "repeated_confirmation",
+                "message": "user had to approve twice",
+                "run_id": run_id,
+                "user_id": "default",
+                "signals": ["user_repeated_approval"],
+                "metadata": {},
+            }
+        ) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(workspace)
+
+    from supervisor.eval.replay import run_replay_eval
+
+    report = run_replay_eval(run_id)
+
+    assert report["summary"]["friction"]["total_events"] == 1
+    assert report["summary"]["friction"]["by_kind"]["repeated_confirmation"] == 1

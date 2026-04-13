@@ -23,6 +23,11 @@ def run_replay_eval(run_id: str, *, runtime_dir: str = ".supervisor/runtime") ->
             "matched_count": matched_count,
             "mismatch_count": mismatch_count,
             "mismatch_kinds": dict(mismatch_kinds),
+            "friction": exported.get("friction_summary") or {
+                "total_events": len(exported.get("friction_events", [])),
+                "by_kind": {},
+                "by_signal": {},
+            },
             "pass_rate": (matched_count / decision_count) if decision_count else 0.0,
         },
         "replay": replay,

@@ -425,6 +425,45 @@ def test_learn_friction_add_and_list_json(tmp_path, monkeypatch, capsys):
     assert events[0]["kind"] == "repeated_confirmation"
 
 
+def test_learn_friction_summarize_json(tmp_path, monkeypatch, capsys):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    config_path = tmp_path / ".supervisor" / "config.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps({"runtime_dir": str(runtime_dir)}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    app.cmd_learn(argparse.Namespace(
+        learn_action="friction",
+        friction_action="add",
+        kind="repeated_confirmation",
+        message="user approved twice",
+        run_id="run_1",
+        user_id="default",
+        signal=["user_repeated_approval"],
+        json=False,
+        config=None,
+    ))
+    capsys.readouterr()
+
+    result = app.cmd_learn(argparse.Namespace(
+        learn_action="friction",
+        friction_action="summarize",
+        kind="",
+        run_id="run_1",
+        user_id="default",
+        json=True,
+        config=None,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["total_events"] == 1
+    assert payload["by_kind"]["repeated_confirmation"] == 1
+
+
 def test_learn_prefs_set_and_show_json(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
 

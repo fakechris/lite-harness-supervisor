@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -103,6 +104,35 @@ def list_friction_events(
             continue
         events.append(item)
     return events
+
+
+def summarize_friction_events(
+    runtime_dir: str | Path,
+    *,
+    run_id: str = "",
+    kind: str = "",
+    user_id: str = "",
+) -> dict:
+    events = list_friction_events(
+        runtime_dir,
+        run_id=run_id,
+        kind=kind,
+        user_id=user_id,
+    )
+    by_kind = Counter()
+    by_signal = Counter()
+    for event in events:
+        event_kind = str(event.get("kind", "") or "")
+        if event_kind:
+            by_kind[event_kind] += 1
+        for signal in event.get("signals", []) or []:
+            if signal:
+                by_signal[str(signal)] += 1
+    return {
+        "total_events": len(events),
+        "by_kind": dict(by_kind),
+        "by_signal": dict(by_signal),
+    }
 
 
 def load_user_preferences(runtime_dir: str | Path, *, user_id: str = "default") -> dict:

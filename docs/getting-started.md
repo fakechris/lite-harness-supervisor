@@ -125,6 +125,7 @@ thin-supervisor eval replay --run-id <run_id> --json
 thin-supervisor eval compare --suite approval-core --candidate-policy builtin-approval-strict-v1 --json
 thin-supervisor eval expand --suite approval-core --output .supervisor/evals/approval-core-synth.jsonl
 thin-supervisor eval propose --suite approval-core --objective reduce_false_approval --json
+thin-supervisor learn friction summarize --run-id <run_id> --json
 thin-supervisor eval run --suite approval-core --save-report
 
 # Watch the daemon log
