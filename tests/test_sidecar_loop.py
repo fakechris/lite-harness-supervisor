@@ -615,6 +615,75 @@ def test_sidecar_zero_poll_interval_falls_back_to_idle_guard_and_nonzero_sleep(t
     assert all(seconds > 0 for seconds in sleep_calls)
 
 
+def test_sidecar_small_positive_poll_interval_is_floored(tmp_path, monkeypatch):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+    terminal = MockTerminal([])
+
+    ticks = {"value": 0}
+    sleep_calls: list[float] = []
+
+    def _fake_monotonic():
+        ticks["value"] += 0.1
+        return ticks["value"]
+
+    def _fake_sleep(seconds: float):
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr("supervisor.loop.time.monotonic", _fake_monotonic)
+    monkeypatch.setattr("supervisor.loop.time.sleep", _fake_sleep)
+
+    final = loop.run_sidecar(
+        spec,
+        state,
+        terminal,
+        poll_interval=0.001,
+        read_lines=50,
+        idle_timeout_sec=0.3,
+    )
+
+    assert final.top_state == TopState.PAUSED_FOR_HUMAN
+    assert "idle timeout" in final.human_escalations[-1]["reason"]
+    assert sleep_calls
+    assert all(seconds >= 0.01 for seconds in sleep_calls)
+
+
+def test_sidecar_none_poll_interval_uses_safe_defaults(tmp_path, monkeypatch):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+    terminal = MockTerminal([])
+
+    ticks = {"value": 0}
+    sleep_calls: list[float] = []
+
+    def _fake_monotonic():
+        ticks["value"] += 0.1
+        return ticks["value"]
+
+    def _fake_sleep(seconds: float):
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr("supervisor.loop.time.monotonic", _fake_monotonic)
+    monkeypatch.setattr("supervisor.loop.time.sleep", _fake_sleep)
+
+    final = loop.run_sidecar(
+        spec,
+        state,
+        terminal,
+        poll_interval=None,
+        read_lines=50,
+    )
+
+    assert final.top_state == TopState.PAUSED_FOR_HUMAN
+    assert "idle timeout" in final.human_escalations[-1]["reason"]
+    assert sleep_calls
+    assert all(seconds >= 0.01 for seconds in sleep_calls)
+
+
 def test_sidecar_does_not_consume_mismatch_checkpoint_before_threshold(tmp_path):
     spec = load_spec("specs/examples/linear_plan.example.yaml")
     store = StateStore(str(tmp_path / "runtime"))

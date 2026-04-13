@@ -434,9 +434,12 @@ class SupervisorLoop:
         poll_interval, read_lines,
         max_node_mismatch, interrupted_ref, idle_timeout_sec,
     ):
-        effective_poll_interval = poll_interval if poll_interval and poll_interval > 0 else MIN_POLL_SLEEP_SEC
+        if poll_interval is None or poll_interval <= 0:
+            effective_poll_interval = MIN_POLL_SLEEP_SEC
+        else:
+            effective_poll_interval = max(poll_interval, MIN_POLL_SLEEP_SEC)
         effective_idle_timeout_sec = idle_timeout_sec
-        if effective_idle_timeout_sec is None and poll_interval <= 0:
+        if effective_idle_timeout_sec is None and (poll_interval is None or poll_interval <= 0):
             effective_idle_timeout_sec = ZERO_POLL_IDLE_TIMEOUT_SEC
         pending_text = None
         last_activity_at = time.monotonic()
