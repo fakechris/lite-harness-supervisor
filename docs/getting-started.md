@@ -115,27 +115,29 @@ thin-supervisor run summarize <run_id>
 thin-supervisor run replay <run_id>
 thin-supervisor run postmortem <run_id>
 
+# Runtime CLI ends here. Everything below uses the separate dev/operator CLI.
+
 # Run offline eval suites
-thin-supervisor eval list
-thin-supervisor eval run --suite approval-core --json
-thin-supervisor eval run --suite approval-adversarial --json
-thin-supervisor eval run --suite routing-core --json
-thin-supervisor eval run --suite escalation-core --json
-thin-supervisor eval run --suite finish-gate-core --json
-thin-supervisor eval run --suite pause-ux-core --json
-thin-supervisor eval replay --run-id <run_id> --json
-thin-supervisor eval compare --suite approval-core --candidate-policy builtin-approval-strict-v1 --json
-thin-supervisor eval canary --run-id <run_id> [--candidate-id <candidate_id>] [--phase shadow|limited] --json
-thin-supervisor eval expand --suite approval-core --output .supervisor/evals/approval-core-synth.jsonl
-thin-supervisor eval propose --suite approval-core --objective reduce_false_approval --json
-thin-supervisor eval review-candidate --candidate-id <candidate_id> --json
-thin-supervisor eval candidate-status --candidate-id <candidate_id> --json
-thin-supervisor eval gate-candidate --candidate-id <candidate_id> --run-id <run_id> --json
-thin-supervisor eval promote-candidate --candidate-id <candidate_id> --approved-by human --json
-thin-supervisor eval promotion-history --json
-thin-supervisor eval rollout-history --candidate-id <candidate_id> --json
-thin-supervisor learn friction summarize --run-id <run_id> --json
-thin-supervisor eval run --suite approval-core --save-report
+thin-supervisor-dev eval list
+thin-supervisor-dev eval run --suite approval-core --json
+thin-supervisor-dev eval run --suite approval-adversarial --json
+thin-supervisor-dev eval run --suite routing-core --json
+thin-supervisor-dev eval run --suite escalation-core --json
+thin-supervisor-dev eval run --suite finish-gate-core --json
+thin-supervisor-dev eval run --suite pause-ux-core --json
+thin-supervisor-dev eval replay --run-id <run_id> --json
+thin-supervisor-dev eval compare --suite approval-core --candidate-policy builtin-approval-strict-v1 --json
+thin-supervisor-dev eval canary --run-id <run_id> [--candidate-id <candidate_id>] [--phase shadow|limited] --json
+thin-supervisor-dev eval expand --suite approval-core --output .supervisor/evals/approval-core-synth.jsonl
+thin-supervisor-dev eval propose --suite approval-core --objective reduce_false_approval --json
+thin-supervisor-dev eval review-candidate --candidate-id <candidate_id> --json
+thin-supervisor-dev eval candidate-status --candidate-id <candidate_id> --json
+thin-supervisor-dev eval gate-candidate --candidate-id <candidate_id> --run-id <run_id> --json
+thin-supervisor-dev eval promote-candidate --candidate-id <candidate_id> --approved-by human --json
+thin-supervisor-dev eval promotion-history --json
+thin-supervisor-dev eval rollout-history --candidate-id <candidate_id> --json
+thin-supervisor-dev learn friction summarize --run-id <run_id> --json
+thin-supervisor-dev eval run --suite approval-core --save-report
 
 # Watch the daemon log
 tail -f .supervisor/runtime/daemon.log
@@ -144,7 +146,9 @@ tail -f .supervisor/runtime/daemon.log
 thin-supervisor bridge read work:0 50
 ```
 
-`--save-report` writes eval artifacts under `.supervisor/evals/reports/`. With `thin-supervisor eval propose`, the same run also writes a candidate-lineage manifest under `.supervisor/evals/candidates/`. Use `thin-supervisor eval review-candidate` to turn that manifest into a human promotion-review summary, `thin-supervisor eval candidate-status` to inspect the full lifecycle dossier, `thin-supervisor eval canary --candidate-id ... --phase shadow|limited` to record real rollout attempts, then `thin-supervisor eval gate-candidate` to combine compare and optional canary signals before promotion, and finally `thin-supervisor eval promote-candidate` to record the approved decision.
+`--save-report` writes eval artifacts under `.supervisor/evals/reports/`. With `thin-supervisor-dev eval propose`, the same run also writes a candidate-lineage manifest under `.supervisor/evals/candidates/`. Use `thin-supervisor-dev eval review-candidate` to turn that manifest into a human promotion-review summary, `thin-supervisor-dev eval candidate-status` to inspect the full lifecycle dossier, `thin-supervisor-dev eval canary --candidate-id ... --phase shadow|limited` to record real rollout attempts, then `thin-supervisor-dev eval gate-candidate` to combine compare and optional canary signals before promotion, and finally `thin-supervisor-dev eval promote-candidate` to record the approved decision.
+
+Normal task users should not need `thin-supervisor-dev`. It is reserved for local tuning, canary evaluation, and candidate promotion work.
 
 ### 7. What happens during execution
 
@@ -164,20 +168,20 @@ Agent receives instruction, starts step 2
 If verification fails, supervisor injects a retry instruction with failure details.
 If agent is blocked, supervisor escalates to you (pauses and waits).
 If you want to improve the system from past runs instead of only watching the live pane, use `run export`, `run summarize`, `run replay`, and `run postmortem` against the finished `run_id`.
-If you want to validate clarify/approval behavior offline before changing the skill, start with `thin-supervisor eval run --suite approval-core`.
-- `thin-supervisor eval run --suite routing-core`
+If you want to validate clarify/approval behavior offline before changing the skill, start with `thin-supervisor-dev eval run --suite approval-core`.
+- `thin-supervisor-dev eval run --suite routing-core`
   Validate deterministic `step_done/workflow_done -> VERIFY_STEP` routing.
-- `thin-supervisor eval run --suite escalation-core`
+- `thin-supervisor-dev eval run --suite escalation-core`
   Validate deterministic `blocked -> ESCALATE_TO_HUMAN` behavior.
-- `thin-supervisor eval run --suite finish-gate-core`
+- `thin-supervisor-dev eval run --suite finish-gate-core`
   Validate finish-gate and reviewer-gate completion rules.
-- `thin-supervisor eval replay --run-id <run_id>`
+- `thin-supervisor-dev eval replay --run-id <run_id>`
   Check whether a policy candidate would regress historical supervisor behavior.
-- `thin-supervisor eval compare --suite approval-core`
+- `thin-supervisor-dev eval compare --suite approval-core`
   Get a quick baseline-vs-candidate summary on the golden suite.
-- `thin-supervisor eval expand --suite approval-core`
+- `thin-supervisor-dev eval expand --suite approval-core`
   Generate synthetic variants with provenance metadata.
-- `thin-supervisor eval propose --suite approval-core`
+- `thin-supervisor-dev eval propose --suite approval-core`
   Recommend a constrained candidate policy with failure-case advisory.
 
 ### 7.5 Real canary protocol
@@ -187,19 +191,19 @@ Offline eval is necessary but not sufficient. Once a candidate looks good offlin
 1. `3-5` shadow canaries
    Keep the current default behavior in charge, but save eval evidence:
    ```bash
-   thin-supervisor eval run --suite approval-core --save-report
-   thin-supervisor eval compare --suite approval-core --candidate-policy <candidate> --save-report
+   thin-supervisor-dev eval run --suite approval-core --save-report
+   thin-supervisor-dev eval compare --suite approval-core --candidate-policy <candidate> --save-report
    ```
 2. For each real supervised task, capture:
    ```bash
    thin-supervisor run summarize <run_id>
    thin-supervisor run postmortem <run_id>
-   thin-supervisor eval replay --run-id <run_id> --save-report
+   thin-supervisor-dev eval replay --run-id <run_id> --save-report
    ```
    Once you have a small batch, aggregate it with:
    ```bash
-   thin-supervisor eval canary --run-id <run_a> --run-id <run_b> --candidate-id <candidate_id> --phase shadow --save-report
-   thin-supervisor eval rollout-history --candidate-id <candidate_id> --json
+   thin-supervisor-dev eval canary --run-id <run_a> --run-id <run_b> --candidate-id <candidate_id> --phase shadow --save-report
+   thin-supervisor-dev eval rollout-history --candidate-id <candidate_id> --json
    ```
 3. If the shadow canaries stay clean, move to `10-20` limited rollout runs.
 

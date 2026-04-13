@@ -254,26 +254,6 @@ thin-supervisor run summarize <run_id> [--json]
 thin-supervisor run replay <run_id> [--json]
 thin-supervisor run postmortem <run_id> [--output file]
 thin-supervisor spec approve --spec <spec> [--by human]
-thin-supervisor learn friction add --kind <kind> --message "..." [--run-id <run_id>] [--signal <signal>]
-thin-supervisor learn friction list [--run-id <run_id>] [--kind <kind>] [--json]
-thin-supervisor learn friction summarize [--run-id <run_id>] [--kind <kind>] [--json]
-thin-supervisor learn prefs set --key <key> --value <value>
-thin-supervisor learn prefs show [--json]
-thin-supervisor eval list
-thin-supervisor eval run [--suite approval-core|routing-core|escalation-core|finish-gate-core] [--json]
-thin-supervisor eval replay --run-id <run_id> [--json]
-thin-supervisor eval compare --suite approval-core --candidate-policy <policy> [--json]
-thin-supervisor eval canary --run-id <run_id> [--run-id <run_id> ...] [--candidate-id <candidate_id>] [--phase shadow|limited] [--json]
-thin-supervisor eval expand --suite approval-core --output <path> [--variants-per-case 2]
-thin-supervisor eval propose --suite approval-core --objective <goal> [--json]
-thin-supervisor eval review-candidate --candidate-id <candidate_id> [--json]
-thin-supervisor eval candidate-status --candidate-id <candidate_id> [--json]
-thin-supervisor eval gate-candidate --candidate-id <candidate_id> [--run-id <run_id> ...] [--json]
-thin-supervisor eval promote-candidate --candidate-id <candidate_id> --approved-by <name> [--run-id <run_id> ...] [--json]
-thin-supervisor eval promotion-history [--json]
-thin-supervisor eval rollout-history [--candidate-id <candidate_id>] [--json]
-
-Add `--save-report` to `run`, `replay`, `compare`, `canary`, `propose`, `review-candidate`, `gate-candidate`, or `promote-candidate` to persist a JSON report under `.supervisor/evals/reports/`. When used with `eval propose`, thin-supervisor also writes a candidate-lineage manifest under `.supervisor/evals/candidates/`, `eval review-candidate` turns that manifest back into a bounded human review summary, `eval candidate-status` assembles the manifest, latest related reports, and promotion-registry state into one lifecycle dossier, `eval gate-candidate` combines compare plus optional canary signals into a promotion recommendation, and `eval promote-candidate` records an approved promotion in `.supervisor/evals/promotions.jsonl`.
 
 thin-supervisor status                                     # Active runs in current worktree
 thin-supervisor list                                       # Detailed active-run view
@@ -287,16 +267,41 @@ thin-supervisor session detect                             # Detect current agen
 thin-supervisor session jsonl                              # Resolve current transcript path
 thin-supervisor session list                               # List recent sessions and cwd
 
-thin-supervisor oracle consult --question "..." [--file path ...]
-                                                            # Advisory second opinion (external or fallback)
-
 thin-supervisor skill install                              # Install Codex / Claude skills
 thin-supervisor bridge <action> [args]                     # tmux bridge operations
 ```
 
+`thin-supervisor` is the runtime CLI. It is the only command family normal task users should need.
+
+```bash
+thin-supervisor-dev learn friction add --kind <kind> --message "..." [--run-id <run_id>] [--signal <signal>]
+thin-supervisor-dev learn friction list [--run-id <run_id>] [--kind <kind>] [--json]
+thin-supervisor-dev learn friction summarize [--run-id <run_id>] [--kind <kind>] [--json]
+thin-supervisor-dev learn prefs set --key <key> --value <value>
+thin-supervisor-dev learn prefs show [--json]
+thin-supervisor-dev eval list
+thin-supervisor-dev eval run [--suite approval-core|routing-core|escalation-core|finish-gate-core] [--json]
+thin-supervisor-dev eval replay --run-id <run_id> [--json]
+thin-supervisor-dev eval compare --suite approval-core --candidate-policy <policy> [--json]
+thin-supervisor-dev eval canary --run-id <run_id> [--run-id <run_id> ...] [--candidate-id <candidate_id>] [--phase shadow|limited] [--json]
+thin-supervisor-dev eval expand --suite approval-core --output <path> [--variants-per-case 2]
+thin-supervisor-dev eval propose --suite approval-core --objective <goal> [--json]
+thin-supervisor-dev eval review-candidate --candidate-id <candidate_id> [--json]
+thin-supervisor-dev eval candidate-status --candidate-id <candidate_id> [--json]
+thin-supervisor-dev eval gate-candidate --candidate-id <candidate_id> [--run-id <run_id> ...] [--json]
+thin-supervisor-dev eval promote-candidate --candidate-id <candidate_id> --approved-by <name> [--run-id <run_id> ...] [--json]
+thin-supervisor-dev eval promotion-history [--json]
+thin-supervisor-dev eval rollout-history [--candidate-id <candidate_id>] [--json]
+thin-supervisor-dev oracle consult --question "..." [--file path ...]
+```
+
+`thin-supervisor-dev` is the devtime/operator CLI. Use it for local tuning, offline evals, candidate rollout, learning signals, and advisory second opinions. Do not expose it to normal runtime users.
+
+Add `--save-report` to `run`, `replay`, `compare`, `canary`, `propose`, `review-candidate`, `gate-candidate`, or `promote-candidate` to persist a JSON report under `.supervisor/evals/reports/`. When used with `eval propose`, `thin-supervisor-dev` also writes a candidate-lineage manifest under `.supervisor/evals/candidates/`, `eval review-candidate` turns that manifest back into a bounded human review summary, `eval candidate-status` assembles the manifest, latest related reports, and promotion-registry state into one lifecycle dossier, `eval gate-candidate` combines compare plus optional canary signals into a promotion recommendation, and `eval promote-candidate` records an approved promotion in `.supervisor/evals/promotions.jsonl`.
+
 If a daemon-managed run pauses, `status` and `list` now show the human-readable reason and the suggested next command. For non-active persisted runs, the same hint appears under `Local state found:`.
 
-`thin-supervisor eval` is the first offline evaluation surface for the new skill-evolution work. Bundled suites now cover more than approval copy: `approval-core` checks explicit approval vs re-ask behavior, `approval-adversarial` covers tricky mixed signals and repeat-approval cases, `routing-core` checks deterministic `step_done/workflow_done -> VERIFY_STEP` routing, `escalation-core` checks `blocked -> ESCALATE_TO_HUMAN`, `finish-gate-core` checks reviewer and completion contracts, and `pause-ux-core` checks externally visible pause/completion summaries. `thin-supervisor eval replay --run-id ...` wraps the existing history replay path into the same evaluation surface so policy candidates can be checked against real historical traces. `thin-supervisor eval compare ...` adds a blind `A/B`-style comparator over deterministic suite results so baseline and candidate policies can be compared without hard-coding one output format into the report consumer. `thin-supervisor eval canary ...` aggregates replay pass-rate, mismatch kinds, and friction over a set of real runs so shadow-canary promotion decisions become a command instead of a checklist; when you pass `--candidate-id`, the same command also records a rollout attempt under `.supervisor/evals/rollouts.jsonl`. `thin-supervisor eval expand ...` generates provenance-tagged synthetic variants from the golden suite so coverage can grow without mutating the original contract set. `thin-supervisor eval propose ...` is the first constrained candidate-generator surface: it summarizes failure cases, consults the advisory/self-review layer, recommends a policy candidate for a stated objective without automatically changing shipped defaults, and can persist a candidate-lineage manifest for later comparison and promotion review. `thin-supervisor eval review-candidate ...` loads one of those manifests and emits the bounded human-review summary for the next promotion step. `thin-supervisor eval candidate-status ...` turns the manifest, related eval reports, promotion-registry state, and recorded rollout attempts into one lifecycle dossier. `thin-supervisor eval rollout-history ...` exposes the rollout ledger directly. `thin-supervisor eval gate-candidate ...` then combines that bounded review with deterministic compare output and optional real-run canary signals before a human decides whether to promote. `thin-supervisor eval promote-candidate ...` records that approval in the promotion registry so candidate history and current promoted policies are queryable later.
+`thin-supervisor-dev eval` is the first offline evaluation surface for the new skill-evolution work. Bundled suites now cover more than approval copy: `approval-core` checks explicit approval vs re-ask behavior, `approval-adversarial` covers tricky mixed signals and repeat-approval cases, `routing-core` checks deterministic `step_done/workflow_done -> VERIFY_STEP` routing, `escalation-core` checks `blocked -> ESCALATE_TO_HUMAN`, `finish-gate-core` checks reviewer and completion contracts, and `pause-ux-core` checks externally visible pause/completion summaries. `thin-supervisor-dev eval replay --run-id ...` wraps the existing history replay path into the same evaluation surface so policy candidates can be checked against real historical traces. `thin-supervisor-dev eval compare ...` adds a blind `A/B`-style comparator over deterministic suite results so baseline and candidate policies can be compared without hard-coding one output format into the report consumer. `thin-supervisor-dev eval canary ...` aggregates replay pass-rate, mismatch kinds, and friction over a set of real runs so shadow-canary promotion decisions become a command instead of a checklist; when you pass `--candidate-id`, the same command also records a rollout attempt under `.supervisor/evals/rollouts.jsonl`. `thin-supervisor-dev eval expand ...` generates provenance-tagged synthetic variants from the golden suite so coverage can grow without mutating the original contract set. `thin-supervisor-dev eval propose ...` is the first constrained candidate-generator surface: it summarizes failure cases, consults the advisory/self-review layer, recommends a policy candidate for a stated objective without automatically changing shipped defaults, and can persist a candidate-lineage manifest for later comparison and promotion review. `thin-supervisor-dev eval review-candidate ...` loads one of those manifests and emits the bounded human-review summary for the next promotion step. `thin-supervisor-dev eval candidate-status ...` turns the manifest, related eval reports, promotion-registry state, and recorded rollout attempts into one lifecycle dossier. `thin-supervisor-dev eval rollout-history ...` exposes the rollout ledger directly. `thin-supervisor-dev eval gate-candidate ...` then combines that bounded review with deterministic compare output and optional real-run canary signals before a human decides whether to promote. `thin-supervisor-dev eval promote-candidate ...` records that approval in the promotion registry so candidate history and current promoted policies are queryable later.
 
 ### Real Canary Loop
 
@@ -308,16 +313,16 @@ Yes, you should run real canaries. A safe sequence is:
    Pick 3-5 real tasks and keep the baseline behavior in charge. Record each finished run with:
    `thin-supervisor run summarize <run_id>`
    `thin-supervisor run postmortem <run_id>`
-   `thin-supervisor eval replay --run-id <run_id> --save-report`
-   `thin-supervisor eval canary --run-id <run_id> ... --candidate-id <candidate_id> --phase shadow --save-report`
-   `thin-supervisor eval rollout-history --candidate-id <candidate_id> --json`
+   `thin-supervisor-dev eval replay --run-id <run_id> --save-report`
+   `thin-supervisor-dev eval canary --run-id <run_id> ... --candidate-id <candidate_id> --phase shadow --save-report`
+   `thin-supervisor-dev eval rollout-history --candidate-id <candidate_id> --json`
 3. Limited rollout
    If shadow canary stays clean, run 10-20 real tasks with the candidate under close observation.
 
 For each real canary, log friction explicitly when needed:
 
 ```bash
-thin-supervisor learn friction add \
+thin-supervisor-dev learn friction add \
   --kind repeated_confirmation \
   --message "user had to approve twice" \
   --run-id <run_id> \
@@ -327,7 +332,7 @@ thin-supervisor learn friction add \
 Then summarize what actually accumulated for a run:
 
 ```bash
-thin-supervisor learn friction summarize --run-id <run_id> --json
+thin-supervisor-dev learn friction summarize --run-id <run_id> --json
 ```
 
 ### Bridge subcommands
@@ -404,7 +409,7 @@ Future policy optimization should target the strategy fragments, not the whole `
 If you want an Amp-style "oracle" second opinion without giving up supervisor control, use:
 
 ```bash
-thin-supervisor oracle consult \
+thin-supervisor-dev oracle consult \
   --mode review \
   --question "Review the retry policy design" \
   --file supervisor/loop.py \

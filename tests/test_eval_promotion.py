@@ -49,7 +49,7 @@ def test_evaluate_candidate_gate_needs_canary_when_compare_is_clean():
     gate = evaluate_candidate_gate(review, suite=suite)
 
     assert gate["decision"] == "needs_canary"
-    assert gate["next_action"].startswith("thin-supervisor eval canary")
+    assert gate["next_action"] == "thin-supervisor-dev eval canary --run-id <recent_run>"
 
 
 def test_evaluate_candidate_gate_rolls_back_on_canary_regression():
@@ -73,3 +73,4 @@ def test_evaluate_candidate_gate_rolls_back_on_canary_regression():
 
     assert gate["decision"] == "rollback"
     assert gate["canary"]["decision"] == "rollback"
+    assert gate["next_action"] == "thin-supervisor-dev eval review-candidate --candidate-id candidate_demo"

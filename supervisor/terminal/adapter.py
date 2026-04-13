@@ -188,16 +188,24 @@ class TerminalAdapter:
             )
 
     def _confirm_injection(self, target: str, text: str) -> None:
-        needle = " ".join(text.split())
-        if not needle:
+        markers = self._stuck_markers(text)
+        if not markers:
             return
 
         for _ in range(2):
+            clean_snapshots = 0
             self._tmux("send-keys", "-t", target, "Enter")
             for _ in range(10):
                 snapshot = self._capture_tail(target, lines=30)
-                if self._tail_shows_submission_progress(snapshot, needle):
+                status = self._submission_snapshot_status(snapshot, markers)
+                if status == "progress":
                     return
+                if status == "clear":
+                    clean_snapshots += 1
+                    if clean_snapshots >= 2:
+                        return
+                else:
+                    clean_snapshots = 0
                 time.sleep(0.5)
 
         raise InjectionConfirmationError(
@@ -211,15 +219,46 @@ class TerminalAdapter:
         return result.stdout
 
     @staticmethod
-    def _tail_looks_stuck(snapshot: str, needle: str) -> bool:
+    def _stuck_markers(text: str) -> tuple[str, ...]:
+        normalized = " ".join(text.split())
+        if not normalized:
+            return ()
+
+        markers: list[str] = []
+        words = normalized.split()
+        if len(words) >= 6:
+            markers.append(" ".join(words[:12]))
+        else:
+            markers.append(normalized)
+
+        current_node_match = re.search(r"current_node:\s*([^\s<]+)", normalized)
+        if current_node_match:
+            markers.append(f"current_node: {current_node_match.group(1)}")
+
+        # Keep ordering stable while removing duplicates/empties.
+        unique: list[str] = []
+        for marker in markers:
+            marker = marker.strip()
+            if marker and marker not in unique:
+                unique.append(marker)
+        return tuple(unique)
+
+    @staticmethod
+    def _tail_looks_stuck(snapshot: str, markers: tuple[str, ...]) -> bool:
         tail = [line.strip() for line in snapshot.splitlines() if line.strip()][-12:]
         normalized_tail = [" ".join(line.split()) for line in tail]
         joined_tail = " ".join(normalized_tail)
-        return needle in joined_tail
+        if not any(marker in joined_tail for marker in markers):
+            return False
+        if "›" in joined_tail:
+            return True
+        # Short or unwrapped prompts in tests/terminals may appear without the Codex
+        # composer glyph. Treat exact marker retention as stuck in that case too.
+        return markers[0] in joined_tail
 
     @classmethod
-    def _tail_shows_submission_progress(cls, snapshot: str, needle: str) -> bool:
-        if not cls._tail_looks_stuck(snapshot, needle):
+    def _tail_shows_submission_progress(cls, snapshot: str, markers: tuple[str, ...]) -> bool:
+        if not cls._tail_looks_stuck(snapshot, markers):
             return True
         normalized = " ".join(snapshot.split())
         progress_markers = (
@@ -230,6 +269,22 @@ class TerminalAdapter:
             "esc to interrupt",
         )
         return any(marker in normalized for marker in progress_markers)
+
+    @classmethod
+    def _submission_snapshot_status(cls, snapshot: str, markers: tuple[str, ...]) -> str:
+        normalized = " ".join(snapshot.split())
+        progress_markers = (
+            "• Working",
+            "• Planning",
+            "• Explored",
+            "• Implementing",
+            "esc to interrupt",
+        )
+        if any(marker in normalized for marker in progress_markers):
+            return "progress"
+        if cls._tail_looks_stuck(snapshot, markers):
+            return "stuck"
+        return "clear"
 
     def _detect_socket(self) -> str | None:
         """Auto-detect the tmux socket (4-level priority like smux)."""

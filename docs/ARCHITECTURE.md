@@ -86,7 +86,8 @@ Escalation paths:
 - **Alternate Executor** — planned (worker switching)
 
 Collaboration plane (`list`, `observe`, `note`) is implemented as CLI + daemon IPC.
-Advisory consultation is now available through `thin-supervisor oracle consult`; its outputs are intentionally non-authoritative and can be persisted into the collaboration plane as structured oracle notes. When a later escalation is informed by that note, the routing event can reference the consultation ID for auditability.
+Advisory consultation is now available through `thin-supervisor-dev oracle consult`; its outputs are intentionally non-authoritative and can be persisted into the collaboration plane as structured oracle notes. When a later escalation is informed by that note, the routing event can reference the consultation ID for auditability.
+CLI surfaces are now intentionally split: `thin-supervisor` is runtime-only, while `thin-supervisor-dev` is the dev/operator surface for oracle, learning, eval, canary, and promotion work.
 Human-pause visibility now has a dedicated notification layer: the loop derives a stable pause summary (`pause_reason` + `next_action`), records a `human_pause` session event, and dispatches it through pluggable notification channels. Built-in channels today are `tmux_display` for pane-local alerts and `jsonl` for durable notification records; future Feishu/Telegram adapters plug into the same `NotificationChannel` interface in `supervisor/notifications.py`.
 Testing-oriented pause handling now sits above that layer: `pause_handling_mode=notify_then_ai` means “notify first, then let the agent attempt a bounded automatic recovery.” The current heuristic auto-intervention engine handles blocked checkpoints, repeated node mismatch, and retry-budget exhaustion, while reviewer-gated pauses remain human-owned.
 
@@ -159,7 +160,7 @@ These files are intentionally advisory. They are input to hindsight, replay, and
 - tmux + open-relay + JSONL surfaces
 - Single daemon, multi-run
 - Collaboration plane: list / observe / note
-- Advisory oracle consultation plane (`thin-supervisor oracle consult`)
+- Advisory oracle consultation plane (`thin-supervisor-dev oracle consult`)
 - Reviewer-gated completion with explicit human / stronger reviewer acknowledgement
 
 ### V2 (planned)
@@ -174,7 +175,7 @@ These files are intentionally advisory. They are input to hindsight, replay, and
 
 - `friction_event` and `user_preference_memory` act as the learning substrate
 - `run export`, `run summarize`, `run replay`, and `run postmortem` provide offline evidence
-- `thin-supervisor eval` now exposes deterministic golden-suite executors for `approval-core`, `approval-adversarial`, `routing-core`, `escalation-core`, `finish-gate-core`, and `pause-ux-core`, plus a replay wrapper that converts historical run replays into eval-style reports, a blind comparator for baseline-vs-candidate suite outcomes, a canary runner that aggregates replay plus friction over real runs into a promote/hold/rollback signal and can persist candidate-bound rollout attempts under `.supervisor/evals/rollouts.jsonl`, deterministic synthetic expansion with provenance tags, a constrained proposal surface that combines failure-case summaries with advisory/self-review guidance without auto-promoting candidates, optional report persistence under `.supervisor/evals/reports/`, candidate-lineage manifests under `.supervisor/evals/candidates/`, a bounded `review-candidate` surface for manual promotion review, a unified `candidate-status` dossier that ties manifests to reports, rollout state, and registry state, a `gate-candidate` command that combines compare plus optional canary results into a promotion recommendation, and a promotion registry under `.supervisor/evals/promotions.jsonl`
+- `thin-supervisor-dev eval` now exposes deterministic golden-suite executors for `approval-core`, `approval-adversarial`, `routing-core`, `escalation-core`, `finish-gate-core`, and `pause-ux-core`, plus a replay wrapper that converts historical run replays into eval-style reports, a blind comparator for baseline-vs-candidate suite outcomes, a canary runner that aggregates replay plus friction over real runs into a promote/hold/rollback signal and can persist candidate-bound rollout attempts under `.supervisor/evals/rollouts.jsonl`, deterministic synthetic expansion with provenance tags, a constrained proposal surface that combines failure-case summaries with advisory/self-review guidance without auto-promoting candidates, optional report persistence under `.supervisor/evals/reports/`, candidate-lineage manifests under `.supervisor/evals/candidates/`, a bounded `review-candidate` surface for manual promotion review, a unified `candidate-status` dossier that ties manifests to reports, rollout state, and registry state, a `gate-candidate` command that combines compare plus optional canary results into a promotion recommendation, and a promotion registry under `.supervisor/evals/promotions.jsonl`
 - Global behavior changes remain offline and human-reviewed; online adaptation stays scoped to the current run or user preference memory
 
 ### Skill Optimization Boundary

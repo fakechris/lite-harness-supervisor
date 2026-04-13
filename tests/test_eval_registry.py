@@ -11,7 +11,7 @@ def _gate(decision: str = "needs_canary") -> dict:
         "decision": decision,
         "compare": {"summary": {"weighted_wins": {"baseline": 0.0, "candidate": 0.0, "tie": 8.0}}},
         "canary": None,
-        "next_action": "thin-supervisor eval review-candidate --candidate-id candidate_demo",
+        "next_action": "thin-supervisor-dev eval review-candidate --candidate-id candidate_demo",
     }
 
 

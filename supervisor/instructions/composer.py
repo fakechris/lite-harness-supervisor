@@ -36,7 +36,7 @@ class InstructionComposer:
         next_inst = state.last_decision.get("next_instruction") if isinstance(state.last_decision, dict) else getattr(state.last_decision, "next_instruction", None)
         if next_inst and next_inst != node.objective:
             generic = ["Continue with the highest-priority", "Do not ask the user"]
-            if not any(p in next_inst for p in generic):
+            if trigger_type == "continue" or not any(p in next_inst for p in generic):
                 parts.append(next_inst)
 
         # Append verification failure details on retry
@@ -50,7 +50,9 @@ class InstructionComposer:
                 )
                 parts.append(f"Previous verification failed: {details}")
 
-        content = " ".join(parts)
+        parts.append(self._checkpoint_protocol_suffix(node.id))
+
+        content = "\n\n".join(parts)
 
         return HandoffInstruction.make(
             content=content,
@@ -58,4 +60,28 @@ class InstructionComposer:
             current_attempt=state.current_attempt,
             triggered_by_decision_id=triggered_by_decision_id,
             trigger_type=trigger_type,
+        )
+
+    @staticmethod
+    def _checkpoint_protocol_suffix(node_id: str) -> str:
+        return (
+            f"Stay on current_node: {node_id}.\n"
+            "After meaningful progress, output a checkpoint block exactly like:\n"
+            "<checkpoint>\n"
+            "run_id: <run_id>\n"
+            "checkpoint_seq: <incrementing integer>\n"
+            "status: <working | blocked | step_done | workflow_done>\n"
+            f"current_node: {node_id}\n"
+            "summary: <one-line description>\n"
+            "evidence:\n"
+            "  - modified: <file path>\n"
+            "  - ran: <command>\n"
+            "  - result: <short result>\n"
+            "candidate_next_actions:\n"
+            "  - <next action>\n"
+            "needs:\n"
+            "  - none\n"
+            "question_for_supervisor:\n"
+            "  - none\n"
+            "</checkpoint>"
         )

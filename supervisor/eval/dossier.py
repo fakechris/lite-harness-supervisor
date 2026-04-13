@@ -135,7 +135,7 @@ def _is_related_report(
 
 def _next_action(*, review: dict, latest_gate: dict | None, current_rollout: dict, is_current: bool) -> str:
     if is_current:
-        return "thin-supervisor eval promotion-history --json"
+        return "thin-supervisor-dev eval promotion-history --json"
     gate_saved_at = str((latest_gate or {}).get("saved_at", ""))
     rollout_saved_at = str(current_rollout.get("saved_at", ""))
     if latest_gate and gate_saved_at >= rollout_saved_at:
@@ -144,9 +144,9 @@ def _next_action(*, review: dict, latest_gate: dict | None, current_rollout: dic
             return str(payload["next_action"])
     if current_rollout:
         if current_rollout.get("decision") == "promote":
-            return f"thin-supervisor eval gate-candidate --candidate-id {review.get('candidate_id', '')} --run-id <recent_run>"
+            return f"thin-supervisor-dev eval gate-candidate --candidate-id {review.get('candidate_id', '')} --run-id <recent_run>"
         if current_rollout.get("decision") in {"hold", "rollback"}:
-            return f"thin-supervisor eval review-candidate --candidate-id {review.get('candidate_id', '')}"
+            return f"thin-supervisor-dev eval review-candidate --candidate-id {review.get('candidate_id', '')}"
     if latest_gate:
         payload = dict(latest_gate.get("payload") or {})
         if payload.get("next_action"):

@@ -464,6 +464,7 @@ class SupervisorLoop:
                 continue
 
             restart_loop = False
+            deferred_continue_instruction = None
             for checkpoint in checkpoints:
                 # #2: reject checkpoints from wrong run
                 if checkpoint.run_id and checkpoint.run_id != state.run_id:
@@ -590,10 +591,23 @@ class SupervisorLoop:
                 if state.top_state == TopState.RUNNING:
                     node_changed = state.current_node_id != state.last_injected_node_id
                     new_retry = state.current_attempt > 0 and state.current_attempt != state.last_injected_attempt
-                    if node_changed or new_retry:
+                    continue_guidance = bool(
+                        decision
+                        and decision.decision.upper() == DecisionType.CONTINUE.value
+                        and getattr(decision, "next_instruction", None)
+                    )
+                    if node_changed or new_retry or continue_guidance:
                         node = spec.get_node(state.current_node_id)
                         decision_id = decision.decision_id if decision else ""
-                        trigger = "retry" if new_retry else ("branch" if decision and decision.decision.upper() == "BRANCH" else "node_advance")
+                        trigger = (
+                            "retry"
+                            if new_retry
+                            else (
+                                "continue"
+                                if continue_guidance
+                                else ("branch" if decision and decision.decision.upper() == "BRANCH" else "node_advance")
+                            )
+                        )
                         # Re-evaluate policy (node advance resets attempt, failures escalate)
                         policy = self.policy_engine.determine(self.worker_profile, contract, state)
                         instruction = self.composer.build(
@@ -602,6 +616,9 @@ class SupervisorLoop:
                             trigger_type=trigger,
                             policy=policy,
                         )
+                        if continue_guidance:
+                            deferred_continue_instruction = instruction
+                            continue
                         # Persist the selected next node before delivery so a
                         # crash cannot replay the previous instruction.
                         state.last_injected_node_id = state.current_node_id
@@ -612,10 +629,28 @@ class SupervisorLoop:
                         logger.info("injected: %s (id=%s, trigger=%s)", node.id, instruction.instruction_id, trigger)
                         if state.top_state == TopState.PAUSED_FOR_HUMAN:
                             return
+                        if continue_guidance:
+                            continue
                         restart_loop = True
                         break
 
             # 7. Persist + progress
+            if (
+                deferred_continue_instruction is not None
+                and state.top_state == TopState.RUNNING
+                and not restart_loop
+            ):
+                state.last_injected_node_id = state.current_node_id
+                state.last_injected_attempt = state.current_attempt
+                self.store.save(state)
+                if not self._inject_or_pause(state, terminal, deferred_continue_instruction):
+                    return
+                logger.info(
+                    "injected: %s (id=%s, trigger=%s)",
+                    state.current_node_id,
+                    deferred_continue_instruction.instruction_id,
+                    deferred_continue_instruction.trigger_type,
+                )
             self.store.save(state)
             if hasattr(terminal, "consume_checkpoint"):
                 try:
