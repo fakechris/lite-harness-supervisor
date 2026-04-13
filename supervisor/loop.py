@@ -26,6 +26,9 @@ from supervisor.progress import write_progress
 
 logger = logging.getLogger(__name__)
 
+MIN_POLL_SLEEP_SEC = 0.01
+ZERO_POLL_IDLE_TIMEOUT_SEC = 0.5
+
 
 def build_context(spec, state) -> dict:
     return {
@@ -431,6 +434,13 @@ class SupervisorLoop:
         poll_interval, read_lines,
         max_node_mismatch, interrupted_ref, idle_timeout_sec,
     ):
+        if poll_interval is None or poll_interval <= 0:
+            effective_poll_interval = MIN_POLL_SLEEP_SEC
+        else:
+            effective_poll_interval = max(poll_interval, MIN_POLL_SLEEP_SEC)
+        effective_idle_timeout_sec = idle_timeout_sec
+        if effective_idle_timeout_sec is None and (poll_interval is None or poll_interval <= 0):
+            effective_idle_timeout_sec = ZERO_POLL_IDLE_TIMEOUT_SEC
         pending_text = None
         last_activity_at = time.monotonic()
 
@@ -481,7 +491,7 @@ class SupervisorLoop:
                 text = pending_text if pending_text is not None else terminal.read(lines=read_lines)
             except Exception as e:
                 logger.warning("terminal read failed: %s", e)
-                time.sleep(poll_interval)
+                time.sleep(effective_poll_interval)
                 continue
             pending_text = None
             if text:
@@ -490,12 +500,12 @@ class SupervisorLoop:
             # 2. Parse checkpoint with identity
             checkpoints = adapter.parse_checkpoints(text, run_id=state.run_id, surface_id=surface_id)
             if not checkpoints:
-                if idle_timeout_sec and idle_timeout_sec > 0:
+                if effective_idle_timeout_sec and effective_idle_timeout_sec > 0:
                     idle_for = time.monotonic() - last_activity_at
-                    if idle_for >= idle_timeout_sec:
+                    if idle_for >= effective_idle_timeout_sec:
                         payload = {
                             "reason": f"agent idle timeout after {int(idle_for)}s without checkpoint or visible output",
-                            "idle_timeout_sec": idle_timeout_sec,
+                            "idle_timeout_sec": effective_idle_timeout_sec,
                             "node_id": state.current_node_id,
                         }
                         self.store.append_event({"type": "timeout", "payload": payload})
@@ -505,11 +515,11 @@ class SupervisorLoop:
                         if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
                             last_activity_at = time.monotonic()
                             self.store.save(state)
-                            time.sleep(poll_interval)
+                            time.sleep(effective_poll_interval)
                             continue
                         self.store.save(state)
                         return
-                time.sleep(poll_interval)
+                time.sleep(effective_poll_interval)
                 continue
 
             restart_loop = False
