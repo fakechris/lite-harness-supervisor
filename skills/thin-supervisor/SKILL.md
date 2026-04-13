@@ -57,6 +57,7 @@ time than a thorough question.
 
 **Default behavior**: always do a clarify pass before planning or
 attaching. Do not jump directly from user intent to execution.
+
 ### Clarify loop (when needed)
 
 Ask ONE question per round. Target the weakest clarity dimension:
