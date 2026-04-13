@@ -45,6 +45,39 @@ _NOT_READY_PATTERNS = [
     r"修改",
 ]
 
+_REAL_DELIVERY_PATTERNS = [
+    r"真实环境",
+    r"真实钉钉",
+    r"\buat\b",
+    r"完整测试",
+    r"完整地测试",
+    r"\btoken\b",
+    r"\blive\b",
+    r"全量打通",
+    r"真实集成",
+]
+
+_MOCK_ONLY_PATTERNS = [
+    r"\bmock\b",
+    r"\bdev baseline\b",
+    r"本地 mock",
+    r"演示",
+    r"先做.*baseline",
+    r"原型",
+    r"不接真实环境",
+    r"不接真实",
+    r"不用真实",
+    r"不连真实",
+]
+
+_NEGATED_MOCK_ONLY_PATTERNS = [
+    r"不接受.*\bmock\b",
+    r"不允许.*\bmock\b",
+    r"不能.*\bmock\b",
+    r"不要.*\bmock\b",
+    r"不是.*\bmock\b",
+]
+
 _SEVERITY_WEIGHTS = {
     "low": 1.0,
     "medium": 2.0,
@@ -71,12 +104,17 @@ def _last_user_message(case: EvalCase) -> str:
 
 
 def _matches_any(text: str, patterns: list[str]) -> bool:
-    lower = text.lower()
     for pattern in patterns:
-        haystack = lower if "\\b" in pattern else text
-        if re.search(pattern, haystack):
+        if re.search(pattern, text, re.IGNORECASE):
             return True
     return False
+
+
+def _conversation_text(case: EvalCase, role: str = "") -> str:
+    messages = case.conversation
+    if role:
+        messages = [message for message in messages if (message.get("role") or "").lower() == role.lower()]
+    return "\n".join(str(message.get("content") or "") for message in messages)
 
 
 def _detect_approval(case: EvalCase) -> dict:
@@ -95,6 +133,48 @@ def _detect_approval(case: EvalCase) -> dict:
         "should_approve": False,
         "should_reask_confirmation": True,
         "should_attach_run": False,
+    }
+
+
+def _evaluate_contract_scope(case: EvalCase) -> dict:
+    user_text = _conversation_text(case, role="user")
+    assistant_text = _conversation_text(case, role="assistant")
+    combined = _conversation_text(case)
+
+    explicitly_rejects_mock_only = _matches_any(user_text, _NEGATED_MOCK_ONLY_PATTERNS)
+    explicitly_allows_mock_only = (
+        _matches_any(user_text, _MOCK_ONLY_PATTERNS) and not explicitly_rejects_mock_only
+    )
+    wants_real_delivery = (
+        not explicitly_allows_mock_only
+        and (
+            _matches_any(user_text, _REAL_DELIVERY_PATTERNS)
+            or _matches_any(combined, _REAL_DELIVERY_PATTERNS)
+        )
+    )
+    assistant_narrows_to_mock = _matches_any(assistant_text, _MOCK_ONLY_PATTERNS)
+
+    if wants_real_delivery:
+        return {
+            "delivery_target": "real_integration_ready",
+            "should_forbid_mock_only_delivery": True,
+            "should_require_scope_clarification": False,
+            "assistant_scope_narrows_to_mock": assistant_narrows_to_mock,
+        }
+
+    if explicitly_allows_mock_only:
+        return {
+            "delivery_target": "mock_dev_baseline",
+            "should_forbid_mock_only_delivery": False,
+            "should_require_scope_clarification": False,
+            "assistant_scope_narrows_to_mock": assistant_narrows_to_mock,
+        }
+
+    return {
+        "delivery_target": "unspecified",
+        "should_forbid_mock_only_delivery": False,
+        "should_require_scope_clarification": True,
+        "assistant_scope_narrows_to_mock": assistant_narrows_to_mock,
     }
 
 
@@ -207,6 +287,8 @@ def _evaluate_case(case: EvalCase, detector) -> dict:
         return _evaluate_finish_gate(case)
     if case.category == "pause_summary":
         return _evaluate_pause_summary(case)
+    if case.category == "contract_scope":
+        return _evaluate_contract_scope(case)
     raise ValueError(f"unsupported eval category: {case.category}")
 
 

@@ -60,4 +60,5 @@ def test_list_bundled_suites_includes_new_policy_suites():
 
     assert "approval-core" in suites
     assert "approval-adversarial" in suites
+    assert "clarify-contract-core" in suites
     assert "pause-ux-core" in suites

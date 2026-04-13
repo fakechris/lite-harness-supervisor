@@ -124,9 +124,9 @@ def test_run_replay_eval_returns_non_regression_summary(tmp_path, monkeypatch):
     assert report["summary"]["decision_count"] == 1
     assert report["summary"]["matched_count"] == 1
     assert report["summary"]["mismatch_count"] == 0
+    assert report["summary"]["pass_rate"] == 1.0
     assert report["summary"]["mismatch_kinds"] == {}
     assert report["summary"]["friction"]["total_events"] == 0
-    assert report["summary"]["pass_rate"] == 1.0
 
 
 def test_run_replay_eval_classifies_mismatch_kinds(tmp_path, monkeypatch):
@@ -210,3 +210,215 @@ def test_run_replay_eval_includes_friction_summary(tmp_path, monkeypatch):
 
     assert report["summary"]["friction"]["total_events"] == 1
     assert report["summary"]["friction"]["by_kind"]["repeated_confirmation"] == 1
+
+
+def test_run_replay_eval_handles_pause_then_resume_history(tmp_path, monkeypatch):
+    workspace, run_id = _build_replay_workspace(tmp_path)
+    run_dir = workspace / ".supervisor" / "runtime" / "runs" / run_id
+    state_path = run_dir / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["top_state"] = "RUNNING"
+    (run_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    decision_1 = {
+        "decision_id": "dec_1",
+        "decision": "VERIFY_STEP",
+        "reason": "checkpoint says step_done",
+        "confidence": 1.0,
+        "needs_human": False,
+        "timestamp": "2026-04-12T00:00:01Z",
+        "gate_type": "checkpoint_status",
+        "triggered_by_seq": 1,
+        "triggered_by_checkpoint_id": "cp_1",
+        "next_instruction": None,
+        "selected_branch": None,
+        "next_node_id": None,
+    }
+    decision_2 = {
+        "decision_id": "dec_2",
+        "decision": "VERIFY_STEP",
+        "reason": "checkpoint says step_done",
+        "confidence": 1.0,
+        "needs_human": False,
+        "timestamp": "2026-04-12T00:00:02Z",
+        "gate_type": "checkpoint_status",
+        "triggered_by_seq": 2,
+        "triggered_by_checkpoint_id": "cp_2",
+        "next_instruction": None,
+        "selected_branch": None,
+        "next_node_id": None,
+    }
+    decision_3 = {
+        "decision_id": "dec_3",
+        "decision": "VERIFY_STEP",
+        "reason": "checkpoint says step_done",
+        "confidence": 1.0,
+        "needs_human": False,
+        "timestamp": "2026-04-12T00:00:03Z",
+        "gate_type": "checkpoint_status",
+        "triggered_by_seq": 3,
+        "triggered_by_checkpoint_id": "cp_3",
+        "next_instruction": None,
+        "selected_branch": None,
+        "next_node_id": None,
+    }
+    decision_4 = {
+        "decision_id": "dec_4",
+        "decision": "VERIFY_STEP",
+        "reason": "checkpoint says workflow_done",
+        "confidence": 1.0,
+        "needs_human": False,
+        "timestamp": "2026-04-12T00:00:04Z",
+        "gate_type": "checkpoint_status",
+        "triggered_by_seq": 4,
+        "triggered_by_checkpoint_id": "cp_4",
+        "next_instruction": None,
+        "selected_branch": None,
+        "next_node_id": None,
+    }
+    events = [
+        {
+            "run_id": run_id,
+            "seq": 1,
+            "event_type": "checkpoint",
+            "timestamp": "2026-04-12T00:00:01Z",
+            "payload": {
+                "checkpoint_id": "cp_1",
+                "run_id": run_id,
+                "checkpoint_seq": 1,
+                "status": "step_done",
+                "current_node": "first",
+                "summary": "first retry",
+            },
+        },
+        {
+            "run_id": run_id,
+            "seq": 2,
+            "event_type": "gate_decision",
+            "timestamp": "2026-04-12T00:00:01Z",
+            "payload": decision_1,
+        },
+        {
+            "run_id": run_id,
+            "seq": 3,
+            "event_type": "verification",
+            "timestamp": "2026-04-12T00:00:01Z",
+            "payload": {"ok": False, "results": [{"type": "command", "ok": False, "command": "echo nope"}]},
+        },
+        {
+            "run_id": run_id,
+            "seq": 4,
+            "event_type": "checkpoint",
+            "timestamp": "2026-04-12T00:00:02Z",
+            "payload": {
+                "checkpoint_id": "cp_2",
+                "run_id": run_id,
+                "checkpoint_seq": 2,
+                "status": "step_done",
+                "current_node": "first",
+                "summary": "second retry",
+            },
+        },
+        {
+            "run_id": run_id,
+            "seq": 5,
+            "event_type": "gate_decision",
+            "timestamp": "2026-04-12T00:00:02Z",
+            "payload": decision_2,
+        },
+        {
+            "run_id": run_id,
+            "seq": 6,
+            "event_type": "verification",
+            "timestamp": "2026-04-12T00:00:02Z",
+            "payload": {"ok": False, "results": [{"type": "command", "ok": False, "command": "echo nope"}]},
+        },
+        {
+            "run_id": run_id,
+            "seq": 7,
+            "event_type": "checkpoint",
+            "timestamp": "2026-04-12T00:00:03Z",
+            "payload": {
+                "checkpoint_id": "cp_3",
+                "run_id": run_id,
+                "checkpoint_seq": 3,
+                "status": "step_done",
+                "current_node": "first",
+                "summary": "third retry",
+            },
+        },
+        {
+            "run_id": run_id,
+            "seq": 8,
+            "event_type": "gate_decision",
+            "timestamp": "2026-04-12T00:00:03Z",
+            "payload": decision_3,
+        },
+        {
+            "run_id": run_id,
+            "seq": 9,
+            "event_type": "verification",
+            "timestamp": "2026-04-12T00:00:03Z",
+            "payload": {"ok": False, "results": [{"type": "command", "ok": False, "command": "echo nope"}]},
+        },
+        {
+            "run_id": run_id,
+            "seq": 10,
+            "event_type": "human_pause",
+            "timestamp": "2026-04-12T00:00:03Z",
+            "payload": {"reason": "verification retry budget exhausted"},
+        },
+        {
+            "run_id": run_id,
+            "seq": 11,
+            "event_type": "resume_requested",
+            "timestamp": "2026-04-12T00:00:04Z",
+            "payload": {"reason": "user resumed"},
+        },
+        {
+            "run_id": run_id,
+            "seq": 12,
+            "event_type": "checkpoint",
+            "timestamp": "2026-04-12T00:00:04Z",
+            "payload": {
+                "checkpoint_id": "cp_4",
+                "run_id": run_id,
+                "checkpoint_seq": 4,
+                "status": "workflow_done",
+                "current_node": "first",
+                "summary": "done after resume",
+            },
+        },
+        {
+            "run_id": run_id,
+            "seq": 13,
+            "event_type": "gate_decision",
+            "timestamp": "2026-04-12T00:00:04Z",
+            "payload": decision_4,
+        },
+        {
+            "run_id": run_id,
+            "seq": 14,
+            "event_type": "verification",
+            "timestamp": "2026-04-12T00:00:04Z",
+            "payload": {"ok": True, "results": [{"type": "command", "ok": True, "command": "echo ok"}]},
+        },
+    ]
+    (run_dir / "decision_log.jsonl").write_text(
+        "\n".join(json.dumps(item) for item in [decision_1, decision_2, decision_3, decision_4]) + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "session_log.jsonl").write_text(
+        "\n".join(json.dumps(item) for item in events) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(workspace)
+
+    from supervisor.eval.replay import run_replay_eval
+
+    report = run_replay_eval(run_id)
+
+    assert report["summary"]["decision_count"] == 4
+    assert report["summary"]["matched_count"] == 4
+    assert report["summary"]["mismatch_count"] == 0
+    assert report["summary"]["pass_rate"] == 1.0
