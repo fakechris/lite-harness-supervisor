@@ -121,6 +121,7 @@ thin-supervisor run postmortem <run_id>
 thin-supervisor-dev eval list
 thin-supervisor-dev eval run --suite approval-core --json
 thin-supervisor-dev eval run --suite approval-adversarial --json
+thin-supervisor-dev eval run --suite clarify-contract-core --json
 thin-supervisor-dev eval run --suite routing-core --json
 thin-supervisor-dev eval run --suite escalation-core --json
 thin-supervisor-dev eval run --suite finish-gate-core --json
@@ -169,6 +170,8 @@ If verification fails, supervisor injects a retry instruction with failure detai
 If agent is blocked, supervisor escalates to you (pauses and waits).
 If you want to improve the system from past runs instead of only watching the live pane, use `run export`, `run summarize`, `run replay`, and `run postmortem` against the finished `run_id`.
 If you want to validate clarify/approval behavior offline before changing the skill, start with `thin-supervisor-dev eval run --suite approval-core`.
+- `thin-supervisor-dev eval run --suite clarify-contract-core`
+  Validate that explicit “real UAT” user intent does not get silently narrowed into a mock/dev-only delivery contract.
 - `thin-supervisor-dev eval run --suite routing-core`
   Validate deterministic `step_done/workflow_done -> VERIFY_STEP` routing.
 - `thin-supervisor-dev eval run --suite escalation-core`

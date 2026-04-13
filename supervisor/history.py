@@ -7,6 +7,8 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
+from supervisor.domain.enums import TopState
+from supervisor.domain.state_machine import transition_top_state
 from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
 from supervisor.learning import (
@@ -239,6 +241,13 @@ def replay_run(exported: dict) -> dict:
                 loop.apply_decision(spec, state, predicted)
             elif event_type == "verification":
                 loop.apply_verification(spec, state, payload, cwd=state.workspace_root)
+            elif event_type == "resume_requested":
+                if state.top_state == TopState.PAUSED_FOR_HUMAN:
+                    transition_top_state(state, TopState.RUNNING, reason="replay resume requested")
+                    state.auto_intervention_count = 0
+                    state.node_mismatch_count = 0
+                    state.last_mismatch_node_id = ""
+                    state.human_escalations = []
 
     mismatches = [record for record in records if not record["matched"]]
     return {

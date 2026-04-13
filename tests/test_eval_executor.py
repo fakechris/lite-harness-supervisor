@@ -143,3 +143,84 @@ def test_run_eval_suite_supports_pause_summary_cases():
 
     assert report["counts"]["passed"] == 1
     assert report["results"][0]["actual"]["pause_reason"] == "node mismatch persisted for 5 checkpoints"
+
+
+def test_run_eval_suite_supports_contract_scope_cases():
+    suite = EvalSuite(
+        name="clarify-contract-core",
+        cases=[
+            EvalCase(
+                case_id="real_uat_not_mock",
+                category="contract_scope",
+                conversation=[
+                    {"role": "assistant", "content": "我会先做一个本地 mock/dev baseline。"},
+                    {"role": "user", "content": "目标是配上钉钉 token 就能完整测试，必须是真实环境全量打通。"},
+                ],
+                expected={
+                    "delivery_target": "real_integration_ready",
+                    "should_forbid_mock_only_delivery": True,
+                    "should_require_scope_clarification": False,
+                },
+                severity="critical",
+            )
+        ],
+    )
+
+    report = run_eval_suite(suite)
+
+    assert report["counts"]["passed"] == 1
+    assert report["results"][0]["actual"]["delivery_target"] == "real_integration_ready"
+    assert report["results"][0]["actual"]["should_forbid_mock_only_delivery"] is True
+
+
+def test_run_eval_suite_requires_clarification_when_scope_is_ambiguous():
+    suite = EvalSuite(
+        name="clarify-contract-core",
+        cases=[
+            EvalCase(
+                case_id="ambiguous_goal_needs_clarify",
+                category="contract_scope",
+                conversation=[
+                    {"role": "user", "content": "把整个 PRD 开发完。"},
+                ],
+                expected={
+                    "delivery_target": "unspecified",
+                    "should_forbid_mock_only_delivery": False,
+                    "should_require_scope_clarification": True,
+                },
+                severity="high",
+            )
+        ],
+    )
+
+    report = run_eval_suite(suite)
+
+    assert report["counts"]["passed"] == 1
+    assert report["results"][0]["actual"]["should_require_scope_clarification"] is True
+
+
+def test_run_eval_suite_allows_explicit_mock_only_delivery():
+    suite = EvalSuite(
+        name="clarify-contract-core",
+        cases=[
+            EvalCase(
+                case_id="explicit_mock_only",
+                category="contract_scope",
+                conversation=[
+                    {"role": "assistant", "content": "我会先起一个 baseline。"},
+                    {"role": "user", "content": "这次先做本地 mock 演示就行，不接真实环境。"},
+                ],
+                expected={
+                    "delivery_target": "mock_dev_baseline",
+                    "should_forbid_mock_only_delivery": False,
+                    "should_require_scope_clarification": False,
+                },
+                severity="medium",
+            )
+        ],
+    )
+
+    report = run_eval_suite(suite)
+
+    assert report["counts"]["passed"] == 1
+    assert report["results"][0]["actual"]["delivery_target"] == "mock_dev_baseline"
