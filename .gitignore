@@ -8,6 +8,9 @@ dist/
 
 # Supervisor runtime (generated per-project)
 .supervisor/runtime/
+.supervisor/daemon.pid
+.supervisor/daemon.sock
+.supervisor/evals/
 runtime/state.json
 runtime/event_log.jsonl
 runtime/decision_log.jsonl

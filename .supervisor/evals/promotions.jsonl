@@ -1,1 +1,0 @@
-{"candidate_id": "candidate_395ef91574", "candidate_policy": "builtin-approval-strict-v1", "baseline_policy": "builtin-approval-v1", "suite": "approval-core", "status": "promoted", "gate_decision": "hold", "approved_by": "human", "forced": true, "promoted_at": "2026-04-13T03:30:24.723691+00:00"}
