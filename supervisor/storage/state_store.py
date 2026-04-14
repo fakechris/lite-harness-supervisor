@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ class StateStore:
         self.decision_log_path = self.runtime_dir / "decision_log.jsonl"
         self.session_log_path = self.runtime_dir / "session_log.jsonl"
         self._session_seq = 0
+        self._seq_lock = threading.Lock()
 
     def load_or_init(
         self, spec: WorkflowSpec, *,
@@ -104,10 +106,12 @@ class StateStore:
 
     def append_session_event(self, run_id: str, event_type: str, payload: dict) -> None:
         """Append to the durable session log (append-only)."""
-        self._session_seq += 1
+        with self._seq_lock:
+            self._session_seq += 1
+            seq = self._session_seq
         record = {
             "run_id": run_id,
-            "seq": self._session_seq,
+            "seq": seq,
             "event_type": event_type,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "payload": payload,
@@ -116,8 +120,9 @@ class StateStore:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def next_checkpoint_seq(self) -> int:
-        self._session_seq += 1
-        return self._session_seq
+        with self._seq_lock:
+            self._session_seq += 1
+            return self._session_seq
 
     def _archive_state(self, label: str) -> None:
         if self.state_path.exists():

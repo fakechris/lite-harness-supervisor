@@ -29,20 +29,9 @@ class AutoInterventionManager:
         if not reason or reason.startswith("requires review by:"):
             return None
 
-        if reason == "checkpoint says blocked":
-            node = spec.get_node(state.current_node_id)
-            return AutoIntervention(
-                action_type="resume_with_instruction",
-                reason="blocked checkpoint auto-recovery",
-                instruction=(
-                    "Testing auto-recovery mode is enabled. "
-                    f"Continue working on current_node: {state.current_node_id}. "
-                    f"Objective: {node.objective}. "
-                    "Make best-effort assumptions and proceed unless truly blocked by missing "
-                    "external authority, credentials, or irreversible risk. "
-                    f"Your next checkpoint MUST use current_node: {state.current_node_id}."
-                ),
-            )
+        # "blocked" checkpoints are genuine external blockers — do NOT auto-recover.
+        # The contract says: "If blocked, emit status: blocked. Supervisor will escalate."
+        # Auto-recovery only handles recoverable conditions below.
 
         if "node mismatch persisted" in reason:
             node = spec.get_node(state.current_node_id)
