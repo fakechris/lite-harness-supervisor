@@ -1,0 +1,41 @@
+{
+  "candidate_id": "candidate_395ef91574",
+  "saved_at": "2026-04-13T03:06:30.660336+00:00",
+  "proposal": {
+    "suite": "approval-core",
+    "objective": "reduce_false_approval",
+    "baseline_policy": "builtin-approval-v1",
+    "recommended_candidate_policy": "builtin-approval-strict-v1",
+    "rationale": "Prefer the stricter approval detector when optimizing for false-approval reduction. This keeps the proposal conservative even if it risks more re-asks."
+  },
+  "candidate": {
+    "candidate_id": "candidate_395ef91574",
+    "candidate_policy": "builtin-approval-strict-v1",
+    "parent_id": "builtin-approval-v1",
+    "objective": "reduce_false_approval",
+    "touched_fragments": [
+      "approval-boundary"
+    ],
+    "mutation_operator": "tighten_positive_boundary",
+    "fragment_mutations": [
+      {
+        "fragment": "approval-boundary",
+        "path": "skills/thin-supervisor/strategy/approval-boundary.md",
+        "instructions": [
+          "Require explicit execution verbs when prior context is weak or ambiguous.",
+          "Treat terse approvals as final approval only when the immediate prior turn explicitly asked for approval to run."
+        ]
+      }
+    ],
+    "originating_evidence": {
+      "suite": "approval-core",
+      "failure_case_count": 3,
+      "failure_case_ids": [
+        "approval_explicit_yes_zh",
+        "approval_short_go_ahead",
+        "approval_terse_ship_it"
+      ],
+      "advisory_source": "fallback"
+    }
+  }
+}

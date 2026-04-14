@@ -1,0 +1,144 @@
+{
+  "report_kind": "run",
+  "saved_at": "2026-04-12T15:11:43.239647+00:00",
+  "payload": {
+    "suite": "approval-core",
+    "policy": "builtin-approval-v1",
+    "counts": {
+      "total": 8,
+      "passed": 8,
+      "failed": 0,
+      "pass_rate": 1.0
+    },
+    "results": [
+      {
+        "case_id": "approval_explicit_yes_zh",
+        "category": "approval",
+        "passed": true,
+        "expected": {
+          "should_approve": true,
+          "should_reask_confirmation": false,
+          "should_attach_run": true
+        },
+        "actual": {
+          "should_approve": true,
+          "should_reask_confirmation": false,
+          "should_attach_run": true
+        },
+        "mismatches": {}
+      },
+      {
+        "case_id": "approval_explicit_yes_en",
+        "category": "approval",
+        "passed": true,
+        "expected": {
+          "should_approve": true,
+          "should_reask_confirmation": false,
+          "should_attach_run": true
+        },
+        "actual": {
+          "should_approve": true,
+          "should_reask_confirmation": false,
+          "should_attach_run": true
+        },
+        "mismatches": {}
+      },
+      {
+        "case_id": "approval_short_go_ahead",
+        "category": "approval",
+        "passed": true,
+        "expected": {
+          "should_approve": true,
+          "should_reask_confirmation": false,
+          "should_attach_run": true
+        },
+        "actual": {
+          "should_approve": true,
+          "should_reask_confirmation": false,
+          "should_attach_run": true
+        },
+        "mismatches": {}
+      },
+      {
+        "case_id": "approval_terse_ship_it",
+        "category": "approval",
+        "passed": true,
+        "expected": {
+          "should_approve": true,
+          "should_reask_confirmation": false,
+          "should_attach_run": true
+        },
+        "actual": {
+          "should_approve": true,
+          "should_reask_confirmation": false,
+          "should_attach_run": true
+        },
+        "mismatches": {}
+      },
+      {
+        "case_id": "approval_ambiguous_show_spec",
+        "category": "approval",
+        "passed": true,
+        "expected": {
+          "should_approve": false,
+          "should_reask_confirmation": true,
+          "should_attach_run": false
+        },
+        "actual": {
+          "should_approve": false,
+          "should_reask_confirmation": true,
+          "should_attach_run": false
+        },
+        "mismatches": {}
+      },
+      {
+        "case_id": "approval_negative_wait",
+        "category": "approval",
+        "passed": true,
+        "expected": {
+          "should_approve": false,
+          "should_reask_confirmation": true,
+          "should_attach_run": false
+        },
+        "actual": {
+          "should_approve": false,
+          "should_reask_confirmation": true,
+          "should_attach_run": false
+        },
+        "mismatches": {}
+      },
+      {
+        "case_id": "approval_adjust_then_confirm",
+        "category": "approval",
+        "passed": true,
+        "expected": {
+          "should_approve": false,
+          "should_reask_confirmation": true,
+          "should_attach_run": false
+        },
+        "actual": {
+          "should_approve": false,
+          "should_reask_confirmation": true,
+          "should_attach_run": false
+        },
+        "mismatches": {}
+      },
+      {
+        "case_id": "approval_review_first_en",
+        "category": "approval",
+        "passed": true,
+        "expected": {
+          "should_approve": false,
+          "should_reask_confirmation": true,
+          "should_attach_run": false
+        },
+        "actual": {
+          "should_approve": false,
+          "should_reask_confirmation": true,
+          "should_attach_run": false
+        },
+        "mismatches": {}
+      }
+    ]
+  }
+}

@@ -443,6 +443,9 @@ class SupervisorLoop:
             effective_idle_timeout_sec = ZERO_POLL_IDLE_TIMEOUT_SEC
         pending_text = None
         last_activity_at = time.monotonic()
+        # Delivery ack: transient monotonic time of last injection (not persisted)
+        delivery_ack_deadline = 0.0  # 0 = not awaiting ack
+        DELIVERY_ACK_TIMEOUT = 60  # seconds
 
         # Compute supervision policy based on worker + contract + state
         contract = spec.acceptance or AcceptanceContract.from_finish_policy(spec.finish_policy, goal=spec.goal)
@@ -464,6 +467,8 @@ class SupervisorLoop:
                 # working checkpoint.
                 state.last_injected_node_id = state.current_node_id
                 state.last_injected_attempt = state.current_attempt
+                state.last_injection_seq = state.checkpoint_seq
+                delivery_ack_deadline = time.monotonic() + DELIVERY_ACK_TIMEOUT
             if not cp:
                 # Skip init inject for observation-only surfaces (agent already running)
                 if not getattr(terminal, "is_observation_only", False):
@@ -483,6 +488,26 @@ class SupervisorLoop:
 
         while not self.is_final(state) and state.top_state != TopState.PAUSED_FOR_HUMAN:
             if interrupted_ref():
+                self.store.save(state)
+                return
+
+            # Delivery ack timeout: if we injected but no checkpoint arrived
+            if (delivery_ack_deadline > 0
+                    and time.monotonic() > delivery_ack_deadline
+                    and state.checkpoint_seq <= state.last_injection_seq):
+                payload = {
+                    "reason": "no checkpoint received within delivery timeout after injection",
+                    "node_id": state.current_node_id,
+                    "timeout_sec": DELIVERY_ACK_TIMEOUT,
+                    "injection_seq": state.last_injection_seq,
+                }
+                self.store.append_session_event(state.run_id, "delivery_ack_timeout", payload)
+                logger.warning("delivery ack timeout: no checkpoint after injection for %ds", DELIVERY_ACK_TIMEOUT)
+                pause_payload = self._pause_for_human(state, payload)
+                if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
+                    delivery_ack_deadline = 0
+                    self.store.save(state)
+                    continue
                 self.store.save(state)
                 return
 
@@ -607,6 +632,8 @@ class SupervisorLoop:
 
                 if checkpoint.checkpoint_seq > 0:
                     state.checkpoint_seq = checkpoint.checkpoint_seq
+                # Clear delivery ack deadline — checkpoint proves agent is alive
+                delivery_ack_deadline = 0
                 logger.info("checkpoint: %s (id=%s)", checkpoint.summary, checkpoint.checkpoint_id)
                 if checkpoint.status in {"working", "step_done", "workflow_done"}:
                     self._reset_recovery_tracking(state, clear_escalations=False)
@@ -690,9 +717,11 @@ class SupervisorLoop:
                         # crash cannot replay the previous instruction.
                         state.last_injected_node_id = state.current_node_id
                         state.last_injected_attempt = state.current_attempt
+                        state.last_injection_seq = state.checkpoint_seq
                         self.store.save(state)
                         if not self._inject_or_pause(state, terminal, instruction):
                             return
+                        delivery_ack_deadline = time.monotonic() + DELIVERY_ACK_TIMEOUT
                         logger.info("injected: %s (id=%s, trigger=%s)", node.id, instruction.instruction_id, trigger)
                         if state.top_state == TopState.PAUSED_FOR_HUMAN:
                             return
@@ -713,9 +742,11 @@ class SupervisorLoop:
                 deferred_continue_instruction, _expected_node_id, _expected_attempt = deferred_continue
                 state.last_injected_node_id = state.current_node_id
                 state.last_injected_attempt = state.current_attempt
+                state.last_injection_seq = state.checkpoint_seq
                 self.store.save(state)
                 if not self._inject_or_pause(state, terminal, deferred_continue_instruction):
                     return
+                delivery_ack_deadline = time.monotonic() + DELIVERY_ACK_TIMEOUT
                 logger.info(
                     "injected: %s (id=%s, trigger=%s)",
                     state.current_node_id,

@@ -1,0 +1,88 @@
+{
+  "report_kind": "run",
+  "saved_at": "2026-04-13T11:00:38.820197+00:00",
+  "payload": {
+    "suite": "clarify-contract-core",
+    "policy": "builtin-approval-v1",
+    "counts": {
+      "total": 3,
+      "passed": 2,
+      "failed": 1,
+      "pass_rate": 0.6666666666666666
+    },
+    "weighted": {
+      "total": 10.0,
+      "passed": 8.0,
+      "failed": 2.0,
+      "pass_rate": 0.8
+    },
+    "results": [
+      {
+        "case_id": "contract_real_uat_not_mock",
+        "category": "contract_scope",
+        "severity": "critical",
+        "weight": 5.0,
+        "passed": true,
+        "expected": {
+          "delivery_target": "real_integration_ready",
+          "should_forbid_mock_only_delivery": true,
+          "should_require_scope_clarification": false
+        },
+        "actual": {
+          "delivery_target": "real_integration_ready",
+          "should_forbid_mock_only_delivery": true,
+          "should_require_scope_clarification": false,
+          "assistant_scope_narrows_to_mock": true
+        },
+        "mismatches": {}
+      },
+      {
+        "case_id": "contract_mock_only_allowed",
+        "category": "contract_scope",
+        "severity": "medium",
+        "weight": 2.0,
+        "passed": false,
+        "expected": {
+          "delivery_target": "mock_dev_baseline",
+          "should_forbid_mock_only_delivery": false,
+          "should_require_scope_clarification": false
+        },
+        "actual": {
+          "delivery_target": "real_integration_ready",
+          "should_forbid_mock_only_delivery": true,
+          "should_require_scope_clarification": false,
+          "assistant_scope_narrows_to_mock": false
+        },
+        "mismatches": {
+          "delivery_target": {
+            "expected": "mock_dev_baseline",
+            "actual": "real_integration_ready"
+          },
+          "should_forbid_mock_only_delivery": {
+            "expected": false,
+            "actual": true
+          }
+        }
+      },
+      {
+        "case_id": "contract_ambiguous_goal_needs_clarify",
+        "category": "contract_scope",
+        "severity": "high",
+        "weight": 3.0,
+        "passed": true,
+        "expected": {
+          "delivery_target": "unspecified",
+          "should_forbid_mock_only_delivery": false,
+          "should_require_scope_clarification": true
+        },
+        "actual": {
+          "delivery_target": "unspecified",
+          "should_forbid_mock_only_delivery": false,
+          "should_require_scope_clarification": true,
+          "assistant_scope_narrows_to_mock": false
+        },
+        "mismatches": {}
+      }
+    ]
+  }
+}
