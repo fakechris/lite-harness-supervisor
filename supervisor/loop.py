@@ -481,9 +481,11 @@ class SupervisorLoop:
                     )
                     state.last_injected_node_id = state.current_node_id
                     state.last_injected_attempt = 0
+                    state.last_injection_seq = state.checkpoint_seq
                     self.store.save(state)
                     if not self._inject_or_pause(state, terminal, instruction):
                         return
+                    delivery_ack_deadline = time.monotonic() + DELIVERY_ACK_TIMEOUT
                 pending_text = None
 
         while not self.is_final(state) and state.top_state != TopState.PAUSED_FOR_HUMAN:
@@ -491,9 +493,12 @@ class SupervisorLoop:
                 self.store.save(state)
                 return
 
+            # Cache monotonic time for this iteration
+            now = time.monotonic()
+
             # Delivery ack timeout: if we injected but no checkpoint arrived
             if (delivery_ack_deadline > 0
-                    and time.monotonic() > delivery_ack_deadline
+                    and now > delivery_ack_deadline
                     and state.checkpoint_seq <= state.last_injection_seq):
                 payload = {
                     "reason": "no checkpoint received within delivery timeout after injection",
@@ -505,7 +510,9 @@ class SupervisorLoop:
                 logger.warning("delivery ack timeout: no checkpoint after injection for %ds", DELIVERY_ACK_TIMEOUT)
                 pause_payload = self._pause_for_human(state, payload)
                 if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
-                    delivery_ack_deadline = 0
+                    # Auto-intervention injected a new instruction — reset tracking
+                    state.last_injection_seq = state.checkpoint_seq
+                    delivery_ack_deadline = now + DELIVERY_ACK_TIMEOUT
                     self.store.save(state)
                     continue
                 self.store.save(state)
@@ -520,13 +527,16 @@ class SupervisorLoop:
                 continue
             pending_text = None
             if text:
-                last_activity_at = time.monotonic()
+                last_activity_at = now
 
             # 2. Parse checkpoint with identity
             checkpoints = adapter.parse_checkpoints(text, run_id=state.run_id, surface_id=surface_id)
+            # Any checkpoint (even deduped) proves agent is alive — clear delivery deadline
+            if checkpoints and delivery_ack_deadline > 0:
+                delivery_ack_deadline = 0
             if not checkpoints:
                 if effective_idle_timeout_sec and effective_idle_timeout_sec > 0:
-                    idle_for = time.monotonic() - last_activity_at
+                    idle_for = now - last_activity_at
                     if idle_for >= effective_idle_timeout_sec:
                         payload = {
                             "reason": f"agent idle timeout after {int(idle_for)}s without checkpoint or visible output",
@@ -538,7 +548,7 @@ class SupervisorLoop:
                         self.handle_event(state, {"type": "timeout", "payload": payload})
                         pause_payload = self._pause_for_human(state, payload)
                         if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
-                            last_activity_at = time.monotonic()
+                            last_activity_at = now
                             self.store.save(state)
                             time.sleep(effective_poll_interval)
                             continue
@@ -632,8 +642,6 @@ class SupervisorLoop:
 
                 if checkpoint.checkpoint_seq > 0:
                     state.checkpoint_seq = checkpoint.checkpoint_seq
-                # Clear delivery ack deadline — checkpoint proves agent is alive
-                delivery_ack_deadline = 0
                 logger.info("checkpoint: %s (id=%s)", checkpoint.summary, checkpoint.checkpoint_id)
                 if checkpoint.status in {"working", "step_done", "workflow_done"}:
                     self._reset_recovery_tracking(state, clear_escalations=False)
