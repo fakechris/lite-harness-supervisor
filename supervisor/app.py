@@ -1283,13 +1283,201 @@ def cmd_eval(args):
                 print(f"{suite}: {item.get('candidate_id', '?')} ({item.get('status', '?')})")
         return 0
 
+    if args.eval_action == "improve":
+        return _cmd_eval_improve(
+            args,
+            runtime_dir=runtime_dir,
+            load_eval_suite=load_eval_suite,
+            propose_candidate_policy=propose_candidate_policy,
+            save_candidate_manifest=save_candidate_manifest,
+            load_candidate_manifest=load_candidate_manifest,
+            review_candidate_manifest=review_candidate_manifest,
+            run_eval_suite=run_eval_suite,
+            compare_eval_policies=compare_eval_policies,
+            evaluate_candidate_gate=evaluate_candidate_gate,
+            run_canary_eval=run_canary_eval,
+            record_rollout=record_rollout,
+            promote_candidate=promote_candidate,
+            save_eval_report=save_eval_report,
+        )
+
     if args.eval_action == "list":
         for name in list_bundled_suites():
             print(name)
         return 0
 
-    print("Usage: thin-supervisor-dev eval {list,run,replay,compare,canary,rollout-history,expand,propose,review-candidate,candidate-status,gate-candidate,promote-candidate,promotion-history} ...")
+    print("Usage: thin-supervisor-dev eval {list,run,replay,compare,canary,rollout-history,expand,propose,review-candidate,candidate-status,gate-candidate,promote-candidate,promotion-history,improve} ...")
     return 1
+
+
+def _cmd_eval_improve(
+    args,
+    *,
+    runtime_dir,
+    load_eval_suite,
+    propose_candidate_policy,
+    save_candidate_manifest,
+    load_candidate_manifest,
+    review_candidate_manifest,
+    run_eval_suite,
+    compare_eval_policies,
+    evaluate_candidate_gate,
+    run_canary_eval,
+    record_rollout,
+    promote_candidate,
+    save_eval_report,
+):
+    """Orchestrate the full improvement loop: propose → run → compare → gate → [canary] → promote."""
+    dry_run = getattr(args, "dry_run", False)
+    as_json = getattr(args, "json", False)
+    suite_ref = getattr(args, "suite_file", None) or args.suite
+    run_ids = getattr(args, "run_id", []) or []
+    approved_by = getattr(args, "approved_by", "")
+
+    # --- Step 1: Propose ---
+    print("Step 1/6: Proposing candidate policy...")
+    try:
+        suite = load_eval_suite(suite_ref)
+        proposal = propose_candidate_policy(
+            suite,
+            objective=args.objective,
+            baseline_policy=args.baseline_policy,
+        )
+        manifest_path = save_candidate_manifest(proposal, runtime_dir=runtime_dir)
+        save_eval_report(proposal, report_kind="proposal", runtime_dir=runtime_dir)
+    except Exception as exc:
+        print(f"  FAILED: {exc}", file=sys.stderr)
+        return 1
+
+    candidate_policy = proposal["recommended_candidate_policy"]
+    candidate_id = proposal.get("candidate", {}).get("candidate_id", "")
+    print(f"  Candidate: {candidate_id}")
+    print(f"  Policy:    {candidate_policy}")
+    print(f"  Rationale: {proposal['rationale']}")
+
+    if dry_run:
+        print("\n--dry-run: stopping after propose")
+        return 0
+
+    # --- Step 2: Run baseline + candidate ---
+    print("\nStep 2/6: Running eval suite...")
+    try:
+        baseline_report = run_eval_suite(suite, policy=args.baseline_policy)
+        candidate_report = run_eval_suite(suite, policy=candidate_policy)
+        save_eval_report(baseline_report, report_kind="run", runtime_dir=runtime_dir)
+        save_eval_report(candidate_report, report_kind="run", runtime_dir=runtime_dir)
+    except Exception as exc:
+        print(f"  FAILED: {exc}", file=sys.stderr)
+        return 1
+
+    bc = baseline_report["counts"]
+    cc = candidate_report["counts"]
+    print(f"  Baseline:  {bc['passed']}/{bc['total']} ({bc['pass_rate']:.0%})")
+    print(f"  Candidate: {cc['passed']}/{cc['total']} ({cc['pass_rate']:.0%})")
+
+    # --- Step 3: Compare ---
+    print("\nStep 3/6: Comparing policies...")
+    try:
+        comparison = compare_eval_policies(
+            suite,
+            baseline_policy=args.baseline_policy,
+            candidate_policy=candidate_policy,
+        )
+        save_eval_report(comparison, report_kind="compare", runtime_dir=runtime_dir)
+    except Exception as exc:
+        print(f"  FAILED: {exc}", file=sys.stderr)
+        return 1
+
+    wins = comparison["summary"]["wins"]
+    print(f"  Wins: baseline={wins['baseline']} candidate={wins['candidate']} tie={wins['tie']}")
+
+    # --- Step 4: Gate ---
+    print("\nStep 4/6: Running promotion gate...")
+    try:
+        manifest = load_candidate_manifest(candidate_id=candidate_id, runtime_dir=runtime_dir)
+        review = review_candidate_manifest(manifest)
+        canary_report = None
+        if run_ids:
+            canary_report = run_canary_eval(
+                run_ids,
+                runtime_dir=runtime_dir,
+                max_mismatch_rate=getattr(args, "max_mismatch_rate", 0.25),
+                max_friction_events=getattr(args, "max_friction_events", 0),
+            )
+        gate = evaluate_candidate_gate(review, suite=suite, canary_report=canary_report)
+        save_eval_report(gate, report_kind="gate", runtime_dir=runtime_dir)
+    except Exception as exc:
+        print(f"  FAILED: {exc}", file=sys.stderr)
+        return 1
+
+    decision = gate["decision"]
+    print(f"  Decision:  {decision}")
+
+    # --- Step 5: Canary (if needed and run_ids available) ---
+    if decision == "needs_canary":
+        if not run_ids:
+            print("\nStep 5/6: Canary needed but no --run-id provided. Stopping.")
+            print(f"  Resume with: thin-supervisor-dev eval canary --run-id <id> --candidate-id {candidate_id}")
+            if as_json:
+                print(json.dumps({"stage": "needs_canary", "candidate_id": candidate_id, "gate": gate}, ensure_ascii=False))
+            return 0
+        print("\nStep 5/6: Running canary validation...")
+        try:
+            canary = run_canary_eval(
+                run_ids,
+                runtime_dir=runtime_dir,
+                max_mismatch_rate=getattr(args, "max_mismatch_rate", 0.25),
+                max_friction_events=getattr(args, "max_friction_events", 0),
+            )
+            record_rollout(
+                candidate_id=candidate_id,
+                phase="shadow",
+                canary_report=canary,
+                runtime_dir=runtime_dir,
+            )
+            save_eval_report(canary, report_kind="canary", runtime_dir=runtime_dir)
+            decision = canary.get("decision", decision)
+            print(f"  Canary decision: {decision}")
+        except Exception as exc:
+            print(f"  FAILED: {exc}", file=sys.stderr)
+            return 1
+    else:
+        print("\nStep 5/6: Canary not required, skipping.")
+
+    # --- Step 6: Promote ---
+    if decision not in ("promote", "needs_canary"):
+        print(f"\nStep 6/6: Gate decision is '{decision}' — not promoting.")
+        if as_json:
+            print(json.dumps({"stage": "held", "candidate_id": candidate_id, "decision": decision, "gate": gate}, ensure_ascii=False))
+        return 0
+
+    if not approved_by:
+        print(f"\nStep 6/6: Ready to promote but no --approved-by provided. Stopping.")
+        print(f"  Promote with: thin-supervisor-dev eval promote-candidate --candidate-id {candidate_id} --approved-by human")
+        if as_json:
+            print(json.dumps({"stage": "awaiting_approval", "candidate_id": candidate_id, "gate": gate}, ensure_ascii=False))
+        return 0
+
+    print(f"\nStep 6/6: Promoting candidate...")
+    try:
+        gate["objective"] = review.get("objective", "")
+        gate["touched_fragments"] = list(review.get("touched_fragments", []) or [])
+        record = promote_candidate(
+            gate,
+            runtime_dir=runtime_dir,
+            approved_by=approved_by,
+            force=False,
+        )
+        save_eval_report(record, report_kind="promotion", runtime_dir=runtime_dir)
+    except Exception as exc:
+        print(f"  FAILED: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"  Promoted:  {record['candidate_id']}")
+    print(f"  Approved:  {record['approved_by']}")
+    if as_json:
+        print(json.dumps(record, ensure_ascii=False))
+    return 0
 
 
 def _prepare_candidate_gate(
@@ -1777,6 +1965,18 @@ def _add_eval_parser(sub) -> None:
     p_eval_history = eval_sub.add_parser("promotion-history", help="Show promotion registry history")
     p_eval_history.add_argument("--config", default=None, help="Config YAML path")
     p_eval_history.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    p_eval_improve = eval_sub.add_parser("improve", help="Full improvement loop: propose → run → compare → gate → canary → promote")
+    p_eval_improve.add_argument("--suite", default="approval-core", help="Bundled suite name")
+    p_eval_improve.add_argument("--suite-file", default=None, help="Path to a JSONL eval suite")
+    p_eval_improve.add_argument("--baseline-policy", default="builtin-approval-v1", help="Baseline policy id")
+    p_eval_improve.add_argument("--objective", required=True, choices=["reduce_repeated_confirmation", "reduce_false_approval"], help="Optimization objective")
+    p_eval_improve.add_argument("--run-id", action="append", default=[], help="Canary run id (repeatable, needed if gate says needs_canary)")
+    p_eval_improve.add_argument("--approved-by", default="", help="Approver identity for promotion (omit to stop before promote)")
+    p_eval_improve.add_argument("--max-mismatch-rate", type=float, default=0.25, help="Canary hold threshold for mismatch rate")
+    p_eval_improve.add_argument("--max-friction-events", type=int, default=0, help="Canary hold threshold for friction events")
+    p_eval_improve.add_argument("--dry-run", action="store_true", help="Show what would run without executing")
+    p_eval_improve.add_argument("--config", default=None, help="Config YAML path")
+    p_eval_improve.add_argument("--json", action="store_true", help="Print machine-readable JSON")
 
 
 def build_runtime_parser() -> argparse.ArgumentParser:
