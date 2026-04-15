@@ -40,25 +40,16 @@ The default is now clarify-first: the skill should produce a draft spec, ask you
 tmux new -s work
 ```
 
-### 3. Initialize supervisor in your project
+### 3. Launch Codex and invoke the skill
 
-```bash
-cd your-project
-thin-supervisor init
-```
+No manual setup needed — `thin-supervisor bootstrap` handles everything
+automatically (init, daemon start, pane detection). The skill calls it
+before attaching.
 
-This creates `.supervisor/` with config, specs, and runtime directories.
-If the directory already exists but is missing `config.yaml`, run `thin-supervisor init --repair` to restore the scaffold without overwriting the current config.
+> **Manual alternative**: If you prefer explicit setup, you can still run
+> `thin-supervisor init` and `thin-supervisor daemon start` separately.
 
-### 4. Start the supervisor daemon
-
-```bash
-thin-supervisor daemon start
-```
-
-The daemon runs in the background, ready to accept runs from any tmux session.
-
-### 5. Launch Codex and invoke the skill
+### 4. Launch Codex and invoke the skill
 
 In the tmux pane:
 

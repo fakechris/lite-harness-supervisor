@@ -82,7 +82,8 @@ def test_bootstrap_two_projects(tmp_path, monkeypatch):
     proj_a.mkdir()
     proj_b.mkdir()
 
-    with patch("supervisor.bootstrap._ensure_daemon_running"):
+    with patch("supervisor.bootstrap._ensure_daemon_running"), \
+         patch("supervisor.bootstrap._validate_pane", return_value=None):
         result_a = bootstrap(cwd=str(proj_a))
         result_b = bootstrap(cwd=str(proj_b))
 

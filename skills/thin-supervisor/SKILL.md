@@ -264,19 +264,23 @@ confirmation question:
 Once the user has already approved in the conversation, do not ask again.
 Immediately mark the spec approved and continue to attach.
 
-As soon as the user approves, mark the spec approved and then attach the
+As soon as the user approves, bootstrap the environment and attach the
 supervisor BEFORE any implementation work:
 
 ```bash
+thin-supervisor bootstrap
 thin-supervisor spec approve --spec .supervisor/specs/<slug>.yaml --by human
-scripts/thin-supervisor-attach.sh <slug>
+thin-supervisor run register --spec .supervisor/specs/<slug>.yaml --pane "$(thin-supervisor bridge id)"
 ```
+
+`thin-supervisor bootstrap` auto-detects tmux, initializes `.supervisor/`
+if missing, starts the daemon if needed, and validates the execution surface.
 
 Execution commands now reject draft specs. This is intentional: user
 confirmation is part of the execution contract.
 
 Do not start coding, git cleanup, worktree edits, or long test runs
-until this command succeeds.
+until these commands succeed.
 
 ---
 
