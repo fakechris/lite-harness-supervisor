@@ -210,6 +210,7 @@ class DaemonServer:
                 conn, _ = self._sock.accept()
             except socket.timeout:
                 self._reap_finished()
+                self._refresh_idle_state()
                 self._check_idle_shutdown()
                 continue
             except OSError:
@@ -741,6 +742,21 @@ class DaemonServer:
                     self._runs.pop(rid, None)
                 self._update_daemon_record_locked()
             logger.info("reaped %d finished run(s)", len(reaped))
+
+    def _refresh_idle_state(self) -> None:
+        """Update registry with current idle duration (called every ~1s from accept loop)."""
+        with self._lock:
+            active = len(self._runs)
+        if active > 0:
+            return
+        now = time.time()
+        last_activity = max(self._last_run_finished_at, self._last_client_contact_at, self._started_at)
+        update_daemon(
+            self.sock_path,
+            state="idle",
+            active_runs=0,
+            idle_for_sec=int(now - last_activity),
+        )
 
     def _check_idle_shutdown(self) -> None:
         """Auto-shutdown if idle for too long with zero active runs."""

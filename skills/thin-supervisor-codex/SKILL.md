@@ -50,6 +50,33 @@ Load strategy fragments only when they are relevant to the current step.
 
 ---
 
+## Stage 0: Preflight
+
+Before entering clarify/plan, run a read-only environment check:
+
+```bash
+thin-supervisor bootstrap
+```
+
+This detects:
+- whether you are inside tmux
+- whether the pane is already occupied by another run
+- whether .supervisor/ needs initialization
+- whether the daemon is running
+
+**If bootstrap fails** (not in tmux, pane locked, etc.), stop and tell
+the user what needs to be fixed before starting any work.
+
+**If an active run already exists** for this pane/project, do NOT start
+a new clarify/plan cycle. Instead:
+- Show the user the active run's status
+- Ask whether to observe, resume, or stop it
+
+Only proceed to Stage 1 if the environment is ready and no conflicting
+run exists.
+
+---
+
 ## Stage 1: Clarify
 
 **Default behavior**: always start with a clarify pass before planning or
