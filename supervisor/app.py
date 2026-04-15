@@ -1604,24 +1604,23 @@ def cmd_dashboard(args):
             continue
         try:
             remote = DaemonClient(sock_path=sock)
-            if remote.is_running():
-                result = remote.status()
-                if result.get("ok"):
-                    for r in result.get("runs", []):
-                        rid = r["run_id"]
-                        if rid in seen_run_ids:
-                            continue
-                        seen_run_ids.add(rid)
-                        worktree = daemon.get("cwd", "")
-                        items.append({
-                            "run_id": rid,
-                            "tag": "daemon",
-                            "state": r["top_state"],
-                            "node": r.get("current_node", ""),
-                            "pane": r.get("pane_target", "?"),
-                            "worktree": worktree,
-                        })
-        except Exception:
+            result = remote.status()
+            if result.get("ok"):
+                for r in result.get("runs", []):
+                    rid = r["run_id"]
+                    if rid in seen_run_ids:
+                        continue
+                    seen_run_ids.add(rid)
+                    worktree = daemon.get("cwd", "")
+                    items.append({
+                        "run_id": rid,
+                        "tag": "daemon",
+                        "state": r["top_state"],
+                        "node": r.get("current_node", ""),
+                        "pane": r.get("pane_target", "?"),
+                        "worktree": worktree,
+                    })
+        except (ConnectionRefusedError, FileNotFoundError, OSError):
             pass  # unreachable daemon — skip
 
     # Collect foreground runs from global pane lock registry
