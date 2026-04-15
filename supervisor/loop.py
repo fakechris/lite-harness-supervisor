@@ -475,11 +475,16 @@ class SupervisorLoop:
             transition_top_state(state, TopState.RUNNING, reason="initial handoff")
             self.store.save(state)
             pending_text = terminal.read(lines=read_lines)
-            # Only look at the tail of the pane for an init checkpoint.
-            # Full pane text may contain stale checkpoints from previous runs
-            # that would falsely suppress the init inject.
-            tail_text = "\n".join(pending_text.splitlines()[-50:]) if pending_text else ""
-            cp = adapter.parse_checkpoint(tail_text, run_id=state.run_id, surface_id=surface_id)
+            # Only parse the LAST checkpoint in the pane to avoid stale ones
+            # from previous runs that would falsely suppress init inject.
+            # Find the last <checkpoint> block rather than truncating by line count,
+            # since checkpoint blocks can vary in size.
+            init_parse_text = ""
+            if pending_text:
+                last_cp_start = pending_text.rfind("<checkpoint>")
+                if last_cp_start >= 0:
+                    init_parse_text = pending_text[last_cp_start:]
+            cp = adapter.parse_checkpoint(init_parse_text, run_id=state.run_id, surface_id=surface_id)
             if cp and cp.run_id and cp.run_id != state.run_id:
                 cp = None  # checkpoint from a different run
             if cp:

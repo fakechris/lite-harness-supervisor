@@ -30,20 +30,29 @@ def global_config_path() -> Path:
 
 
 def _update_config_file(path: Path, key: str, value) -> Path:
-    """Read-modify-write a single key in a YAML config file (atomic)."""
+    """Read-modify-write a single key in a YAML config file with file locking."""
+    import fcntl
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = {}
-    if path.exists():
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    data[key] = value
-    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".yaml")
+    lock_path = path.parent / f".{path.name}.lock"
+    lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o644)
     try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, default_flow_style=False)
-        os.replace(tmp_path, str(path))
-    except Exception:
-        os.unlink(tmp_path)
-        raise
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        data = {}
+        if path.exists():
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        data[key] = value
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".yaml")
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                yaml.safe_dump(data, f, default_flow_style=False)
+            os.replace(tmp_path, str(path))
+        except Exception:
+            os.unlink(tmp_path)
+            raise
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
     return path
 
 

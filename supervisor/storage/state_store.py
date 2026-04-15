@@ -146,6 +146,34 @@ class StateStore:
                 return seq
         return 0
 
+    def load_raw(self) -> dict | None:
+        """Load state as a raw dict without constructing SupervisorState."""
+        if not self.state_path.exists():
+            return None
+        try:
+            return json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def read_recent_session_events(self, count: int = 5) -> list[dict]:
+        """Read the last N session events."""
+        if not self.session_log_path.exists():
+            return []
+        try:
+            lines = self._tail_lines(self.session_log_path, max_lines=count)
+            return [json.loads(line) for line in lines if line.strip()]
+        except (OSError, json.JSONDecodeError):
+            return []
+
+    def session_event_count(self) -> int:
+        """Count total session events (approximate for large files)."""
+        if not self.session_log_path.exists():
+            return 0
+        try:
+            return sum(1 for _ in self.session_log_path.open("r", encoding="utf-8"))
+        except OSError:
+            return 0
+
     @staticmethod
     def _hash_spec(path: str) -> str:
         try:

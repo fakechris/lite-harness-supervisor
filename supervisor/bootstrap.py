@@ -225,11 +225,20 @@ def _ensure_daemon_running(config: RuntimeConfig | None = None) -> None:
 
     if config is None:
         config = RuntimeConfig.load(CONFIG_FILE)
-    _fork_daemon(config)
+    child_pid = _fork_daemon(config)
 
     for _ in range(30):
         time.sleep(0.2)
         if client.is_running():
             return
+        # Check if the forked child is still alive
+        try:
+            os.waitpid(child_pid, os.WNOHANG)
+            os.kill(child_pid, 0)
+        except (OSError, ProcessLookupError, ChildProcessError):
+            raise RuntimeError(
+                f"daemon process (PID {child_pid}) exited immediately; "
+                f"check .supervisor/runtime/daemon.log for details"
+            )
 
     raise RuntimeError("daemon did not start within 6s")

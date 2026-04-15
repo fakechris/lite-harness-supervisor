@@ -197,23 +197,29 @@ class TerminalAdapter:
             self.last_delivery_state = DeliveryState.SUBMITTED
             return
 
-        for _ in range(2):
-            clean_snapshots = 0
-            self._tmux("send-keys", "-t", target, "Enter")
-            for _ in range(10):
-                snapshot = self._capture_tail(target, lines=30)
-                status = self._submission_snapshot_status(snapshot, markers)
-                if status == "progress":
-                    self.last_delivery_state = DeliveryState.ACKNOWLEDGED
-                    return
-                if status == "clear":
-                    clean_snapshots += 1
-                    if clean_snapshots >= 2:
-                        self.last_delivery_state = DeliveryState.SUBMITTED
+        try:
+            for _ in range(2):
+                clean_snapshots = 0
+                self._tmux("send-keys", "-t", target, "Enter")
+                for _ in range(10):
+                    snapshot = self._capture_tail(target, lines=30)
+                    status = self._submission_snapshot_status(snapshot, markers)
+                    if status == "progress":
+                        self.last_delivery_state = DeliveryState.ACKNOWLEDGED
                         return
-                else:
-                    clean_snapshots = 0
-                time.sleep(0.5)
+                    if status == "clear":
+                        clean_snapshots += 1
+                        if clean_snapshots >= 2:
+                            self.last_delivery_state = DeliveryState.SUBMITTED
+                            return
+                    else:
+                        clean_snapshots = 0
+                    time.sleep(0.5)
+        except InjectionConfirmationError:
+            raise
+        except Exception:
+            self.last_delivery_state = DeliveryState.FAILED
+            raise
 
         self.last_delivery_state = DeliveryState.FAILED
         raise InjectionConfirmationError(
