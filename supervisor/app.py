@@ -1502,6 +1502,43 @@ def cmd_status(args):
 # ------------------------------------------------------------------
 
 
+def cmd_bootstrap(args):
+    """Run full zero-setup bootstrap and print step results."""
+    from supervisor.bootstrap import bootstrap
+
+    result = bootstrap()
+    for step in result.steps:
+        icon = "ok" if step["status"] == "ok" else ("skip" if step["status"] == "skipped" else "FAIL")
+        print(f"  [{icon}] {step['name']}: {step['message']}")
+    if result.missing_credentials:
+        print(f"\n  Optional: {len(result.missing_credentials)} credential(s) not configured")
+        for cred in result.missing_credentials:
+            print(f"    - {cred['key']}: {cred['description']}")
+            print(f"      Set with: thin-supervisor config set --key {cred['key']} --value <value>")
+    if result.ok:
+        print(f"\nReady. pane={result.pane_target} surface={result.surface_type}")
+    else:
+        print(f"\nBootstrap failed: {result.error}")
+    return 0 if result.ok else 1
+
+
+def cmd_config_set(args):
+    """Set a config value in global or project scope."""
+    from dataclasses import fields as dc_fields
+    from supervisor.config import RuntimeConfig, coerce_config_value
+    from supervisor.credentials import persist_credential
+
+    known = {f.name for f in dc_fields(RuntimeConfig)}
+    if args.key not in known:
+        print(f"Error: unknown config key '{args.key}'")
+        return 1
+
+    value = coerce_config_value(args.key, args.value)
+    persist_credential(args.key, value, scope=args.scope)
+    print(f"Saved {args.key} to {args.scope} config.")
+    return 0
+
+
 def cmd_bridge(args):
     """Tmux pane operations (read, type, keys, list, id, doctor)."""
     from supervisor.terminal.adapter import TerminalAdapter, TerminalAdapterError
@@ -1902,6 +1939,15 @@ def build_runtime_parser() -> argparse.ArgumentParser:
     p_bridge.add_argument("target", nargs="?", default=None)
     p_bridge.add_argument("extra", nargs="*")
 
+    sub.add_parser("bootstrap", help="Auto-detect, init, start daemon, and validate surface")
+
+    p_config = sub.add_parser("config", help="Read or write config values")
+    config_sub = p_config.add_subparsers(dest="config_action")
+    p_config_set = config_sub.add_parser("set", help="Set a config value")
+    p_config_set.add_argument("--key", required=True, help="Config key name")
+    p_config_set.add_argument("--value", required=True, help="Value to set")
+    p_config_set.add_argument("--scope", choices=["global", "project"], default="global", help="Config scope")
+
     return parser
 
 
@@ -2018,6 +2064,14 @@ def main():
         sys.exit(cmd_status(args))
     elif args.command == "bridge":
         sys.exit(cmd_bridge(args))
+    elif args.command == "bootstrap":
+        sys.exit(cmd_bootstrap(args))
+    elif args.command == "config":
+        if args.config_action == "set":
+            sys.exit(cmd_config_set(args))
+        else:
+            print("Usage: thin-supervisor config {set}")
+            sys.exit(1)
     else:
         parser.print_help()
         sys.exit(0)
