@@ -1718,35 +1718,31 @@ def _inspect_run(item: dict, args) -> None:
     print(f"State:      {item['state']}")
     print(f"Node:       {item['node']}")
     print(f"Pane:       {item['pane']}")
+    if item.get("worktree"):
+        print(f"Worktree:   {item['worktree']}")
 
-    # Try to load session events
-    run_dir = Path(RUNTIME_DIR) / "runs" / run_id
-    state_path = run_dir / "state.json"
-    session_path = run_dir / "session_log.jsonl"
-
-    if state_path.exists():
-        try:
-            state = json.loads(state_path.read_text())
-            print(f"Delivery:   {state.get('delivery_state', 'IDLE')}")
-            print(f"Spec:       {state.get('spec_path', '?')}")
-            print(f"Checkpoint: seq={state.get('checkpoint_seq', 0)}")
-            escalations = state.get("human_escalations", [])
+    # Load state and session events via StateStore
+    run_dir = str(Path(RUNTIME_DIR) / "runs" / run_id)
+    try:
+        store = StateStore(run_dir)
+        state_data = store.load_raw()
+        if state_data:
+            print(f"Delivery:   {state_data.get('delivery_state', 'IDLE')}")
+            print(f"Spec:       {state_data.get('spec_path', '?')}")
+            print(f"Checkpoint: seq={state_data.get('checkpoint_seq', 0)}")
+            escalations = state_data.get("human_escalations", [])
             if escalations:
                 last = escalations[-1] if isinstance(escalations[-1], dict) else {"reason": str(escalations[-1])}
                 print(f"Last pause: {last.get('reason', '?')}")
-        except (json.JSONDecodeError, OSError):
-            pass
 
-    if session_path.exists():
-        try:
-            lines = session_path.read_text().strip().splitlines()
-            recent = lines[-5:] if len(lines) > 5 else lines
-            print(f"\nRecent events ({len(lines)} total):")
-            for line in recent:
-                evt = json.loads(line)
+        events = store.read_recent_session_events(count=5)
+        if events:
+            total = store.session_event_count()
+            print(f"\nRecent events ({total} total):")
+            for evt in events:
                 print(f"  [{evt.get('event_type', '?')}] {evt.get('timestamp', '')[:19]}")
-        except (json.JSONDecodeError, OSError):
-            pass
+    except Exception:
+        pass
 
     print(f"{'='*60}")
 
