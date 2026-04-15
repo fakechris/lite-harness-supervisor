@@ -1,10 +1,70 @@
 """Runtime configuration with file / env / defaults layering."""
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 import yaml
+
+
+# Global config directory (overridable for testing)
+_GLOBAL_CONFIG_ENV = "THIN_SUPERVISOR_GLOBAL_CONFIG"
+
+# Fields safe to inherit from global config into any project
+_GLOBAL_INHERITABLE = frozenset({
+    "worker_provider", "worker_model", "judge_model",
+    "judge_temperature", "judge_max_tokens", "worker_trust_level",
+    "notification_channels", "pause_handling_mode", "max_auto_interventions",
+    "poll_interval_sec", "read_lines",
+})
+
+
+def global_config_path() -> Path:
+    """Return the global defaults config path."""
+    env = os.environ.get(_GLOBAL_CONFIG_ENV, "").strip()
+    if env:
+        return Path(env)
+    return Path.home() / ".config" / "thin-supervisor" / "defaults.yaml"
+
+
+def save_global_config(key: str, value) -> Path:
+    """Write a single key to the global config, creating it if needed."""
+    path = global_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {}
+    if path.exists():
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    data[key] = value
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".yaml")
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, default_flow_style=False)
+        os.replace(tmp_path, str(path))
+    except Exception:
+        os.unlink(tmp_path)
+        raise
+    return path
+
+
+def save_project_config(key: str, value, project_dir: str | Path = ".") -> Path:
+    """Write a single key to the project config."""
+    path = Path(project_dir) / ".supervisor" / "config.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {}
+    if path.exists():
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    data[key] = value
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".yaml")
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, default_flow_style=False)
+        os.replace(tmp_path, str(path))
+    except Exception:
+        os.unlink(tmp_path)
+        raise
+    return path
 
 
 @dataclass
@@ -63,8 +123,6 @@ class RuntimeConfig:
     @classmethod
     def from_env(cls, prefix: str = "SUPERVISOR_") -> "RuntimeConfig":
         """Build config from ``SUPERVISOR_*`` environment variables."""
-        import os
-
         data: dict = {}
         known = {f.name: f for f in fields(cls)}
         for key, val in os.environ.items():
@@ -84,16 +142,33 @@ class RuntimeConfig:
 
     @classmethod
     def load(cls, config_path: str | Path | None = None) -> "RuntimeConfig":
-        """Load with priority: *config_path* → env → defaults.
+        """Load with priority: defaults → global (inheritable) → project → env.
 
-        Values from the file are applied first, then env vars override.
+        Global config applies only inheritable fields. Project config applies
+        all fields. Environment variables override everything.
         """
         base = cls()
-        if config_path and Path(config_path).exists():
-            base = cls.from_file(config_path)
-        # Overlay env vars
-        import os
         known = {f.name: f for f in fields(cls)}
+
+        # 1. Global config — inheritable fields only
+        gpath = global_config_path()
+        if gpath.exists():
+            try:
+                gdata = yaml.safe_load(gpath.read_text(encoding="utf-8")) or {}
+                for k, v in gdata.items():
+                    if k in known and k in _GLOBAL_INHERITABLE:
+                        setattr(base, k, v)
+            except Exception:
+                pass  # corrupt global config — skip silently
+
+        # 2. Project config — all fields
+        if config_path and Path(config_path).exists():
+            pdata = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+            for k, v in pdata.items():
+                if k in known:
+                    setattr(base, k, v)
+
+        # 3. Env vars override everything
         prefix = "SUPERVISOR_"
         for key, val in os.environ.items():
             if not key.startswith(prefix):
