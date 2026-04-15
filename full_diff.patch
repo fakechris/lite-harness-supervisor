@@ -1,0 +1,4734 @@
+diff --git a/.github/workflows/publish.yml b/.github/workflows/publish.yml
+index 98016a2..b92a5c0 100644
+--- a/.github/workflows/publish.yml
++++ b/.github/workflows/publish.yml
+@@ -3,17 +3,64 @@ name: Publish to PyPI
+ on:
+   push:
+     tags: ["v*"]
++  workflow_dispatch:
++    inputs:
++      repository:
++        description: "Where to publish the built distributions"
++        required: true
++        default: "testpypi"
++        type: choice
++        options:
++          - testpypi
++          - pypi
++          - both
+ 
+ jobs:
+-  publish:
++  build:
+     runs-on: ubuntu-latest
+-    permissions:
+-      id-token: write  # OIDC for trusted publisher
+     steps:
+       - uses: actions/checkout@v4
+       - uses: actions/setup-python@v5
+         with:
+           python-version: "3.10"
+-      - run: pip install build
++      - run: python -m pip install --upgrade build twine
+       - run: python -m build
++      - run: python -m twine check dist/*
++      - uses: actions/upload-artifact@v4
++        with:
++          name: python-dist
++          path: dist/*
++
++  publish-testpypi:
++    needs: build
++    runs-on: ubuntu-latest
++    if: github.event_name == 'workflow_dispatch' && (inputs.repository == 'testpypi' || inputs.repository == 'both')
++    permissions:
++      id-token: write
++    environment:
++      name: testpypi
++      url: https://test.pypi.org/p/thin-supervisor
++    steps:
++      - uses: actions/download-artifact@v4
++        with:
++          name: python-dist
++          path: dist
++      - uses: pypa/gh-action-pypi-publish@release/v1
++        with:
++          repository-url: https://test.pypi.org/legacy/
++
++  publish-pypi:
++    needs: build
++    runs-on: ubuntu-latest
++    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.repository == 'pypi' || inputs.repository == 'both'))
++    permissions:
++      id-token: write
++    environment:
++      name: pypi
++      url: https://pypi.org/p/thin-supervisor
++    steps:
++      - uses: actions/download-artifact@v4
++        with:
++          name: python-dist
++          path: dist
+       - uses: pypa/gh-action-pypi-publish@release/v1
+diff --git a/.gitignore b/.gitignore
+index a8c1833..860225f 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -8,6 +8,9 @@ dist/
+ 
+ # Supervisor runtime (generated per-project)
+ .supervisor/runtime/
++.supervisor/daemon.pid
++.supervisor/daemon.sock
++.supervisor/evals/
+ runtime/state.json
+ runtime/event_log.jsonl
+ runtime/decision_log.jsonl
+diff --git a/docs/getting-started.md b/docs/getting-started.md
+index 991cfec..83f8c3d 100644
+--- a/docs/getting-started.md
++++ b/docs/getting-started.md
+@@ -40,25 +40,16 @@ The default is now clarify-first: the skill should produce a draft spec, ask you
+ tmux new -s work
+ ```
+ 
+-### 3. Initialize supervisor in your project
++### 3. Launch Codex and invoke the skill
+ 
+-```bash
+-cd your-project
+-thin-supervisor init
+-```
+-
+-This creates `.supervisor/` with config, specs, and runtime directories.
+-If the directory already exists but is missing `config.yaml`, run `thin-supervisor init --repair` to restore the scaffold without overwriting the current config.
+-
+-### 4. Start the supervisor daemon
+-
+-```bash
+-thin-supervisor daemon start
+-```
++No manual setup needed — `thin-supervisor bootstrap` handles everything
++automatically (init, daemon start, pane detection). The skill calls it
++before attaching.
+ 
+-The daemon runs in the background, ready to accept runs from any tmux session.
++> **Manual alternative**: If you prefer explicit setup, you can still run
++> `thin-supervisor init` and `thin-supervisor daemon start` separately.
+ 
+-### 5. Launch Codex and invoke the skill
++### 4. Launch Codex and invoke the skill
+ 
+ In the tmux pane:
+ 
+@@ -79,8 +70,8 @@ The Skill will:
+ 2. Generate a draft spec YAML with verification steps
+ 3. Self-review the plan (architect + critic passes)
+ 4. Ask you to approve
+-5. Mark the spec approved with `thin-supervisor spec approve --spec .supervisor/specs/<slug>.yaml --by human`
+-6. Attach immediately with `scripts/thin-supervisor-attach.sh <slug>`
++5. Run `thin-supervisor bootstrap` to auto-init, start daemon, and validate the surface
++6. Mark the spec approved and register the run
+ 7. Start emitting checkpoints as it works
+ 
+ If a spec is still in `approval.status: draft`, execution commands reject it until you approve it.
+diff --git a/docs/plans/2026-04-14-runtime-controller-unification.md b/docs/plans/2026-04-14-runtime-controller-unification.md
+new file mode 100644
+index 0000000..54a9165
+--- /dev/null
++++ b/docs/plans/2026-04-14-runtime-controller-unification.md
+@@ -0,0 +1,421 @@
++# Runtime Controller Unification Plan
++
++> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
++
++**Goal:** Unify `thin-supervisor` runtime control so users can invoke `/thin-supervisor` without needing to understand daemon vs foreground internals, while preserving a separate debug-only foreground controller mode.
++
++**Architecture:** Treat runtime control as a single product surface with one default controller model: daemon-owned runs. Reframe foreground behavior into two explicit concepts: an ordinary user-facing attached view over daemon-owned runs, and a separate debug-only foreground controller path for developers. Add explicit runtime detection so daemon-owned, auto-started, foreground-debug, and persisted local state can all be recognized, surfaced, and handled consistently.
++
++**Tech Stack:** Python 3.10, `supervisor/app.py`, `supervisor/bootstrap.py`, `supervisor/daemon/server.py`, `supervisor/global_registry.py`, `supervisor/storage/state_store.py`, `supervisor/notifications.py`, tmux surfaces, pytest.
++
++## Product Requirement
++
++### Problem Statement
++
++The runtime currently exposes multiple partially overlapping control models:
++
++- background daemon
++- zero-setup bootstrap that assumes daemon ownership
++- `run foreground` as a separate controller
++- pane ownership and local persisted state hints
++
++This creates ambiguity in real use:
++
++- users cannot tell whether a run is daemon-owned or foreground-owned
++- bootstrap only reasons about daemon reachability, not full controller state
++- foreground runs are not first-class in global discovery
++- multi-session usage becomes hard to understand as more runs accumulate
++
++The result is a runtime that works mechanically but does not present a coherent mental model.
++
++### Target Runtime Model
++
++There should be **one default runtime controller model**:
++
++- **daemon-owned runtime** for all normal user-facing execution
++
++There may be **one developer-only debug controller model**:
++
++- **foreground controller** for local debugging only
++
++There should be **one user-facing presentation model**:
++
++- users attach to, observe, resume, stop, and inspect runs
++- users do not need to reason about controller implementation details
++
++### Non-Goals
++
++- Do not build a full TUI in this phase
++- Do not merge runtime and devtime CLIs again
++- Do not expose optimizer/eval concepts to runtime users
++- Do not preserve the current ambiguous “foreground is just another normal runtime path” behavior
++
++## Required Runtime Semantics
++
++### 1. Daemon-owned runtime is the default
++
++For ordinary runtime use, `/thin-supervisor` and zero-setup bootstrap should always target daemon-owned runs.
++
++Required behavior:
++
++- if a daemon is already running for the project, reuse it
++- if no daemon is running, auto-start one
++- if a matching daemon-owned run already exists for the pane/spec/project context, show or reuse it instead of creating a duplicate
++
++### 2. Foreground controller becomes debug-only
++
++`thin-supervisor run foreground` should remain available, but it must be treated as an explicit developer/debug mode, not the normal runtime path.
++
++Required behavior:
++
++- foreground controller mode must be clearly labeled as debug-only
++- zero-setup runtime bootstrap must not silently choose foreground controller mode
++- runtime docs and skill docs must stop presenting foreground controller mode as equivalent to daemon-owned runtime
++
++### 3. Attached view is not a separate controller
++
++For user-facing runtime flows, “foreground” should mean “attached view” or “visible supervision surface”, not “a second controller implementation”.
++
++Required behavior:
++
++- user-facing runtime flows should attach to daemon-owned runs
++- the system should distinguish:
++  - controller mode
++  - visibility/attachment mode
++- status output should expose both clearly when relevant
++
++### 4. Cross-mode detection must be explicit
++
++The runtime must detect all controller states before deciding what to do.
++
++Required behavior:
++
++- detect active project daemon
++- detect active daemon-owned runs for the current pane
++- detect active foreground-owned runs for the current pane/project
++- detect persisted orphaned local state
++- detect pane ownership conflicts across worktrees/projects
++
++The runtime should never create a new controller path until it has checked all of the above.
++
++## Mode Interaction Rules
++
++### Case A: daemon already running
++
++If a project daemon already exists:
++
++- `thin-supervisor daemon start` must not start a second daemon
++- bootstrap must reuse the existing daemon
++- runtime invocation must not start a foreground controller by default
++
++### Case B: daemon not running
++
++If no daemon exists:
++
++- bootstrap should auto-start the daemon
++- runtime invocation should continue against that daemon-owned controller
++
++### Case C: foreground debug controller already running
++
++If a foreground debug run is already active:
++
++- bootstrap and runtime invocation must detect it
++- the system must surface that a foreground-owned run already exists
++- the user must be offered a coherent next action:
++  - observe
++  - continue using that run
++  - stop it and start daemon-owned runtime
++
++The system must not blindly launch a daemon-owned duplicate on the same pane.
++
++### Case D: daemon exists and user launches debug foreground
++
++This path must be explicit and constrained.
++
++Required behavior:
++
++- either reject it with a clear explanation, or
++- allow it only when it targets a different pane/spec and is explicitly marked debug-only
++
++The project should choose one policy and encode it consistently in code, docs, and tests.
++
++**Recommendation:** reject by default for the same pane/project, allow only as an explicit debug path on a separate pane.
++
++## Multi-Session Requirements
++
++### Current problem
++
++Single-session assumptions leak into the current runtime. With multiple sessions:
++
++- pane ownership is hard to inspect mentally
++- daemon-owned and foreground-owned runs are not presented uniformly
++- persisted local state and active runs are split across different views
++
++### Required minimum improvement (without TUI)
++
++Before any TUI work, ship a minimum coherent multi-session operator surface.
++
++Required behavior:
++
++- `thin-supervisor status` must clearly separate:
++  - active daemon-owned runs
++  - active foreground-owned runs
++  - orphaned persisted local states
++- `thin-supervisor ps` must show daemon processes plus active run counts
++- `thin-supervisor pane-owner` must identify whether the owner is daemon-owned or foreground-owned
++- a user should be able to answer “what is running where?” from CLI output alone
++
++### Deferred work
++
++Full TUI is deferred.
++
++Allowed follow-up after this plan:
++
++- lightweight dashboard / top-style view
++- richer session switching UI
++
++Not required in this phase:
++
++- curses-based TUI
++- split-pane interactive process manager
++
++## Acceptance Criteria
++
++The work is not complete until all of the following are true:
++
++1. `/thin-supervisor` always prefers daemon-owned runtime for ordinary user flows.
++2. If a daemon already exists, bootstrap and runtime invocation reuse it instead of launching another controller.
++3. If no daemon exists, bootstrap auto-starts one and continues.
++4. If a foreground debug controller already exists, the runtime detects it and gives a clear next action instead of silently creating a conflicting run.
++5. Same-pane controller conflicts are prevented across daemon-owned and foreground-owned modes.
++6. `status`, `ps`, and `pane-owner` can distinguish daemon-owned runs, foreground-owned runs, and orphaned local state.
++7. Docs and skills no longer present debug foreground mode as part of the normal happy path.
++8. Multi-session CLI output is understandable without reading code or local state files directly.
++
++## Implementation Plan
++
++### Task 1: Define controller ownership model
++
++**Files:**
++- Modify: `supervisor/domain/models.py`
++- Modify: `supervisor/global_registry.py`
++- Modify: `supervisor/app.py`
++- Test: `tests/test_global_registry.py`
++- Test: `tests/test_app_cli.py`
++
++**Step 1: Write failing ownership tests**
++
++Add tests that require ownership metadata to include controller mode:
++
++- daemon-owned
++- foreground-owned
++- orphaned persisted local state
++
++**Step 2: Run targeted tests to confirm failure**
++
++Run: `pytest -q tests/test_global_registry.py tests/test_app_cli.py`
++
++Expected: failures showing controller ownership is not fully modeled.
++
++**Step 3: Add explicit controller ownership fields**
++
++Introduce a consistent ownership vocabulary:
++
++- `controller_mode: daemon | foreground`
++- `view_mode: attached | detached | debug`
++
++Use it in pane ownership and run summaries.
++
++**Step 4: Re-run targeted tests**
++
++Run: `pytest -q tests/test_global_registry.py tests/test_app_cli.py`
++
++Expected: PASS
++
++### Task 2: Make bootstrap detect all controller states before acting
++
++**Files:**
++- Modify: `supervisor/bootstrap.py`
++- Modify: `supervisor/daemon/client.py`
++- Modify: `supervisor/app.py`
++- Test: `tests/test_bootstrap.py`
++
++**Step 1: Write failing bootstrap tests**
++
++Cover:
++
++- daemon already running
++- no daemon running
++- foreground-owned run already present
++- pane locked by daemon-owned run
++- pane locked by foreground-owned run
++
++**Step 2: Run targeted tests to confirm failure**
++
++Run: `pytest -q tests/test_bootstrap.py`
++
++Expected: failures on foreground-detection and controller conflict handling.
++
++**Step 3: Extend bootstrap detection**
++
++Before reporting `Ready`, bootstrap must:
++
++- detect daemon reachability
++- detect pane ownership
++- detect controller mode of the owner
++- return a structured next action instead of only pass/fail where appropriate
++
++**Step 4: Re-run targeted tests**
++
++Run: `pytest -q tests/test_bootstrap.py`
++
++Expected: PASS
++
++### Task 3: Restrict normal runtime flows to daemon-owned control
++
++**Files:**
++- Modify: `skills/thin-supervisor/SKILL.md`
++- Modify: `skills/thin-supervisor-codex/SKILL.md`
++- Modify: `docs/getting-started.md`
++- Test: `tests/test_primitives.py`
++
++**Step 1: Write failing doc/skill assertions**
++
++Add tests or assertions that the normal runtime happy path:
++
++- uses bootstrap + daemon-owned registration
++- does not recommend debug foreground mode
++
++**Step 2: Run targeted tests**
++
++Run: `pytest -q tests/test_primitives.py`
++
++Expected: FAIL if old foreground/attach semantics still leak into the happy path.
++
++**Step 3: Update skill and docs**
++
++Make the normal runtime path explicitly:
++
++- bootstrap
++- approve
++- register against daemon-owned runtime
++- attach/observe as presentation, not controller choice
++
++**Step 4: Re-run targeted tests**
++
++Run: `pytest -q tests/test_primitives.py`
++
++Expected: PASS
++
++### Task 4: Constrain debug foreground mode
++
++**Files:**
++- Modify: `supervisor/app.py`
++- Modify: `supervisor/daemon/server.py`
++- Modify: `supervisor/global_registry.py`
++- Test: `tests/test_app_cli.py`
++- Test: `tests/test_daemon.py`
++
++**Step 1: Write failing conflict tests**
++
++Add tests for:
++
++- foreground start while daemon-owned run owns the same pane
++- daemon register while foreground-owned run owns the same pane
++- allowed explicit debug foreground on a separate pane
++
++**Step 2: Run targeted tests**
++
++Run: `pytest -q tests/test_app_cli.py tests/test_daemon.py`
++
++Expected: FAIL on cross-mode conflict policy.
++
++**Step 3: Encode the policy**
++
++Recommended policy:
++
++- reject same-pane same-project foreground/daemon controller conflicts
++- allow separate-pane explicit debug foreground
++- label debug foreground clearly in output
++
++**Step 4: Re-run targeted tests**
++
++Run: `pytest -q tests/test_app_cli.py tests/test_daemon.py`
++
++Expected: PASS
++
++### Task 5: Improve multi-session CLI observability
++
++**Files:**
++- Modify: `supervisor/app.py`
++- Modify: `supervisor/pause_summary.py`
++- Modify: `supervisor/progress.py`
++- Test: `tests/test_app_cli.py`
++
++**Step 1: Write failing CLI presentation tests**
++
++Require `status`, `ps`, and `pane-owner` to show:
++
++- controller mode
++- ownership mode
++- orphaned vs active distinction
++
++**Step 2: Run targeted tests**
++
++Run: `pytest -q tests/test_app_cli.py`
++
++Expected: FAIL on missing controller/view distinctions.
++
++**Step 3: Improve CLI summaries**
++
++Add concise, scannable output that answers:
++
++- what is running
++- where it is running
++- who owns the pane
++- whether it is daemon-owned, foreground-owned, or orphaned
++
++**Step 4: Re-run targeted tests**
++
++Run: `pytest -q tests/test_app_cli.py`
++
++Expected: PASS
++
++## Testing Matrix
++
++Run all of the following before calling this complete:
++
++```bash
++pytest -q tests/test_bootstrap.py tests/test_global_registry.py tests/test_app_cli.py tests/test_daemon.py tests/test_primitives.py
++pytest -q
++```
++
++Manual verification:
++
++1. Start daemon in project A, then invoke runtime skill in project A again
++2. Invoke runtime skill in a fresh project B with no daemon
++3. Start a debug foreground run on pane X, then attempt runtime bootstrap on pane X
++4. Start a debug foreground run on pane X, then attempt runtime bootstrap on pane Y
++5. Inspect `thin-supervisor status`, `thin-supervisor ps`, and `thin-supervisor pane-owner <pane>`
++
++Expected:
++
++- no duplicate controller launch
++- clear conflict handling
++- clear ownership reporting
++- no ambiguity about whether a run is daemon-owned or foreground-owned
++
++## Developer Notes
++
++- This plan is about runtime model coherence, not new features for end users
++- The most important simplification is: ordinary users should not need to care about controller type
++- Do not add TUI in this phase
++- Do not preserve ambiguous semantics just for backward compatibility if they keep the runtime confusing
++
++## Recommended Execution Order
++
++1. Define controller ownership model
++2. Extend bootstrap detection
++3. Update skill/docs happy path
++4. Constrain debug foreground mode
++5. Improve multi-session CLI observability
+diff --git a/docs/plans/2026-04-14-zero-setup-runtime-ux.md b/docs/plans/2026-04-14-zero-setup-runtime-ux.md
+new file mode 100644
+index 0000000..b524840
+--- /dev/null
++++ b/docs/plans/2026-04-14-zero-setup-runtime-ux.md
+@@ -0,0 +1,224 @@
++# Zero-Setup Runtime UX Plan
++
++> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
++
++**Goal:** Make `thin-supervisor` feel like a single-invoke product for runtime users: the user should be able to enter a project, invoke the skill inside Codex, and have setup, config resolution, daemon startup, pane attach, and supervised execution happen automatically.
++
++**Architecture:** Keep the runtime/devtime split, but move runtime bootstrapping behind a single high-level entry path. Introduce a global runtime config layer for reusable secrets and defaults, allow per-project overrides, and make the skill/runtime bridge self-heal missing initialization instead of requiring users to remember `init`, `daemon start`, or attach commands.
++
++**Tech Stack:** Python 3.10, existing runtime CLI in `supervisor/app.py`, skill entrypoints under `skills/thin-supervisor*`, `.supervisor/` project state, global user config under the home directory, tmux execution surface, pytest.
++
++## Product Requirement
++
++### Problem Statement
++
++Current runtime behavior is usable for engineers but too heavy for normal users:
++
++- users must remember `thin-supervisor init`
++- users must remember `thin-supervisor daemon start`
++- users may need to know about attach/register behavior
++- users can forget setup and hit confusing runtime failures
++- credentials and defaults are currently too project-local for a multi-project workflow
++
++This creates unnecessary setup friction and breaks the intended mental model of “just invoke the skill and let the system take over”.
++
++### Desired User Experience
++
++For runtime users, the intended flow is:
++
++1. Open tmux
++2. `cd` into a project
++3. Launch Codex
++4. Invoke `/thin-supervisor`
++5. Everything else happens automatically
++
++The user should not need to run any setup command manually in the normal case.
++
++### Non-Goals
++
++- Do not merge runtime and devtime CLI again
++- Do not expose eval/canary/promotion controls to runtime users
++- Do not require users to understand panes, daemon sockets, or attach semantics
++- Do not require users to duplicate shared credentials per project unless they explicitly want project-local overrides
++
++## Requirements
++
++### 1. Single-invoke runtime bootstrap
++
++When `/thin-supervisor` is invoked inside Codex:
++
++- detect whether the current environment is inside tmux
++- detect whether the current project has `.supervisor/`
++- if missing, auto-run the equivalent of `thin-supervisor init --repair`
++- detect whether a project daemon is running
++- if missing, auto-start it
++- detect the current execution surface and pane id
++- ensure the current pane is attached/registerable
++- continue into clarify/plan/approve/execute without requiring user shell commands
++
++If bootstrap fails, the user-facing message must explain exactly what is missing and what the system already attempted automatically.
++
++### 2. Global runtime config with project override
++
++Introduce a global config layer for reusable settings and secrets.
++
++Required behavior:
++
++- global config lives in a stable user-level path
++- runtime reads config in this precedence order:
++  1. per-invocation explicit inputs
++  2. project-local config
++  3. global config
++  4. built-in defaults
++- users should only provide shared credentials once for multi-project use
++- project-local override must remain possible when the user explicitly requests single-project settings
++
++Example use case:
++
++- user provides DingTalk token once
++- token is written into global config
++- future projects can reuse it automatically
++- if a specific project needs a different token, that project can override locally
++
++### 3. Interactive runtime credential capture
++
++When required runtime credentials are missing:
++
++- the skill/runtime path should ask for the missing value in the agent conversation
++- once the user provides it, the system should persist it into the correct config scope
++- the user should not need to manually edit YAML
++
++This applies to secrets like tokens, client IDs, secrets, tenant ids, or other runtime bootstrap configuration.
++
++### 4. Multi-project support without extra setup burden
++
++The system must work cleanly when two or more projects run in different tmux sessions.
++
++Required behavior:
++
++- each project keeps its own `.supervisor/` runtime state and daemon
++- shared credentials come from global config unless locally overridden
++- `thin-supervisor ps` still provides a global machine-level view
++- invoking `/thin-supervisor` in project A must not require reconfiguration already completed globally for project B
++
++### 5. Explicit runtime messaging
++
++The user should be able to understand which phase the system is in:
++
++- bootstrapping project state
++- starting daemon
++- resolving config
++- attaching pane
++- generating/approving spec
++- running supervised execution
++
++Messages should be short and human-readable, not implementation dumps.
++
++## Acceptance Criteria
++
++The work is not complete until all of the following are true:
++
++1. In a fresh project with no `.supervisor/`, a user can open tmux, launch Codex, invoke `/thin-supervisor`, and successfully start the supervised flow without manually running `thin-supervisor init`.
++2. If the daemon is not running, the same flow auto-starts it without requiring `thin-supervisor daemon start`.
++3. If required runtime credentials are missing, the system asks for them conversationally and persists them without requiring hand-editing config files.
++4. A user can run two separate projects in two tmux sessions and reuse global config without repeating setup.
++5. Project-local override remains possible and has higher precedence than global config.
++6. Runtime users do not need to know or invoke `thin-supervisor-dev`.
++7. The documentation for runtime setup is updated so the top-level happy path no longer begins with manual init/start commands.
++
++## Implementation Slices
++
++### Slice 1: Config layering contract
++
++Define and document:
++
++- global config path
++- project config path
++- precedence rules
++- secret write semantics
++- which fields are safe to inherit globally and which must remain local
++
++### Slice 2: Bootstrap API
++
++Add a runtime bootstrap path that can be called by:
++
++- skill-driven runtime invocation
++- future high-level runtime commands
++
++This should encapsulate:
++
++- init/repair
++- daemon startup check
++- execution surface detection
++- attach readiness
++
++### Slice 3: Skill integration
++
++Update the runtime skill so `/thin-supervisor` calls the bootstrap flow before entering clarify/plan/approve/execute.
++
++Important:
++
++- keep the runtime/devtime split
++- do not leak devtime controls into the runtime UX
++
++### Slice 4: Credential prompting + persistence
++
++Add a credential resolution path that:
++
++- determines missing required values
++- asks the user inside the agent interaction
++- writes those values into global or local config depending on scope
++- masks sensitive values in logs and status output
++
++### Slice 5: Multi-project verification
++
++Test and document:
++
++- two projects
++- two tmux sessions
++- shared global credential reuse
++- one project-local override
++
++## Testing Plan
++
++### Unit tests
++
++- config precedence resolution
++- global vs project override behavior
++- missing-credential detection
++- bootstrap auto-init behavior
++- bootstrap auto-daemon-start behavior
++- pane/session detection behavior
++
++### Integration tests
++
++- fresh project with no `.supervisor/`
++- existing project with daemon stopped
++- two projects with shared global config
++- one project with local override
++
++### Manual N2N test
++
++Use the actual user workflow:
++
++1. create or enter a fresh project directory
++2. open tmux
++3. launch Codex
++4. invoke `/thin-supervisor`
++5. confirm the system bootstraps itself and proceeds
++
++## Developer Notes
++
++- This is a product UX simplification task, not just a runtime refactor
++- The goal is to remove user shell-command memory from the happy path
++- Keep fail-fast behavior when bootstrap cannot complete, but only after the system has tried the automatic path
++- Prefer writing global config in a path that works across projects and survives repo changes
++
++## Recommended Execution Order
++
++1. Implement config precedence and tests
++2. Implement bootstrap API and tests
++3. Integrate bootstrap into runtime skill entry
++4. Add credential prompting/persistence
++5. Update runtime docs
++6. Run multi-project tmux N2N verification
+diff --git a/docs/plans/2026-04-15-global-daemon-architecture-options.md b/docs/plans/2026-04-15-global-daemon-architecture-options.md
+new file mode 100644
+index 0000000..ec9d793
+--- /dev/null
++++ b/docs/plans/2026-04-15-global-daemon-architecture-options.md
+@@ -0,0 +1,298 @@
++# Global Daemon Architecture Options
++
++> This document is a design discussion artifact, not a committed architecture decision.
++
++## Goal
++
++Evaluate whether `thin-supervisor` should evolve from the current **per-worktree daemon** model to a **single global daemon** that manages multiple worktrees.
++
++This document exists so multiple agents can debate the tradeoffs against a shared, concrete target.
++
++## Current Baseline
++
++Today the system behaves as:
++
++- one daemon per worktree
++- one Unix socket per worktree
++- project-local runtime state under `.supervisor/`
++- global discovery only through the registry under the user state directory
++
++This means:
++
++- worktrees are isolated by default
++- multiple daemons can accumulate over time
++- users must reason about worktree-local daemons plus global discovery
++
++## Proposed Alternative
++
++Move to:
++
++- one global daemon process per user/machine
++- one global Unix socket
++- multiple worktrees registered under that daemon
++- run/controller isolation performed explicitly by workspace identity rather than separate processes
++
++## Why Consider A Global Daemon
++
++### 1. Simpler user mental model
++
++Users could think:
++
++- there is one supervisor runtime on my machine
++- it knows about all projects/worktrees
++- `/thin-supervisor` just connects to it
++
++This is cleaner than:
++
++- every worktree has its own daemon
++- every worktree can auto-start another Python process
++
++### 2. No idle-daemon accumulation
++
++A global daemon avoids the current process multiplication problem:
++
++- more worktrees do not imply more daemon processes
++- idle lifecycle becomes a single process concern
++
++### 3. More natural multi-session observability
++
++A single controller can expose:
++
++- all worktrees
++- all runs
++- all panes
++- all orphaned state
++
++without stitching together multiple daemon records.
++
++### 4. Better fit for zero-setup UX
++
++A zero-setup product story is easier to explain as:
++
++- if the global daemon is missing, start it
++- otherwise connect to it
++- register the current worktree and pane
++
++This is closer to the single-invoke runtime vision.
++
++## Why Not Change Immediately
++
++### 1. Isolation becomes explicit instead of structural
++
++Today, process boundaries provide natural isolation.
++
++With a global daemon we must explicitly model:
++
++- `workspace_id`
++- `workspace_root`
++- workspace-local config
++- workspace-local runtime state root
++- workspace-specific recovery
++
++What is currently "local because it lives in this directory" becomes "local because we modeled it correctly".
++
++### 2. Failure domain becomes larger
++
++Today:
++
++- one daemon crash affects one worktree
++
++With a global daemon:
++
++- one daemon crash affects all worktrees
++
++That raises the bar for:
++
++- robustness
++- persistence
++- restart recovery
++- diagnostics
++
++### 3. Recovery becomes significantly more complex
++
++A global daemon would have to recover correctly across:
++
++- multiple worktrees
++- multiple pane locks
++- multiple paused runs
++- multiple spec/config versions
++
++This is much more complex than worktree-local orphan recovery.
++
++### 4. Configuration precedence becomes more critical
++
++A global daemon makes config layering a first-class design problem:
++
++- global defaults
++- global secrets
++- worktree overrides
++- run-level overrides
++
++This is solvable, but must be designed intentionally.
++
++## Architecture Options
++
++## Option A: Keep per-worktree daemon
++
++### Shape
++
++- current architecture
++- add idle shutdown
++- improve observability
++- keep global registry
++
++### Pros
++
++- smallest migration cost
++- preserves failure isolation
++- matches existing persisted state model
++- simpler to ship incrementally
++
++### Cons
++
++- multiple daemon processes remain a core product fact
++- users still need to understand that daemons are worktree-scoped
++- multi-session experience remains CLI-composed rather than centrally managed
++
++## Option B: Global daemon with local state roots
++
++### Shape
++
++- one global control plane process
++- one global socket
++- each run still stores state under the owning worktree's `.supervisor/runtime/`
++- daemon keeps only controller/runtime metadata globally
++
++### Pros
++
++- better product mental model
++- easier single-invoke runtime story
++- eliminates idle-daemon accumulation
++- preserves local on-disk state ownership
++
++### Cons
++
++- requires dual-scope logic:
++  - global controller state
++  - local persisted run state
++- resume/orphan recovery becomes cross-root logic
++- daemon must safely access many worktree roots
++
++## Option C: Fully global daemon + fully global runtime state
++
++### Shape
++
++- one daemon
++- one socket
++- one global state root
++- worktree identity stored in metadata only
++
++### Pros
++
++- most unified architecture
++- easiest to build a future dashboard/TUI on top of
++- one place to inspect all state
++
++### Cons
++
++- largest migration cost
++- highest failure blast radius
++- weakest locality for debugging and repo-scoped inspection
++- changes current “state lives with the repo” assumption
++
++## Recommended Near-Term Position
++
++### Recommendation
++
++Do **not** migrate immediately.
++
++Instead:
++
++1. complete the per-worktree daemon lifecycle contract
++2. ship idle shutdown + clear status + multi-session CLI observability
++3. use that to measure whether process multiplication remains a real product pain
++
++Then evaluate **Option B** as the preferred long-term direction:
++
++- one global daemon
++- local state remains per worktree
++
++This offers the cleanest product model without forcing a fully global storage model.
++
++## Migration Preconditions
++
++Before a global daemon migration should begin, the following must already be true:
++
++1. controller modes are explicit and stable
++2. pane ownership is globally reliable
++3. status/ps/observe semantics are clean
++4. config layering is explicit
++5. orphan recovery contract is already well-defined
++
++Without those, a topology migration will mix product ambiguity with architectural ambiguity.
++
++## Global Daemon Required Semantics
++
++If we choose the global daemon path, the system must support:
++
++### Workspace registration
++
++The daemon must explicitly know:
++
++- workspace root
++- workspace id
++- workspace config source
++- workspace runtime state root
++
++### Per-workspace isolation
++
++The daemon must ensure:
++
++- pane conflicts are global
++- run ids are globally unique
++- workspace-local persisted state is never confused across worktrees
++
++### Lifecycle
++
++The daemon must distinguish:
++
++- active workspace
++- idle workspace
++- orphaned workspace state
++- disconnected but recoverable workspace
++
++### Observability
++
++The CLI must support:
++
++- all worktrees on this machine
++- all runs across worktrees
++- filtering by worktree
++- filtering by controller mode
++
++## Open Design Questions
++
++1. Should the global daemon be user-scoped or machine-scoped?
++2. Should workspace state remain under `.supervisor/` or move into a global store?
++3. How should permissions work if a worktree is deleted while runs remain in metadata?
++4. How should the daemon validate that a workspace path still exists and still matches the original repo/worktree?
++5. How should version skew be handled if the daemon binary stays alive while one repo is upgraded?
++
++## Acceptance Criteria For Choosing Global Daemon
++
++The migration should only be approved if it can demonstrate:
++
++1. simpler user mental model than per-worktree daemon
++2. no regression in orphan recovery
++3. no regression in pane conflict safety
++4. no regression in local state inspectability
++5. clear operational benefit over per-worktree idle shutdown
++
++## Suggested Evaluation Outcome
++
++For now, the system should proceed with:
++
++- **implementing the strengthened per-worktree daemon contract**
++- **deferring the global daemon migration decision**
++
++This keeps the current architecture safe while creating a concrete target for future simplification.
+diff --git a/docs/plans/2026-04-15-per-worktree-daemon-lifecycle-and-observability.md b/docs/plans/2026-04-15-per-worktree-daemon-lifecycle-and-observability.md
+new file mode 100644
+index 0000000..be21613
+--- /dev/null
++++ b/docs/plans/2026-04-15-per-worktree-daemon-lifecycle-and-observability.md
+@@ -0,0 +1,423 @@
++# Per-Worktree Daemon Lifecycle And Observability
++
++> **For Claude/Codex:** treat this as a product + runtime contract document, not just a code refactor note.
++
++## Goal
++
++Keep the current **per-worktree daemon** architecture, but make it operationally safe and understandable:
++
++- no unbounded accumulation of idle daemons
++- clear lifecycle and shutdown semantics
++- clear CLI visibility for multi-session and multi-worktree use
++- explicit distinction between active, idle, foreground-debug, and orphaned state
++
++This document intentionally assumes the current architecture remains in place for now:
++
++- one daemon per workspace/worktree
++- project-local runtime state under `.supervisor/`
++- cross-worktree discovery through the global registry
++
++## Terminology
++
++### Workspace / Worktree
++
++In this system, the daemon is not scoped to a Git repository identity. It is scoped to the **current working directory instance**.
++
++That means:
++
++- one main checkout = one daemon
++- each extra `git worktree` = another daemon
++
++This document uses **per-worktree daemon** as the correct term.
++
++### Daemon-owned runtime
++
++Normal runtime execution path. A worktree-local daemon controls one or more runs for that worktree.
++
++### Foreground debug controller
++
++Explicit debug-only controller created by `thin-supervisor run foreground`. It is not the default runtime model.
++
++### Orphaned local state
++
++Persisted run state left behind without an active controlling worker.
++
++## Problem Statement
++
++The current per-worktree daemon model is mechanically correct but has three product problems:
++
++1. **Idle daemon accumulation**
++   - worktree daemons are auto-started and reused
++   - they do not currently exit after becoming idle
++   - users who touch many worktrees over time will accumulate many idle Python processes
++
++2. **Unclear status model**
++   - users can see active runs, paused runs, completed runs, daemon-owned vs foreground-owned runs, and orphaned local state
++   - but the lifecycle is still not framed as a single coherent runtime contract
++
++3. **Multi-session observability remains CLI-fragmented**
++   - support exists, but the product model is not fully explicit
++   - users need to understand how `ps`, `status`, `pane-owner`, and `observe` fit together
++
++This plan closes those gaps while keeping the current architecture.
++
++## Architecture Decision
++
++### Keep per-worktree daemon for now
++
++We are **not** changing to a global daemon in this phase.
++
++Reasons:
++
++- worktree-local isolation is already implemented
++- failure domains remain small
++- persisted runtime state already lives under the worktree
++- existing resume/orphan/pane-lock logic already assumes local daemon ownership
++
++### Add lifecycle controls instead of changing topology
++
++The problem to solve is not "multiple daemons exist".  
++The problem to solve is:
++
++- idle daemons do not retire themselves
++- their lifecycle is not obvious to users
++
++## Required Runtime Semantics
++
++### 1. Daemon scope
++
++Each worktree has at most one daemon-owned controller.
++
++Required behavior:
++
++- starting a daemon in a worktree that already has a running daemon must reuse, not duplicate
++- bootstrap and register flows must reuse an existing daemon for that worktree
++- daemon discovery must remain worktree-local first, then globally observable
++
++### 2. Idle lifecycle
++
++Per-worktree daemons must no longer live forever after the last run finishes.
++
++Required behavior:
++
++- if `active_runs == 0`
++- and the daemon has been idle for at least `idle_shutdown_sec`
++- and there is no active foreground ownership conflict
++- the daemon should shut itself down cleanly
++
++Recommended default:
++
++- `idle_shutdown_sec = 600` seconds (10 minutes)
++
++This value should be configurable.
++
++### 3. Safe automatic restart
++
++Idle shutdown must be invisible to normal users.
++
++Required behavior:
++
++- if a worktree daemon auto-exited while idle
++- the next bootstrap/register/runtime invocation must auto-start it again
++- the user should not need to distinguish:
++  - "never started"
++  - "stopped manually"
++  - "auto-shut down while idle"
++
++### 4. Activity accounting
++
++Idle shutdown cannot be based only on run count. The daemon must track recent activity.
++
++Required daemon activity timestamps:
++
++- `started_at`
++- `last_run_started_at`
++- `last_run_finished_at`
++- `last_client_contact_at`
++- `last_state_change_at`
++
++At minimum, the idle decision must consider:
++
++- zero active runs
++- no recent client contact
++- no recent state transitions
++
++### 5. Foreground coexistence
++
++Foreground debug mode remains debug-only and must not block daemon lifecycle forever.
++
++Required behavior:
++
++- foreground runs do not count as daemon-owned active runs
++- daemon idle shutdown must ignore unrelated foreground ownership in other panes/worktrees
++- if a foreground run exists in the same worktree, status output must show it clearly
++- idle shutdown must never silently kill a foreground controller, because it does not own it
++
++## Idle Shutdown Requirements
++
++### Functional requirements
++
++1. The daemon must evaluate idle shutdown periodically while its accept loop is alive.
++2. Idle shutdown must only occur when `active_runs == 0`.
++3. Idle shutdown must not occur during:
++   - delivery ack pending
++   - verification in progress
++   - stop/reap cleanup in progress
++4. Idle shutdown must emit a session-independent daemon event into logs/registry.
++5. Idle shutdown reason must be inspectable after the fact.
++
++### Registry requirements
++
++The global daemon registry should expose:
++
++- `state: active | idle | shutting_down`
++- `active_runs`
++- `idle_for_sec`
++- `last_client_contact_at`
++- `last_run_finished_at`
++- `worktree_root`
++
++This allows CLI tools to show whether a daemon is:
++
++- healthy and active
++- safe but idle
++- stale and likely dead
++
++### CLI requirements
++
++`thin-supervisor ps` must surface daemon lifecycle state clearly.
++
++Example shape:
++
++```text
++PID      MODE     RUNS  IDLE   WORKTREE
++81231    active   2     0s     ~/workspace/project-a
++81302    idle     0     8m     ~/workspace/project-b
++```
++
++If a daemon is in idle grace period, the user should be able to tell that it will auto-exit soon.
++
++## Clear Status Requirements
++
++### Problem
++
++`status` currently provides useful data, but the runtime mental model is still too implicit.
++
++Users need to answer:
++
++- what is actively running?
++- who owns it?
++- is this controlled by a daemon or by foreground debug mode?
++- is this just persisted local state?
++- what do I do next?
++
++### Required status buckets
++
++`thin-supervisor status` must explicitly separate:
++
++1. **Active daemon-owned runs**
++2. **Active foreground-debug runs**
++3. **Paused/orphaned persisted local state**
++4. **Completed local state worth summarizing**
++
++### Output requirements
++
++For each run-like item, show:
++
++- run id
++- controller mode
++- current node
++- pane target if known
++- top state
++- short reason
++- next action
++
++Example shape:
++
++```text
++Active runs:
++  [daemon] run_aaa RUNNING node=step_2 pane=%3
++    next: thin-supervisor observe run_aaa
++
++Debug foreground runs:
++  [foreground-debug] run_bbb RUNNING node=step_1 pane=%7
++    next: inspect the foreground pane directly
++
++Local persisted state:
++  [orphaned] run_ccc PAUSED_FOR_HUMAN node=step_4 pane=%1
++    reason: daemon exited while the run was in progress
++    next: thin-supervisor run resume --spec ...
++```
++
++### Status behavior requirements
++
++- `status` must not imply an item is active when it is only persisted
++- `status` must not collapse daemon-owned, foreground-owned, and orphaned state into one list without labels
++- `status` must prefer explicit labels over prose
++
++## Multi-Session Observability Requirements
++
++### Current capability baseline
++
++The runtime already supports:
++
++- multiple worktrees
++- multiple daemons
++- multiple tmux sessions
++- pane ownership locking
++- per-project local state
++
++What it lacks is a sufficiently crisp user-facing observability contract.
++
++### Required CLI observability model
++
++Without introducing a TUI, the following commands together must fully explain the system:
++
++#### `thin-supervisor ps`
++
++Machine-level daemon summary:
++
++- worktree root
++- daemon pid
++- daemon lifecycle state
++- active run count
++- idle duration
++
++#### `thin-supervisor status`
++
++Current worktree summary:
++
++- active daemon-owned runs
++- active foreground-debug runs
++- orphaned local state
++- completed local state
++
++#### `thin-supervisor pane-owner <pane>`
++
++Pane-level ownership:
++
++- owning run id
++- controller mode
++- owning pid
++- worktree root
++- spec path if available
++
++#### `thin-supervisor observe <run_id>`
++
++Run-level event view:
++
++- last checkpoints
++- last verification
++- current reason / pause summary
++
++### Product requirement
++
++A user managing multiple sessions must be able to answer:
++
++1. what daemons exist on this machine?
++2. which worktree owns each daemon?
++3. which runs are active now?
++4. which pane belongs to which run?
++5. which items are truly active vs merely persisted?
++
++without reading runtime files manually.
++
++## Required Developer Work
++
++### Slice 1: Idle daemon lifecycle contract
++
++Implement:
++
++- daemon idle timer
++- last-activity tracking
++- auto-shutdown when safe
++- explicit daemon shutdown reason reporting
++
++Files likely involved:
++
++- `supervisor/daemon/server.py`
++- `supervisor/global_registry.py`
++- `supervisor/domain/models.py`
++- `supervisor/app.py`
++- `tests/test_daemon.py`
++- `tests/test_app_cli.py`
++
++### Slice 2: Registry and CLI state model
++
++Implement:
++
++- daemon lifecycle state in registry
++- `idle_for_sec` / last activity fields
++- `ps` output updates
++- `status` bucket separation hardening
++
++Files likely involved:
++
++- `supervisor/global_registry.py`
++- `supervisor/app.py`
++- `tests/test_app_cli.py`
++- `tests/test_global_registry.py`
++
++### Slice 3: Foreground/debug clarity
++
++Implement:
++
++- explicit labeling in `status`
++- explicit ownership display in `pane-owner`
++- no ambiguity between debug foreground and daemon-owned runtime
++
++Files likely involved:
++
++- `supervisor/app.py`
++- `supervisor/global_registry.py`
++- `tests/test_app_cli.py`
++
++## Acceptance Criteria
++
++The work is not complete until all of the following are true:
++
++1. A worktree daemon auto-exits after a configurable idle period with zero active runs.
++2. The next normal runtime invocation auto-starts the daemon again without user intervention.
++3. `thin-supervisor ps` shows which daemons are active vs idle.
++4. `thin-supervisor status` clearly separates daemon-owned runs, foreground-debug runs, and orphaned persisted local state.
++5. `thin-supervisor pane-owner` clearly shows controller mode and owning worktree.
++6. A user with multiple worktrees and tmux sessions can answer "what is running where?" from CLI output alone.
++7. No completed run thread remains indefinitely in daemon memory after reaping.
++8. Idle shutdown does not kill active runs or corrupt persisted local state.
++
++## Testing Plan
++
++### Unit / targeted tests
++
++- daemon idle timer starts only when active run count reaches zero
++- daemon does not idle-exit while runs are active
++- daemon registry shows active vs idle state
++- foreground ownership remains visible in status/pane-owner
++- stale/dead daemon registry entries are cleaned up
++
++### Integration tests
++
++- two worktrees, each with its own daemon
++- one active, one idle
++- one daemon auto-exits and later auto-restarts on bootstrap
++- one foreground-debug run plus one daemon-owned run in another pane
++
++### Manual verification
++
++1. Start runtime in two separate worktrees
++2. Let one daemon go idle
++3. Verify `ps` shows active vs idle correctly
++4. Wait for idle shutdown
++5. Invoke runtime again in that worktree
++6. Verify auto-restart works without extra user commands
++
++## Non-Goals
++
++- No full TUI in this phase
++- No change to single global daemon yet
++- No runtime/devtime CLI merge
++- No optimizer/eval feature work
++
++## Follow-up
++
++If this plan still leaves too much lifecycle complexity or too many idle processes, the next architectural step is to evaluate a **global daemon** with per-worktree isolation, documented separately.
+diff --git a/skills/thin-supervisor-codex/SKILL.md b/skills/thin-supervisor-codex/SKILL.md
+index dd8608c..3f71c63 100644
+--- a/skills/thin-supervisor-codex/SKILL.md
++++ b/skills/thin-supervisor-codex/SKILL.md
+@@ -152,30 +152,29 @@ confirmation question:
+ Once the user has already approved in the conversation, do not ask again.
+ Immediately mark the spec approved and continue to attach.
+ 
+-As soon as the user approves, mark the spec approved and then attach the
++As soon as the user approves, bootstrap the environment and attach the
+ supervisor BEFORE any implementation work:
+ 
+ ```bash
++thin-supervisor bootstrap
+ thin-supervisor spec approve --spec .supervisor/specs/<slug>.yaml --by human
+-scripts/thin-supervisor-attach.sh <slug>
++thin-supervisor run register --spec .supervisor/specs/<slug>.yaml --pane "$(thin-supervisor bridge id)"
+ ```
+ 
++`thin-supervisor bootstrap` auto-detects tmux, initializes `.supervisor/`
++if missing, starts the daemon if needed, and validates the execution surface.
++
+ Execution commands will reject a draft spec. This is intentional: the
+ approval step is part of the contract, not optional ceremony.
+ 
+ Do not start coding, git cleanup, worktree edits, or long test runs
+-until this command succeeds.
++until these commands succeed.
+ 
+ ---
+ 
+ ## Stage 4: Execute
+ 
+-If attach already succeeded in Stage 3, do not run it again.
+-Only use this command when execution starts from a spec that is not yet attached:
+-
+-```bash
+-scripts/thin-supervisor-attach.sh <slug>
+-```
++If attach already succeeded in Stage 3, do not run bootstrap or register again.
+ 
+ ### Checkpoint protocol
+ 
+diff --git a/skills/thin-supervisor-codex/references/contract.md b/skills/thin-supervisor-codex/references/contract.md
+index 0b7f4df..3e7c558 100644
+--- a/skills/thin-supervisor-codex/references/contract.md
++++ b/skills/thin-supervisor-codex/references/contract.md
+@@ -5,7 +5,7 @@ These rules are execution contracts, not optimization targets.
+ ## Must Always Hold
+ 
+ - Treat explicit user approval as final. Do not ask for the same approval twice.
+-- Do not begin implementation before `scripts/thin-supervisor-attach.sh <slug>` succeeds.
++- Do not begin implementation before `thin-supervisor bootstrap` and `thin-supervisor run register` succeed.
+ - Do not ask "should I continue?" The supervisor decides.
+ - Do not skip verification. Every step must satisfy its `verify` checks before moving on.
+ - Do not modify the generated spec during execution unless the user explicitly asks to revise the plan.
+diff --git a/skills/thin-supervisor/SKILL.md b/skills/thin-supervisor/SKILL.md
+index c70bc41..73f6a00 100644
+--- a/skills/thin-supervisor/SKILL.md
++++ b/skills/thin-supervisor/SKILL.md
+@@ -264,19 +264,23 @@ confirmation question:
+ Once the user has already approved in the conversation, do not ask again.
+ Immediately mark the spec approved and continue to attach.
+ 
+-As soon as the user approves, mark the spec approved and then attach the
++As soon as the user approves, bootstrap the environment and attach the
+ supervisor BEFORE any implementation work:
+ 
+ ```bash
++thin-supervisor bootstrap
+ thin-supervisor spec approve --spec .supervisor/specs/<slug>.yaml --by human
+-scripts/thin-supervisor-attach.sh <slug>
++thin-supervisor run register --spec .supervisor/specs/<slug>.yaml --pane "$(thin-supervisor bridge id)"
+ ```
+ 
++`thin-supervisor bootstrap` auto-detects tmux, initializes `.supervisor/`
++if missing, starts the daemon if needed, and validates the execution surface.
++
+ Execution commands now reject draft specs. This is intentional: user
+ confirmation is part of the execution contract.
+ 
+ Do not start coding, git cleanup, worktree edits, or long test runs
+-until this command succeeds.
++until these commands succeed.
+ 
+ ---
+ 
+@@ -284,12 +288,7 @@ until this command succeeds.
+ 
+ ### Start execution only after attach succeeds
+ 
+-If attach already succeeded in Stage 3, do not run it again.
+-Only use this command when execution starts from a spec that is not yet attached:
+-
+-```bash
+-scripts/thin-supervisor-attach.sh <slug>
+-```
++If bootstrap and register already succeeded in Stage 3, do not run them again.
+ 
+ ### Follow the checkpoint protocol
+ 
+diff --git a/skills/thin-supervisor/references/contract.md b/skills/thin-supervisor/references/contract.md
+index 0b7f4df..3e7c558 100644
+--- a/skills/thin-supervisor/references/contract.md
++++ b/skills/thin-supervisor/references/contract.md
+@@ -5,7 +5,7 @@ These rules are execution contracts, not optimization targets.
+ ## Must Always Hold
+ 
+ - Treat explicit user approval as final. Do not ask for the same approval twice.
+-- Do not begin implementation before `scripts/thin-supervisor-attach.sh <slug>` succeeds.
++- Do not begin implementation before `thin-supervisor bootstrap` and `thin-supervisor run register` succeed.
+ - Do not ask "should I continue?" The supervisor decides.
+ - Do not skip verification. Every step must satisfy its `verify` checks before moving on.
+ - Do not modify the generated spec during execution unless the user explicitly asks to revise the plan.
+diff --git a/supervisor/adapters/jsonl_observer.py b/supervisor/adapters/jsonl_observer.py
+index 1798f8e..5cd7422 100644
+--- a/supervisor/adapters/jsonl_observer.py
++++ b/supervisor/adapters/jsonl_observer.py
+@@ -15,6 +15,9 @@ import os
+ from pathlib import Path
+ 
+ 
++from supervisor.domain.enums import DeliveryState
++
++
+ class JsonlObserverError(RuntimeError):
+     pass
+ 
+@@ -36,6 +39,7 @@ class JsonlObserver:
+         self._text_buffer = ""  # cross-read buffer for checkpoint spanning
+         self._offset = 0  # bytes read so far
+         self._detected_cwd: str | None = None
++        self.last_delivery_state: str = DeliveryState.FAILED  # observation-only cannot deliver
+ 
+     def read(self, lines: int = 100) -> str:
+         """Read new content from JSONL file since last read.
+diff --git a/supervisor/adapters/open_relay_surface.py b/supervisor/adapters/open_relay_surface.py
+index 042841d..de509d7 100644
+--- a/supervisor/adapters/open_relay_surface.py
++++ b/supervisor/adapters/open_relay_surface.py
+@@ -10,6 +10,9 @@ import shutil
+ import subprocess
+ 
+ 
++from supervisor.domain.enums import DeliveryState
++
++
+ class OpenRelaySurfaceError(RuntimeError):
+     pass
+ 
+@@ -23,6 +26,7 @@ class OpenRelaySurface:
+         self._session_id = session_id.strip()
+         self._last_read_hash = ""  # for incremental dedup
+         self._pending_echo_filters: list[str] = []
++        self.last_delivery_state: str = DeliveryState.IDLE
+ 
+     def read(self, lines: int = 100) -> str:
+         """Read recent output, returning only new content since last read."""
+@@ -41,6 +45,7 @@ class OpenRelaySurface:
+     def inject(self, text: str) -> None:
+         """Send text + Enter to the oly session."""
+         self._oly("send", self._session_id, text, "key:enter")
++        self.last_delivery_state = DeliveryState.SUBMITTED
+         if text:
+             self._pending_echo_filters.append(text)
+ 
+diff --git a/supervisor/app.py b/supervisor/app.py
+index 7c47fd5..c4a4924 100644
+--- a/supervisor/app.py
++++ b/supervisor/app.py
+@@ -16,7 +16,7 @@ from supervisor.storage.state_store import StateStore
+ from supervisor.loop import SupervisorLoop
+ from supervisor.config import RuntimeConfig
+ from supervisor.adapters.transcript_adapter import TranscriptAdapter
+-from supervisor.global_registry import find_pane_owner, list_daemons
++from supervisor.global_registry import find_pane_owner, list_daemons, list_pane_owners
+ from supervisor.interventions import AutoInterventionManager
+ from supervisor.notifications import NotificationManager
+ from supervisor.pause_summary import summarize_state
+@@ -276,7 +276,9 @@ def cmd_run_register(args):
+ 
+ 
+ def cmd_run_foreground(args):
+-    """Run a single sidecar in foreground (no daemon needed)."""
++    """Run a single sidecar in foreground (debug only, not for normal use)."""
++    from supervisor.global_registry import acquire_pane_lock, release_pane_lock
++
+     spec_path = os.path.abspath(args.spec)
+     try:
+         spec = load_runnable_spec(spec_path)
+@@ -293,60 +295,85 @@ def cmd_run_foreground(args):
+     # Per-run isolated directory
+     import uuid
+     run_id = f"run_{uuid.uuid4().hex[:12]}"
+-    run_dir = str(Path(RUNTIME_DIR) / "runs" / run_id)
+-    store = StateStore(run_dir)
+-    state = store.load_or_init(
+-        spec,
+-        spec_path=os.path.abspath(args.spec),
+-        pane_target=pane_target,
+-        surface_type=surface_type,
+-        workspace_root=os.getcwd(),
+-        controller_mode="foreground",
+-    )
+-
+-    from supervisor.adapters.surface_factory import create_surface
+-    terminal = create_surface(surface_type, pane_target)
+ 
+-    diag = terminal.doctor()
+-    if not diag["ok"]:
+-        print(f"Surface issues: {diag['issues']}")
++    # Acquire pane lock to prevent conflicts with daemon-owned runs
++    pane_owner = {
++        "pid": os.getpid(),
++        "cwd": os.getcwd(),
++        "socket": "",
++        "run_id": run_id,
++        "spec_path": spec_path,
++        "controller_mode": "foreground",
++    }
++    acquired, existing = acquire_pane_lock(pane_target, pane_owner)
++    if not acquired:
++        mode = existing.get("controller_mode", "unknown") if existing else "unknown"
++        owner_run = existing.get("run_id", "?") if existing else "?"
++        print(f"Error: pane {pane_target} is locked by {mode} run {owner_run}.")
++        if mode == "daemon":
++            print("Use 'thin-supervisor run register' for normal execution.")
++        else:
++            print("Stop the existing run first.")
+         return 1
+ 
+-    from supervisor.domain.models import WorkerProfile
+-    worker = WorkerProfile(
+-        provider=config.worker_provider,
+-        model_name=config.worker_model,
+-        trust_level=config.worker_trust_level,
+-    )
+-    loop = SupervisorLoop(
+-        store,
+-        judge_model=config.judge_model,
+-        judge_temperature=config.judge_temperature,
+-        judge_max_tokens=config.judge_max_tokens,
+-        worker_profile=worker,
+-        notification_manager=NotificationManager.from_config(
+-            config,
+-            runtime_root=store.runtime_root,
+-        ),
+-        auto_intervention_manager=AutoInterventionManager(
+-            mode=config.pause_handling_mode,
+-            max_auto_interventions=config.max_auto_interventions,
+-        ),
+-    )
++    try:
++        run_dir = str(Path(RUNTIME_DIR) / "runs" / run_id)
++        store = StateStore(run_dir)
++        state = store.load_or_init(
++            spec,
++            spec_path=os.path.abspath(args.spec),
++            pane_target=pane_target,
++            surface_type=surface_type,
++            workspace_root=os.getcwd(),
++            controller_mode="foreground",
++        )
+ 
+-    print(f"Foreground sidecar: run={run_id} pane={pane_target} spec={spec.id}")
++        from supervisor.adapters.surface_factory import create_surface
++        terminal = create_surface(surface_type, pane_target)
+ 
+-    try:
+-        final_state = loop.run_sidecar(
+-            spec, state, terminal,
+-            poll_interval=config.poll_interval_sec,
+-            read_lines=config.read_lines,
+-            idle_timeout_sec=config.default_agent_timeout_sec,
++        diag = terminal.doctor()
++        if not diag["ok"]:
++            print(f"Surface issues: {diag['issues']}")
++            return 1
++
++        from supervisor.domain.models import WorkerProfile
++        worker = WorkerProfile(
++            provider=config.worker_provider,
++            model_name=config.worker_model,
++            trust_level=config.worker_trust_level,
+         )
+-        print(f"\nRun finished: {final_state.top_state.value}")
+-    except KeyboardInterrupt:
+-        store.save(state)
+-        print("\nInterrupted. State saved.")
++        loop = SupervisorLoop(
++            store,
++            judge_model=config.judge_model,
++            judge_temperature=config.judge_temperature,
++            judge_max_tokens=config.judge_max_tokens,
++            worker_profile=worker,
++            notification_manager=NotificationManager.from_config(
++                config,
++                runtime_root=store.runtime_root,
++            ),
++            auto_intervention_manager=AutoInterventionManager(
++                mode=config.pause_handling_mode,
++                max_auto_interventions=config.max_auto_interventions,
++            ),
++        )
++
++        print(f"[DEBUG MODE] Foreground controller — for debugging only")
++        print(f"  run={run_id} pane={pane_target} spec={spec.id}")
++
++        try:
++            final_state = loop.run_sidecar(
++                spec, state, terminal,
++                poll_interval=config.poll_interval_sec,
++                read_lines=config.read_lines,
++                idle_timeout_sec=config.default_agent_timeout_sec,
++            )
++            print(f"\nRun finished: {final_state.top_state.value}")
++        except KeyboardInterrupt:
++            store.save(state)
++            print("\nInterrupted. State saved.")
++    finally:
++        release_pane_lock(pane_target, run_id)
+ 
+     return 0
+ 
+@@ -526,19 +553,40 @@ def _find_local_run_summaries() -> list[dict]:
+ 
+ def _summarize_local_state_for_hint(state: dict) -> dict:
+     summary = summarize_state(state)
+-    if (
+-        summary.get("top_state") in {"RUNNING", "GATING", "VERIFYING"}
+-        and state.get("controller_mode", "daemon") != "foreground"
+-    ):
+-        orphaned_reason = "persisted run was left in progress without an active daemon worker"
+-        paused_view = dict(state)
+-        paused_view["top_state"] = "PAUSED_FOR_HUMAN"
+-        paused_view["human_escalations"] = list(paused_view.get("human_escalations", [])) + [
+-            {"reason": orphaned_reason}
+-        ]
+-        summary = summarize_state(paused_view)
+-        summary["orphaned_local_state"] = True
+-        summary["orphaned_from"] = state.get("top_state", "")
++    if summary.get("top_state") in {"RUNNING", "GATING", "VERIFYING"}:
++        is_orphaned = False
++        controller = state.get("controller_mode", "daemon")
++        if controller == "foreground":
++            # Foreground is orphaned if the owning process is dead
++            import signal
++            pid = state.get("_foreground_pid", 0)
++            if pid:
++                try:
++                    os.kill(pid, 0)
++                except (OSError, ProcessLookupError):
++                    is_orphaned = True
++            else:
++                # No PID recorded — assume orphaned (legacy state)
++                is_orphaned = True
++        else:
++            # Daemon-owned — always orphaned when found in local scan
++            # (if daemon were managing it, it wouldn't be in local-only state)
++            is_orphaned = True
++
++        if is_orphaned:
++            reason = (
++                "foreground process no longer running"
++                if controller == "foreground"
++                else "persisted run was left in progress without an active daemon worker"
++            )
++            paused_view = dict(state)
++            paused_view["top_state"] = "PAUSED_FOR_HUMAN"
++            paused_view["human_escalations"] = list(paused_view.get("human_escalations", [])) + [
++                {"reason": reason}
++            ]
++            summary = summarize_state(paused_view)
++            summary["orphaned_local_state"] = True
++            summary["orphaned_from"] = state.get("top_state", "")
+     return summary
+ 
+ 
+@@ -550,8 +598,13 @@ def _print_local_state_hint() -> None:
+     print("Local state found:")
+     for state in summaries:
+         display = _summarize_local_state_for_hint(state)
++        mode = display.get("controller_mode", "daemon")
++        mode_tag = "[foreground]" if mode == "foreground" else "[daemon]"
++        if display.get("orphaned_local_state"):
++            mode_tag = "[orphaned]"
+         print(
+             "  "
++            f"{mode_tag} "
+             f"{display.get('run_id', '?')} "
+             f"{display.get('top_state', '?')} "
+             f"node={display.get('current_node_id', '') or '?'} "
+@@ -608,21 +661,43 @@ def _find_global_pane_owner(pane_target: str) -> dict | None:
+ 
+ 
+ def cmd_ps(args):
+-    """List all globally registered daemon processes."""
++    """List all globally registered daemon processes and foreground runs."""
+     daemons = _list_global_daemons()
+-    if not daemons:
+-        print("No registered daemons.")
++    foreground_runs = [
++        p for p in list_pane_owners()
++        if p.get("controller_mode") == "foreground"
++    ]
++
++    if not daemons and not foreground_runs:
++        print("No registered daemons or foreground runs.")
+         return 0
+ 
+-    print(f"{'PID':<8} {'RUNS':<6} {'STARTED':<28} {'SOCKET':<32} {'CWD'}")
+-    for daemon in daemons:
+-        print(
+-            f"{daemon.get('pid', '?'):<8} "
+-            f"{daemon.get('active_runs', 0):<6} "
+-            f"{daemon.get('started_at', ''):<28} "
+-            f"{daemon.get('socket', ''):<32} "
+-            f"{daemon.get('cwd', '')}"
+-        )
++    if daemons:
++        print("Daemons:")
++        print(f"  {'PID':<8} {'STATE':<8} {'RUNS':<6} {'IDLE':<8} {'CWD'}")
++        for daemon in daemons:
++            state = daemon.get("state", "active")
++            idle = daemon.get("idle_for_sec", 0)
++            idle_str = f"{idle}s" if idle > 0 else "-"
++            print(
++                f"  {daemon.get('pid', '?'):<8} "
++                f"{state:<8} "
++                f"{daemon.get('active_runs', 0):<6} "
++                f"{idle_str:<8} "
++                f"{daemon.get('cwd', '')}"
++            )
++
++    if foreground_runs:
++        print("Foreground debug runs:")
++        print(f"  {'PID':<8} {'RUN_ID':<20} {'PANE':<10} {'SPEC'}")
++        for run in foreground_runs:
++            print(
++                f"  {run.get('pid', '?'):<8} "
++                f"{run.get('run_id', '?'):<20} "
++                f"{run.get('pane_target', '?'):<10} "
++                f"{run.get('spec_path', '?')}"
++            )
++
+     return 0
+ 
+ 
+@@ -633,13 +708,15 @@ def cmd_pane_owner(args):
+         print(f"No owner found for pane {args.pane}.")
+         return 1
+ 
+-    print(f"Pane:     {owner.get('pane_target', args.pane)}")
+-    print(f"Run:      {owner.get('run_id', '?')}")
+-    print(f"PID:      {owner.get('pid', '?')}")
+-    print(f"CWD:      {owner.get('cwd', '?')}")
+-    print(f"Socket:   {owner.get('socket', '?')}")
+-    print(f"Spec:     {owner.get('spec_path', '?')}")
+-    print(f"Attached: {owner.get('acquired_at', '?')}")
++    mode = owner.get("controller_mode", "unknown")
++    print(f"Pane:       {owner.get('pane_target', args.pane)}")
++    print(f"Run:        {owner.get('run_id', '?')}")
++    print(f"Controller: {mode}")
++    print(f"PID:        {owner.get('pid', '?')}")
++    print(f"CWD:        {owner.get('cwd', '?')}")
++    print(f"Socket:     {owner.get('socket', '?')}")
++    print(f"Spec:       {owner.get('spec_path', '?')}")
++    print(f"Attached:   {owner.get('acquired_at', '?')}")
+     return 0
+ 
+ 
+@@ -1424,76 +1501,69 @@ def cmd_session(args):
+ 
+ 
+ def cmd_status(args):
+-    """Show all run states."""
++    """Show all run states, bucketed by controller mode."""
+     from supervisor.daemon.client import DaemonClient
+ 
+-    # Try daemon first
++    daemon_runs: list[dict] = []
++    foreground_runs: list[dict] = []
++    orphaned_runs: list[dict] = []
++
++    # Collect daemon-managed runs
+     client = DaemonClient()
+     if client.is_running():
+         result = client.status()
+         if result.get("ok"):
+-            runs = result.get("runs", [])
+-            if not runs:
+-                print("Daemon running, no active runs.")
+-                _print_local_state_hint()
+-                return 0
+-            print(f"{'RUN_ID':<20} {'PANE':<20} {'STATE':<18} {'NODE'}")
+-            for r in runs:
+-                print(f"{r['run_id']:<20} {r['pane_target']:<20} {r['top_state']:<18} {r.get('current_node', '')}")
+-                if r.get("status_reason"):
+-                    print(f"  status: {r['status_reason']}")
+-                if r.get("pause_reason"):
+-                    print(f"  reason: {r['pause_reason']}")
+-                if r.get("next_action"):
+-                    print(f"  next:   {r['next_action']}")
+-            return 0
++            daemon_runs = result.get("runs", [])
+ 
+-    # Fallback: scan run directories
+-    runs_dir = Path(RUNTIME_DIR) / "runs"
+-    if not runs_dir.exists():
+-        # Legacy: check old-style state.json
+-        state_path = Path(RUNTIME_DIR) / "state.json"
+-        if state_path.exists():
+-            try:
+-                state = _summarize_local_state_for_hint(json.loads(state_path.read_text()))
+-                print(f"Run:   {state.get('run_id', '?')}")
+-                print(f"State: {state.get('top_state', '?')}")
+-                print(f"Node:  {state.get('current_node_id', '?')}")
+-                if state.get("status_reason"):
+-                    print(f"Status: {state['status_reason']}")
+-                if state.get("pause_reason"):
+-                    print(f"Reason: {state['pause_reason']}")
+-                if state.get("next_action"):
+-                    print(f"Next:   {state['next_action']}")
+-                return 0
+-            except json.JSONDecodeError:
+-                print("Error: state.json is corrupt.")
+-                return 1
+-        print("No runs found. Daemon not running.")
+-        return 1
++    # Collect local state (foreground, orphaned, completed)
++    for state in _find_local_run_summaries():
++        display = _summarize_local_state_for_hint(state)
++        # Skip daemon-managed runs already shown above
++        if any(r["run_id"] == display.get("run_id") for r in daemon_runs):
++            continue
++        if display.get("orphaned_local_state"):
++            orphaned_runs.append(display)
++        elif state.get("controller_mode") == "foreground":
++            foreground_runs.append(display)
++        elif display.get("top_state") == "COMPLETED":
++            pass  # skip completed in status view
++        else:
++            orphaned_runs.append(display)
+ 
+-    found = False
+-    for run_dir in sorted(runs_dir.iterdir()):
+-        state_path = run_dir / "state.json"
+-        if state_path.exists():
+-            try:
+-                state = _summarize_local_state_for_hint(json.loads(state_path.read_text()))
+-                if not found:
+-                    print(f"{'RUN_ID':<20} {'PANE':<20} {'STATE':<18} {'NODE'}")
+-                    found = True
+-                print(f"{state.get('run_id', '?'):<20} {state.get('pane_target', '?'):<20} {state.get('top_state', '?'):<18} {state.get('current_node_id', '')}")
+-                if state.get("status_reason"):
+-                    print(f"  status: {state['status_reason']}")
+-                if state.get("pause_reason"):
+-                    print(f"  reason: {state['pause_reason']}")
+-                if state.get("next_action"):
+-                    print(f"  next:   {state['next_action']}")
+-            except json.JSONDecodeError:
+-                continue
++    if not daemon_runs and not foreground_runs and not orphaned_runs:
++        if client.is_running():
++            print("Daemon running, no active runs.")
++        else:
++            print("No runs found. Daemon not running.")
++        return 0
++
++    if daemon_runs:
++        print("Active runs:")
++        for r in daemon_runs:
++            print(f"  [daemon]  {r['run_id']}  {r['top_state']}  node={r.get('current_node', '')}  pane={r.get('pane_target', '?')}")
++            if r.get("status_reason"):
++                print(f"    status: {r['status_reason']}")
++            if r.get("pause_reason"):
++                print(f"    reason: {r['pause_reason']}")
++            if r.get("next_action"):
++                print(f"    next:   {r['next_action']}")
++
++    if foreground_runs:
++        print("Debug foreground runs:")
++        for r in foreground_runs:
++            print(f"  [foreground]  {r.get('run_id', '?')}  {r.get('top_state', '?')}  node={r.get('current_node_id', '')}  pane={r.get('pane_target', '?')}")
++            if r.get("status_reason"):
++                print(f"    status: {r['status_reason']}")
++
++    if orphaned_runs:
++        print("Orphaned local state:")
++        for r in orphaned_runs:
++            print(f"  [orphaned]  {r.get('run_id', '?')}  {r.get('top_state', '?')}  node={r.get('current_node_id', '')}  pane={r.get('pane_target', '?')}")
++            if r.get("pause_reason"):
++                print(f"    reason: {r['pause_reason']}")
++            if r.get("next_action"):
++                print(f"    next:   {r['next_action']}")
+ 
+-    if not found:
+-        print("No runs found.")
+-        return 1
+     return 0
+ 
+ 
+@@ -1502,6 +1572,182 @@ def cmd_status(args):
+ # ------------------------------------------------------------------
+ 
+ 
++def cmd_dashboard(args):
++    """Interactive dashboard: numbered list of all runs, press a key to inspect."""
++    from supervisor.daemon.client import DaemonClient
++
++    items: list[dict] = []
++
++    # Collect daemon runs
++    client = DaemonClient()
++    if client.is_running():
++        result = client.status()
++        if result.get("ok"):
++            for r in result.get("runs", []):
++                items.append({
++                    "run_id": r["run_id"],
++                    "tag": "daemon",
++                    "state": r["top_state"],
++                    "node": r.get("current_node", ""),
++                    "pane": r.get("pane_target", "?"),
++                })
++
++    # Collect local state
++    for state in _find_local_run_summaries():
++        display = _summarize_local_state_for_hint(state)
++        if any(i["run_id"] == display.get("run_id") for i in items):
++            continue
++        if display.get("orphaned_local_state"):
++            tag = "orphaned"
++        elif state.get("controller_mode") == "foreground":
++            tag = "foreground"
++        else:
++            tag = "local"
++        items.append({
++            "run_id": display.get("run_id", "?"),
++            "tag": tag,
++            "state": display.get("top_state", "?"),
++            "node": display.get("current_node_id", ""),
++            "pane": display.get("pane_target", "?"),
++        })
++
++    # Show daemons header
++    daemons = _list_global_daemons()
++    if daemons:
++        print("Daemons:")
++        for d in daemons:
++            state = d.get("state", "active")
++            idle = d.get("idle_for_sec", 0)
++            idle_str = f"idle {idle}s" if idle > 0 else "active"
++            print(f"  PID={d.get('pid', '?')}  {idle_str}  runs={d.get('active_runs', 0)}  {d.get('cwd', '')}")
++        print()
++
++    if not items:
++        print("No runs found.")
++        return 0
++
++    # Print numbered list
++    print("Runs:")
++    for i, item in enumerate(items, 1):
++        print(f"  {i}. [{item['tag']}]  {item['run_id']}  {item['state']}  node={item['node']}  pane={item['pane']}")
++
++    print(f"\n[1-{len(items)}] inspect  [q] quit")
++
++    # Interactive loop
++    while True:
++        try:
++            choice = input("> ").strip().lower()
++        except (EOFError, KeyboardInterrupt):
++            break
++        if choice in ("q", "quit", ""):
++            break
++        try:
++            idx = int(choice) - 1
++            if 0 <= idx < len(items):
++                _inspect_run(items[idx], args)
++                # Re-show the list
++                print()
++                for i, item in enumerate(items, 1):
++                    print(f"  {i}. [{item['tag']}]  {item['run_id']}  {item['state']}  node={item['node']}  pane={item['pane']}")
++                print(f"\n[1-{len(items)}] inspect  [q] quit")
++            else:
++                print(f"  Invalid: choose 1-{len(items)}")
++        except ValueError:
++            print(f"  Invalid: choose 1-{len(items)} or q")
++
++    return 0
++
++
++def _inspect_run(item: dict, args) -> None:
++    """Print detailed info for a single run."""
++    run_id = item["run_id"]
++    tag = item["tag"]
++    print(f"\n{'='*60}")
++    print(f"Run:        {run_id}")
++    print(f"Controller: {tag}")
++    print(f"State:      {item['state']}")
++    print(f"Node:       {item['node']}")
++    print(f"Pane:       {item['pane']}")
++
++    # Try to load session events
++    run_dir = Path(RUNTIME_DIR) / "runs" / run_id
++    state_path = run_dir / "state.json"
++    session_path = run_dir / "session_log.jsonl"
++
++    if state_path.exists():
++        try:
++            state = json.loads(state_path.read_text())
++            print(f"Delivery:   {state.get('delivery_state', 'IDLE')}")
++            print(f"Spec:       {state.get('spec_path', '?')}")
++            print(f"Checkpoint: seq={state.get('checkpoint_seq', 0)}")
++            escalations = state.get("human_escalations", [])
++            if escalations:
++                last = escalations[-1] if isinstance(escalations[-1], dict) else {"reason": str(escalations[-1])}
++                print(f"Last pause: {last.get('reason', '?')}")
++        except (json.JSONDecodeError, OSError):
++            pass
++
++    if session_path.exists():
++        try:
++            lines = session_path.read_text().strip().splitlines()
++            recent = lines[-5:] if len(lines) > 5 else lines
++            print(f"\nRecent events ({len(lines)} total):")
++            for line in recent:
++                evt = json.loads(line)
++                print(f"  [{evt.get('event_type', '?')}] {evt.get('timestamp', '')[:19]}")
++        except (json.JSONDecodeError, OSError):
++            pass
++
++    print(f"{'='*60}")
++
++
++def cmd_bootstrap(args):
++    """Run full zero-setup bootstrap and print step results."""
++    from supervisor.bootstrap import bootstrap
++
++    result = bootstrap()
++    for step in result.steps:
++        icon = "ok" if step["status"] == "ok" else ("skip" if step["status"] == "skipped" else "FAIL")
++        print(f"  [{icon}] {step['name']}: {step['message']}")
++    if result.missing_credentials:
++        print(f"\n  Optional: {len(result.missing_credentials)} credential(s) not configured")
++        for cred in result.missing_credentials:
++            print(f"    - {cred['key']}: {cred['description']}")
++            print(f"      Set with: thin-supervisor config set --key {cred['key']} --value <value>")
++    if result.ok:
++        print(f"\nReady. pane={result.pane_target} surface={result.surface_type}")
++    else:
++        print(f"\nBootstrap failed: {result.error}")
++        if result.conflict:
++            mode = result.conflict.get("controller_mode", "unknown")
++            run_id = result.conflict.get("run_id", "?")
++            print(f"\n  Existing run: {run_id} (controller: {mode})")
++            if mode == "daemon":
++                print(f"  Observe:  thin-supervisor observe {run_id}")
++                print(f"  Stop:     thin-supervisor run stop {run_id}")
++            elif mode == "foreground":
++                pid = result.conflict.get("pid", "?")
++                print(f"  Stop:     kill {pid}  # foreground debug process")
++    return 0 if result.ok else 1
++
++
++def cmd_config_set(args):
++    """Set a config value in global or project scope."""
++    from dataclasses import fields as dc_fields
++    from supervisor.config import RuntimeConfig, coerce_config_value
++    from supervisor.credentials import persist_credential
++
++    known = {f.name for f in dc_fields(RuntimeConfig)}
++    if args.key not in known:
++        print(f"Error: unknown config key '{args.key}'")
++        return 1
++
++    value = coerce_config_value(args.key, args.value)
++    persist_credential(args.key, value, scope=args.scope)
++    print(f"Saved {args.key} to {args.scope} config.")
++    return 0
++
++
+ def cmd_bridge(args):
+     """Tmux pane operations (read, type, keys, list, id, doctor)."""
+     from supervisor.terminal.adapter import TerminalAdapter, TerminalAdapterError
+@@ -1808,7 +2054,7 @@ def build_runtime_parser() -> argparse.ArgumentParser:
+     p_register.add_argument("--surface", default=None, help="Override surface type (tmux|open_relay|jsonl)")
+     p_register.add_argument("--config", default=None)
+ 
+-    p_foreground = run_sub.add_parser("foreground", help="Run sidecar in foreground")
++    p_foreground = run_sub.add_parser("foreground", help="Run sidecar in foreground (debug only)")
+     p_foreground.add_argument("--spec", required=True, help="Path to spec YAML")
+     p_foreground.add_argument("--pane", default=None, help="Surface target")
+     p_foreground.add_argument("--target", default=None, help="Alias for --pane")
+@@ -1902,6 +2148,16 @@ def build_runtime_parser() -> argparse.ArgumentParser:
+     p_bridge.add_argument("target", nargs="?", default=None)
+     p_bridge.add_argument("extra", nargs="*")
+ 
++    sub.add_parser("bootstrap", help="Auto-detect, init, start daemon, and validate surface")
++    sub.add_parser("dashboard", help="Interactive run dashboard — numbered list with drill-in")
++
++    p_config = sub.add_parser("config", help="Read or write config values")
++    config_sub = p_config.add_subparsers(dest="config_action")
++    p_config_set = config_sub.add_parser("set", help="Set a config value")
++    p_config_set.add_argument("--key", required=True, help="Config key name")
++    p_config_set.add_argument("--value", required=True, help="Value to set")
++    p_config_set.add_argument("--scope", choices=["global", "project"], default="global", help="Config scope")
++
+     return parser
+ 
+ 
+@@ -2018,6 +2274,16 @@ def main():
+         sys.exit(cmd_status(args))
+     elif args.command == "bridge":
+         sys.exit(cmd_bridge(args))
++    elif args.command == "bootstrap":
++        sys.exit(cmd_bootstrap(args))
++    elif args.command == "dashboard":
++        sys.exit(cmd_dashboard(args))
++    elif args.command == "config":
++        if args.config_action == "set":
++            sys.exit(cmd_config_set(args))
++        else:
++            print("Usage: thin-supervisor config {set}")
++            sys.exit(1)
+     else:
+         parser.print_help()
+         sys.exit(0)
+diff --git a/supervisor/bootstrap.py b/supervisor/bootstrap.py
+new file mode 100644
+index 0000000..d6d343f
+--- /dev/null
++++ b/supervisor/bootstrap.py
+@@ -0,0 +1,235 @@
++"""Zero-setup bootstrap: auto-detect, init, start daemon, validate surface."""
++from __future__ import annotations
++
++import os
++import logging
++from dataclasses import dataclass, field
++from pathlib import Path
++
++from supervisor.config import RuntimeConfig
++
++logger = logging.getLogger(__name__)
++
++CONFIG_FILE = ".supervisor/config.yaml"
++SUPERVISOR_DIR = ".supervisor"
++
++
++@dataclass
++class BootstrapResult:
++    ok: bool = True
++    steps: list[dict] = field(default_factory=list)
++    config: RuntimeConfig | None = None
++    pane_target: str = ""
++    surface_type: str = ""
++    missing_credentials: list[dict] = field(default_factory=list)
++    error: str = ""
++    conflict: dict = field(default_factory=dict)  # {run_id, controller_mode, spec_path, suggested_action}
++
++
++def _step(name: str, status: str, message: str) -> dict:
++    return {"name": name, "status": status, "message": message}
++
++
++def bootstrap(cwd: str | None = None) -> BootstrapResult:
++    """Full bootstrap: tmux check → init/repair → config → daemon → pane detect.
++
++    Returns a BootstrapResult with step-by-step outcomes. On failure,
++    result.ok is False and result.error describes what went wrong.
++    """
++    result = BootstrapResult()
++    original_cwd = os.getcwd()
++    if cwd:
++        os.chdir(cwd)
++
++    try:
++        _do_bootstrap(result)
++    finally:
++        if cwd:
++            os.chdir(original_cwd)
++
++    return result
++
++
++def _do_bootstrap(result: BootstrapResult) -> None:
++    # Step 1: tmux check
++    tmux_env = os.environ.get("TMUX", "")
++    if not tmux_env:
++        result.steps.append(_step("tmux_check", "failed", "not inside a tmux session"))
++        result.ok = False
++        result.error = "must run inside a tmux session ($TMUX not set)"
++        return
++    result.steps.append(_step("tmux_check", "ok", "inside tmux"))
++
++    # Step 2: init/repair
++    supervisor_dir = Path(SUPERVISOR_DIR)
++    if supervisor_dir.exists():
++        result.steps.append(_step("init_repair", "skipped", ".supervisor/ already exists"))
++    else:
++        try:
++            _auto_init()
++            result.steps.append(_step("init_repair", "ok", "created .supervisor/"))
++        except Exception as exc:
++            result.steps.append(_step("init_repair", "failed", str(exc)))
++            result.ok = False
++            result.error = f"auto-init failed: {exc}"
++            return
++
++    # Step 3: config load
++    try:
++        config = RuntimeConfig.load(CONFIG_FILE)
++        result.config = config
++        result.steps.append(_step("config_load", "ok", "config loaded"))
++    except Exception as exc:
++        result.steps.append(_step("config_load", "failed", str(exc)))
++        result.ok = False
++        result.error = f"config load failed: {exc}"
++        return
++
++    # Step 4: daemon ensure
++    try:
++        _ensure_daemon_running(config)
++        result.steps.append(_step("daemon_ensure", "ok", "daemon running"))
++    except Exception as exc:
++        result.steps.append(_step("daemon_ensure", "failed", str(exc)))
++        result.ok = False
++        result.error = f"daemon start failed: {exc}"
++        return
++
++    # Step 5: pane detect + validate
++    pane = os.environ.get("TMUX_PANE", "")
++    if not pane:
++        result.steps.append(_step("pane_detect", "failed", "$TMUX_PANE not set"))
++        result.ok = False
++        result.error = "could not detect tmux pane ($TMUX_PANE not set)"
++        return
++    result.pane_target = pane
++    result.surface_type = config.surface_type or "tmux"
++
++    # Validate pane is accessible and not locked by another run
++    pane_issue, pane_conflict = _validate_pane(pane)
++    if pane_issue:
++        result.steps.append(_step("pane_detect", "failed", pane_issue))
++        result.ok = False
++        result.error = pane_issue
++        if pane_conflict:
++            result.conflict = pane_conflict
++        return
++    result.steps.append(_step("pane_detect", "ok", f"pane={pane}"))
++
++    # Step 6: credential check (optional, does not block)
++    from supervisor.credentials import resolve_credentials
++    missing = resolve_credentials(config)
++    result.missing_credentials = [
++        {"key": m.key, "description": m.description, "scope": m.scope}
++        for m in missing
++    ]
++    if missing:
++        result.steps.append(_step(
++            "credentials", "ok",
++            f"{len(missing)} optional credential(s) not configured",
++        ))
++    else:
++        result.steps.append(_step("credentials", "ok", "all credentials configured"))
++
++
++def _auto_init() -> None:
++    """Minimal init — create scaffold without requiring argparse."""
++    base = Path(SUPERVISOR_DIR)
++    base.mkdir(parents=True, exist_ok=True)
++    (base / "runtime").mkdir(parents=True, exist_ok=True)
++    (base / "specs").mkdir(parents=True, exist_ok=True)
++    (base / "clarify").mkdir(parents=True, exist_ok=True)
++    (base / "plans").mkdir(parents=True, exist_ok=True)
++
++    config_path = Path(CONFIG_FILE)
++    if not config_path.exists():
++        # Write minimal config — don't set inheritable fields so global config flows through
++        config_path.write_text(
++            "# thin-supervisor config\n"
++            "# Project-local settings. Global defaults: ~/.config/thin-supervisor/defaults.yaml\n"
++            "surface_type: tmux\n",
++            encoding="utf-8",
++        )
++
++    # Append to .gitignore if present
++    gitignore = Path(".gitignore")
++    if gitignore.exists():
++        content = gitignore.read_text()
++        if ".supervisor/runtime" not in content:
++            with gitignore.open("a") as f:
++                f.write("\n.supervisor/runtime/\n")
++
++
++def _validate_pane(pane: str) -> tuple[str | None, dict | None]:
++    """Validate pane accessibility and ownership.
++
++    Returns (issue_string, conflict_metadata) — both None if ok.
++    """
++    # Check pane is actually accessible via tmux
++    try:
++        import subprocess
++        result = subprocess.run(
++            ["tmux", "display-message", "-t", pane, "-p", "#{pane_id}"],
++            capture_output=True, text=True, timeout=5,
++        )
++        if result.returncode != 0:
++            return f"pane {pane} is not accessible: {result.stderr.strip()}", None
++    except FileNotFoundError:
++        return "tmux command not found", None
++    except Exception as exc:
++        return f"pane validation failed: {exc}", None
++
++    # Check pane is not locked by another run
++    try:
++        from supervisor.global_registry import find_pane_owner
++        owner = find_pane_owner(pane)
++        if owner:
++            mode = owner.get("controller_mode", "unknown")
++            run_id = owner.get("run_id", "?")
++            spec = owner.get("spec_path", "?")
++            conflict = {
++                "run_id": run_id,
++                "controller_mode": mode,
++                "spec_path": spec,
++                "pid": owner.get("pid"),
++            }
++            if mode == "foreground":
++                fg_pid = owner.get("pid", "?")
++                conflict["suggested_action"] = f"kill {fg_pid}  # stop foreground debug run {run_id}"
++                return (
++                    f"pane {pane} is owned by foreground debug run {run_id} "
++                    f"(spec: {spec}); stop the foreground run or use a different pane"
++                ), conflict
++            conflict["suggested_action"] = f"thin-supervisor observe {run_id}"
++            return (
++                f"pane {pane} is owned by daemon run {run_id} (spec: {spec}); "
++                f"use 'thin-supervisor observe {run_id}' to watch or "
++                f"'thin-supervisor run stop {run_id}' to release"
++            ), conflict
++    except Exception:
++        pass  # registry check is best-effort
++
++    return None, None
++
++
++def _ensure_daemon_running(config: RuntimeConfig | None = None) -> None:
++    """Ensure daemon is running, auto-start if needed."""
++    from supervisor.daemon.client import DaemonClient
++
++    client = DaemonClient()
++    if client.is_running():
++        return
++
++    import time
++    from supervisor.app import _fork_daemon
++
++    if config is None:
++        config = RuntimeConfig.load(CONFIG_FILE)
++    _fork_daemon(config)
++
++    for _ in range(30):
++        time.sleep(0.2)
++        if client.is_running():
++            return
++
++    raise RuntimeError("daemon did not start within 6s")
+diff --git a/supervisor/config.py b/supervisor/config.py
+index f9c554a..47c33c7 100644
+--- a/supervisor/config.py
++++ b/supervisor/config.py
+@@ -1,12 +1,78 @@
+ """Runtime configuration with file / env / defaults layering."""
+ from __future__ import annotations
+ 
++import os
++import tempfile
+ from dataclasses import dataclass, field, fields
+ from pathlib import Path
+ 
+ import yaml
+ 
+ 
++# Global config directory (overridable for testing)
++_GLOBAL_CONFIG_ENV = "THIN_SUPERVISOR_GLOBAL_CONFIG"
++
++# Fields safe to inherit from global config into any project
++_GLOBAL_INHERITABLE = frozenset({
++    "worker_provider", "worker_model", "judge_model",
++    "judge_temperature", "judge_max_tokens", "worker_trust_level",
++    "notification_channels", "pause_handling_mode", "max_auto_interventions",
++    "poll_interval_sec", "read_lines",
++})
++
++
++def global_config_path() -> Path:
++    """Return the global defaults config path."""
++    env = os.environ.get(_GLOBAL_CONFIG_ENV, "").strip()
++    if env:
++        return Path(env)
++    return Path.home() / ".config" / "thin-supervisor" / "defaults.yaml"
++
++
++def _update_config_file(path: Path, key: str, value) -> Path:
++    """Read-modify-write a single key in a YAML config file (atomic)."""
++    path.parent.mkdir(parents=True, exist_ok=True)
++    data = {}
++    if path.exists():
++        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
++    data[key] = value
++    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".yaml")
++    try:
++        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
++            yaml.safe_dump(data, f, default_flow_style=False)
++        os.replace(tmp_path, str(path))
++    except Exception:
++        os.unlink(tmp_path)
++        raise
++    return path
++
++
++def save_global_config(key: str, value) -> Path:
++    """Write a single key to the global config, creating it if needed."""
++    return _update_config_file(global_config_path(), key, value)
++
++
++def save_project_config(key: str, value, project_dir: str | Path = ".") -> Path:
++    """Write a single key to the project config."""
++    path = Path(project_dir) / ".supervisor" / "config.yaml"
++    return _update_config_file(path, key, value)
++
++
++def coerce_config_value(key: str, value: str):
++    """Coerce a string value to the correct type for a RuntimeConfig field."""
++    known = {f.name: f for f in fields(RuntimeConfig)}
++    if key not in known:
++        return value
++    ftype = known[key].type
++    if value.lower() in ("null", "none", "~"):
++        return None
++    if ftype in ("float", float):
++        return float(value)
++    if ftype in ("int", int):
++        return int(value)
++    return value
++
++
+ @dataclass
+ class RuntimeConfig:
+     # -- Execution Surface --
+@@ -63,8 +129,6 @@ class RuntimeConfig:
+     @classmethod
+     def from_env(cls, prefix: str = "SUPERVISOR_") -> "RuntimeConfig":
+         """Build config from ``SUPERVISOR_*`` environment variables."""
+-        import os
+-
+         data: dict = {}
+         known = {f.name: f for f in fields(cls)}
+         for key, val in os.environ.items():
+@@ -84,16 +148,33 @@ class RuntimeConfig:
+ 
+     @classmethod
+     def load(cls, config_path: str | Path | None = None) -> "RuntimeConfig":
+-        """Load with priority: *config_path* → env → defaults.
++        """Load with priority: defaults → global (inheritable) → project → env.
+ 
+-        Values from the file are applied first, then env vars override.
++        Global config applies only inheritable fields. Project config applies
++        all fields. Environment variables override everything.
+         """
+         base = cls()
+-        if config_path and Path(config_path).exists():
+-            base = cls.from_file(config_path)
+-        # Overlay env vars
+-        import os
+         known = {f.name: f for f in fields(cls)}
++
++        # 1. Global config — inheritable fields only
++        gpath = global_config_path()
++        if gpath.exists():
++            try:
++                gdata = yaml.safe_load(gpath.read_text(encoding="utf-8")) or {}
++                for k, v in gdata.items():
++                    if k in known and k in _GLOBAL_INHERITABLE:
++                        setattr(base, k, v)
++            except Exception:
++                pass  # corrupt global config — skip silently
++
++        # 2. Project config — all fields
++        if config_path and Path(config_path).exists():
++            pdata = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
++            for k, v in pdata.items():
++                if k in known:
++                    setattr(base, k, v)
++
++        # 3. Env vars override everything
+         prefix = "SUPERVISOR_"
+         for key, val in os.environ.items():
+             if not key.startswith(prefix):
+diff --git a/supervisor/credentials.py b/supervisor/credentials.py
+new file mode 100644
+index 0000000..891c6e4
+--- /dev/null
++++ b/supervisor/credentials.py
+@@ -0,0 +1,69 @@
++"""Credential resolution and persistence for runtime config."""
++from __future__ import annotations
++
++from dataclasses import dataclass
++
++from supervisor.config import RuntimeConfig, save_global_config, save_project_config
++
++
++@dataclass
++class MissingCredential:
++    key: str
++    description: str
++    required: bool
++    scope: str  # "global" | "project"
++
++
++# Known credentials that may need user input.
++# required=False means the system can run in degraded mode without them.
++CREDENTIAL_SPECS = [
++    {
++        "key": "worker_provider",
++        "description": "Worker provider (anthropic, openai, minimax)",
++        "default_value": "unknown",
++        "required": False,
++        "scope": "global",
++    },
++    {
++        "key": "worker_model",
++        "description": "Worker model name (e.g. claude-opus-4-6)",
++        "default_value": "",
++        "required": False,
++        "scope": "global",
++    },
++    {
++        "key": "judge_model",
++        "description": "LLM judge model (e.g. anthropic/claude-haiku-4-5-20251001, or null for stub mode)",
++        "default_value": None,
++        "required": False,
++        "scope": "global",
++    },
++]
++
++
++def resolve_credentials(config: RuntimeConfig) -> list[MissingCredential]:
++    """Return credentials that are missing or still at defaults."""
++    missing = []
++    for spec in CREDENTIAL_SPECS:
++        current = getattr(config, spec["key"], None)
++        if current == spec["default_value"]:
++            missing.append(MissingCredential(
++                key=spec["key"],
++                description=spec["description"],
++                required=spec["required"],
++                scope=spec["scope"],
++            ))
++    return missing
++
++
++def persist_credential(
++    key: str,
++    value,
++    scope: str = "global",
++    project_dir: str = ".",
++) -> None:
++    """Write a credential to the appropriate config file."""
++    if scope == "global":
++        save_global_config(key, value)
++    else:
++        save_project_config(key, value, project_dir=project_dir)
+diff --git a/supervisor/daemon/server.py b/supervisor/daemon/server.py
+index 3bd16b4..8034474 100644
+--- a/supervisor/daemon/server.py
++++ b/supervisor/daemon/server.py
+@@ -11,10 +11,11 @@ import os
+ import signal
+ import socket
+ import threading
++import time
+ import uuid
+ from pathlib import Path
+ 
+-from supervisor.domain.enums import TopState
++from supervisor.domain.enums import DeliveryState, TopState
+ from supervisor.domain.models import SupervisorState
+ from supervisor.plan.loader import load_spec
+ from supervisor.storage.state_store import StateStore
+@@ -86,19 +87,27 @@ class RunEntry:
+             return None
+ 
+ 
++DEFAULT_IDLE_SHUTDOWN_SEC = 600  # 10 minutes
++
++
+ class DaemonServer:
+     """Single-process daemon managing multiple supervisor runs."""
+ 
+     def __init__(self, config: RuntimeConfig | None = None, *,
+-                 sock_path: str = "", pid_path: str = "", runs_dir: str = ""):
++                 sock_path: str = "", pid_path: str = "", runs_dir: str = "",
++                 idle_shutdown_sec: int | None = None):
+         self.config = config or RuntimeConfig()
+         self.sock_path = sock_path or DEFAULT_SOCK_PATH
+         self.pid_path = pid_path or DEFAULT_PID_PATH
+         self.runs_dir = runs_dir or DEFAULT_RUNS_DIR
++        self.idle_shutdown_sec = idle_shutdown_sec if idle_shutdown_sec is not None else DEFAULT_IDLE_SHUTDOWN_SEC
+         self._runs: dict[str, RunEntry] = {}
+         self._lock = threading.Lock()
+         self._shutdown = threading.Event()
+         self._sock: socket.socket | None = None
++        self._started_at = time.time()
++        self._last_run_finished_at: float = 0
++        self._last_client_contact_at: float = time.time()
+ 
+     def start(self) -> None:
+         """Start the daemon: bind socket, write PID, accept connections."""
+@@ -153,14 +162,31 @@ class DaemonServer:
+                 continue
+ 
+             previous_top_state = state_data.get("top_state", state.top_state.value)
++            delivery = state_data.get("delivery_state", DeliveryState.IDLE)
+             transition_top_state(state, TopState.PAUSED_FOR_HUMAN, reason="daemon startup orphan recovery")
+-            state.human_escalations.append({
+-                "reason": (
++            if delivery in (DeliveryState.INJECTED, DeliveryState.SUBMITTED):
++                recovery_detail = (
++                    f"daemon restarted while delivery was in progress "
++                    f"(delivery_state={delivery}, top_state={previous_top_state}); "
++                    "instruction may not have been processed — explicit resume required"
++                )
++            elif delivery == DeliveryState.TIMED_OUT:
++                recovery_detail = (
++                    f"daemon restarted after delivery timeout "
++                    f"(top_state={previous_top_state}); "
++                    "check agent state before resuming"
++                )
++            else:
++                recovery_detail = (
+                     f"daemon restarted while the run was in progress "
+                     f"({previous_top_state}); "
+                     "explicit resume is required"
+-                ),
++                )
++            state.delivery_state = DeliveryState.IDLE
++            state.human_escalations.append({
++                "reason": recovery_detail,
+                 "orphaned_from": previous_top_state,
++                "delivery_state_at_crash": delivery,
+             })
+             store = StateStore(str(run_dir))
+             store._session_seq = store._read_last_seq()
+@@ -169,6 +195,7 @@ class DaemonServer:
+                 "orphaned_run_recovered",
+                 {
+                     "previous_top_state": previous_top_state,
++                    "delivery_state_at_crash": delivery,
+                     "reason": state.human_escalations[-1]["reason"],
+                 },
+             )
+@@ -183,9 +210,11 @@ class DaemonServer:
+                 conn, _ = self._sock.accept()
+             except socket.timeout:
+                 self._reap_finished()
++                self._check_idle_shutdown()
+                 continue
+             except OSError:
+                 break
++            self._last_client_contact_at = time.time()
+             try:
+                 conn.settimeout(10)
+                 self._handle_connection(conn)
+@@ -448,6 +477,7 @@ class DaemonServer:
+                         return {"ok": False, "error": f"pane {pane_target} locked by {existing_owner}"}
+                     if state.top_state == TopState.PAUSED_FOR_HUMAN:
+                         transition_top_state(state, TopState.RUNNING, reason="resume requested")
++                        state.delivery_state = DeliveryState.IDLE
+                         state.auto_intervention_count = 0
+                         state.node_mismatch_count = 0
+                         state.last_mismatch_node_id = ""
+@@ -705,12 +735,29 @@ class DaemonServer:
+ 
+         # Phase 3: remove from registry (under lock)
+         if reaped:
++            self._last_run_finished_at = time.time()
+             with self._lock:
+                 for rid in reaped:
+                     self._runs.pop(rid, None)
+                 self._update_daemon_record_locked()
+             logger.info("reaped %d finished run(s)", len(reaped))
+ 
++    def _check_idle_shutdown(self) -> None:
++        """Auto-shutdown if idle for too long with zero active runs."""
++        if self.idle_shutdown_sec <= 0:
++            return
++        with self._lock:
++            active = len(self._runs)
++        if active > 0:
++            return
++        now = time.time()
++        last_activity = max(self._last_run_finished_at, self._last_client_contact_at, self._started_at)
++        idle_for = now - last_activity
++        if idle_for >= self.idle_shutdown_sec:
++            logger.info("idle shutdown: no active runs for %.0fs (threshold=%ds)", idle_for, self.idle_shutdown_sec)
++            update_daemon(self.sock_path, state="shutting_down", idle_for_sec=int(idle_for))
++            self._shutdown.set()
++
+     def _handle_sigterm(self, signum, frame):
+         logger.info("SIGTERM received, shutting down")
+         self._shutdown.set()
+@@ -737,14 +784,15 @@ class DaemonServer:
+         conn.sendall((json.dumps(data) + "\n").encode("utf-8"))
+ 
+     def _daemon_metadata(self) -> dict:
++        from datetime import datetime, timezone
+         return {
+             "pid": os.getpid(),
+             "cwd": os.getcwd(),
+             "socket": self.sock_path,
+-            "started_at": __import__("datetime").datetime.now(
+-                __import__("datetime").timezone.utc
+-            ).isoformat(),
++            "started_at": datetime.now(timezone.utc).isoformat(),
+             "active_runs": len(self._runs),
++            "state": "active" if self._runs else "idle",
++            "idle_shutdown_sec": self.idle_shutdown_sec,
+         }
+ 
+     def _pane_owner_metadata(self, run_id: str, spec_path: str,
+@@ -756,12 +804,17 @@ class DaemonServer:
+             "run_id": run_id,
+             "pane_target": pane_target,
+             "spec_path": spec_path,
++            "controller_mode": "daemon",
+         }
+ 
+     def _update_daemon_record_locked(self) -> None:
++        now = time.time()
++        last_activity = max(self._last_run_finished_at, self._last_client_contact_at, self._started_at)
+         update_daemon(
+             self.sock_path,
+             pid=os.getpid(),
+             cwd=os.getcwd(),
+             active_runs=len(self._runs),
++            state="active" if self._runs else "idle",
++            idle_for_sec=int(now - last_activity) if not self._runs else 0,
+         )
+diff --git a/supervisor/domain/enums.py b/supervisor/domain/enums.py
+index 022856a..6796a51 100644
+--- a/supervisor/domain/enums.py
++++ b/supervisor/domain/enums.py
+@@ -10,6 +10,15 @@ class TopState(str, Enum):
+     FAILED = "FAILED"
+     ABORTED = "ABORTED"
+ 
++class DeliveryState(str, Enum):
++    IDLE = "IDLE"                         # no pending injection
++    INJECTED = "INJECTED"                 # send-keys completed
++    SUBMITTED = "SUBMITTED"               # text left input area (clean snapshot)
++    ACKNOWLEDGED = "ACKNOWLEDGED"         # agent shows processing indicators
++    STARTED_PROCESSING = "STARTED_PROCESSING"  # checkpoint with seq > injection seq
++    FAILED = "FAILED"                     # injection error or observation-only
++    TIMED_OUT = "TIMED_OUT"               # 60s passed, no checkpoint
++
+ class DecisionType(str, Enum):
+     CONTINUE = "CONTINUE"
+     RETRY = "RETRY"
+diff --git a/supervisor/domain/models.py b/supervisor/domain/models.py
+index 3fc2790..a87d67c 100644
+--- a/supervisor/domain/models.py
++++ b/supervisor/domain/models.py
+@@ -322,6 +322,7 @@ class SupervisorState:
+     last_injected_attempt: int = -1
+     # Delivery acknowledgement tracking
+     last_injection_seq: int = 0
++    delivery_state: str = "IDLE"
+     # P0-C: checkpoint sequence tracking
+     checkpoint_seq: int = 0
+     # P1-D: resume validation
+@@ -365,6 +366,7 @@ class SupervisorState:
+             last_injected_node_id=data.get("last_injected_node_id"),
+             last_injected_attempt=data.get("last_injected_attempt", -1),
+             last_injection_seq=data.get("last_injection_seq", 0),
++            delivery_state=data.get("delivery_state", "IDLE"),
+             checkpoint_seq=data.get("checkpoint_seq", 0),
+             spec_path=data.get("spec_path", ""),
+             spec_hash=data.get("spec_hash", ""),
+diff --git a/supervisor/global_registry.py b/supervisor/global_registry.py
+index 31f9209..e64e8a2 100644
+--- a/supervisor/global_registry.py
++++ b/supervisor/global_registry.py
+@@ -111,6 +111,22 @@ def list_daemons() -> list[dict]:
+     return sorted(records, key=lambda item: (item.get("cwd", ""), item.get("socket", "")))
+ 
+ 
++def list_pane_owners() -> list[dict]:
++    """List all active pane locks (stale locks with dead PIDs are cleaned up)."""
++    records: list[dict] = []
++    panes_dir = _panes_dir()
++    for path in sorted(panes_dir.glob("*.json")):
++        record = _read_json(path)
++        if not record:
++            path.unlink(missing_ok=True)
++            continue
++        if not _pid_alive(record.get("pid")):
++            path.unlink(missing_ok=True)
++            continue
++        records.append(record)
++    return records
++
++
+ def find_pane_owner(pane_target: str) -> dict | None:
+     path = _pane_path(pane_target)
+     owner = _read_json(path)
+diff --git a/supervisor/loop.py b/supervisor/loop.py
+index 97fb4a0..eea77b9 100644
+--- a/supervisor/loop.py
++++ b/supervisor/loop.py
+@@ -4,7 +4,7 @@ import logging
+ import signal
+ import time
+ 
+-from supervisor.domain.enums import TopState, DecisionType
++from supervisor.domain.enums import DeliveryState, TopState, DecisionType
+ from supervisor.domain.models import (
+     Checkpoint, SupervisorDecision, HandoffInstruction,
+     WorkerProfile, SupervisionPolicy, RoutingDecision, AcceptanceContract,
+@@ -276,6 +276,17 @@ class SupervisorLoop:
+         else:
+             transition_top_state(state, TopState.RUNNING, reason="verification failed but retry budget remains")
+ 
++    def _set_delivery_state(self, state, new_state, *, reason: str = "") -> None:
++        value = new_state.value if isinstance(new_state, DeliveryState) else str(new_state)
++        old = state.delivery_state
++        if old == value:
++            return
++        state.delivery_state = value
++        self.store.append_session_event(
++            state.run_id, "delivery_state_change",
++            {"from": old, "to": value, "reason": reason},
++        )
++
+     def _pause_for_human(self, state, payload: dict | None = None) -> dict:
+         details = dict(payload or {})
+         transition_top_state(state, TopState.PAUSED_FOR_HUMAN, reason="paused for human")
+@@ -296,6 +307,7 @@ class SupervisorLoop:
+             spec_path=state.spec_path,
+             workspace_root=state.workspace_root,
+             surface_type=state.surface_type,
++            delivery_state=state.delivery_state,
+         ))
+         return event_payload
+ 
+@@ -317,18 +329,23 @@ class SupervisorLoop:
+             spec_path=state.spec_path,
+             workspace_root=state.workspace_root,
+             surface_type=state.surface_type,
++            delivery_state=state.delivery_state,
+         ))
+ 
+     def _attempt_auto_intervention(self, spec, state, terminal, payload: dict | None) -> bool:
+         plan = self.auto_intervention_manager.maybe_plan(spec, state, payload or {}, terminal)
+         if not plan:
+             return False
++        self._set_delivery_state(state, DeliveryState.INJECTED, reason="auto intervention")
+         try:
+             terminal.inject(plan.instruction)
+         except Exception:
+             logger.exception("auto intervention injection failed")
++            self._set_delivery_state(state, DeliveryState.FAILED, reason="auto intervention inject failed")
+             return False
+ 
++        adapter_state = getattr(terminal, "last_delivery_state", None) or DeliveryState.SUBMITTED
++        self._set_delivery_state(state, adapter_state, reason="auto intervention confirmed")
+         state.auto_intervention_count += 1
+         transition_top_state(state, TopState.RUNNING, reason="auto intervention requested")
+         record = {
+@@ -348,6 +365,7 @@ class SupervisorLoop:
+             spec_path=state.spec_path,
+             workspace_root=state.workspace_root,
+             surface_type=state.surface_type,
++            delivery_state=state.delivery_state,
+         ))
+         self.store.save(state)
+         return True
+@@ -457,10 +475,13 @@ class SupervisorLoop:
+             transition_top_state(state, TopState.RUNNING, reason="initial handoff")
+             self.store.save(state)
+             pending_text = terminal.read(lines=read_lines)
+-            cp = adapter.parse_checkpoint(pending_text, run_id=state.run_id, surface_id=surface_id)
+-            # #2: validate run_id on startup to avoid stale pane content
++            # Only look at the tail of the pane for an init checkpoint.
++            # Full pane text may contain stale checkpoints from previous runs
++            # that would falsely suppress the init inject.
++            tail_text = "\n".join(pending_text.splitlines()[-50:]) if pending_text else ""
++            cp = adapter.parse_checkpoint(tail_text, run_id=state.run_id, surface_id=surface_id)
+             if cp and cp.run_id and cp.run_id != state.run_id:
+-                cp = None  # stale checkpoint from previous run
++                cp = None  # checkpoint from a different run
+             if cp:
+                 # The pane/session is already emitting progress for the current
+                 # node, so avoid re-injecting the same instruction on the first
+@@ -481,9 +502,11 @@ class SupervisorLoop:
+                     )
+                     state.last_injected_node_id = state.current_node_id
+                     state.last_injected_attempt = 0
++                    state.last_injection_seq = state.checkpoint_seq
+                     self.store.save(state)
+                     if not self._inject_or_pause(state, terminal, instruction):
+                         return
++                    delivery_ack_deadline = time.monotonic() + DELIVERY_ACK_TIMEOUT
+                 pending_text = None
+ 
+         while not self.is_final(state) and state.top_state != TopState.PAUSED_FOR_HUMAN:
+@@ -491,21 +514,28 @@ class SupervisorLoop:
+                 self.store.save(state)
+                 return
+ 
++            # Cache monotonic time for this iteration
++            now = time.monotonic()
++
+             # Delivery ack timeout: if we injected but no checkpoint arrived
+             if (delivery_ack_deadline > 0
+-                    and time.monotonic() > delivery_ack_deadline
++                    and now > delivery_ack_deadline
+                     and state.checkpoint_seq <= state.last_injection_seq):
++                self._set_delivery_state(state, DeliveryState.TIMED_OUT, reason="no checkpoint after injection")
+                 payload = {
+                     "reason": "no checkpoint received within delivery timeout after injection",
+                     "node_id": state.current_node_id,
+                     "timeout_sec": DELIVERY_ACK_TIMEOUT,
+                     "injection_seq": state.last_injection_seq,
++                    "delivery_state": state.delivery_state,
+                 }
+                 self.store.append_session_event(state.run_id, "delivery_ack_timeout", payload)
+                 logger.warning("delivery ack timeout: no checkpoint after injection for %ds", DELIVERY_ACK_TIMEOUT)
+                 pause_payload = self._pause_for_human(state, payload)
+                 if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
+-                    delivery_ack_deadline = 0
++                    # Auto-intervention injected a new instruction — reset tracking
++                    state.last_injection_seq = state.checkpoint_seq
++                    delivery_ack_deadline = now + DELIVERY_ACK_TIMEOUT
+                     self.store.save(state)
+                     continue
+                 self.store.save(state)
+@@ -520,13 +550,13 @@ class SupervisorLoop:
+                 continue
+             pending_text = None
+             if text:
+-                last_activity_at = time.monotonic()
++                last_activity_at = now
+ 
+             # 2. Parse checkpoint with identity
+             checkpoints = adapter.parse_checkpoints(text, run_id=state.run_id, surface_id=surface_id)
+             if not checkpoints:
+                 if effective_idle_timeout_sec and effective_idle_timeout_sec > 0:
+-                    idle_for = time.monotonic() - last_activity_at
++                    idle_for = now - last_activity_at
+                     if idle_for >= effective_idle_timeout_sec:
+                         payload = {
+                             "reason": f"agent idle timeout after {int(idle_for)}s without checkpoint or visible output",
+@@ -538,7 +568,7 @@ class SupervisorLoop:
+                         self.handle_event(state, {"type": "timeout", "payload": payload})
+                         pause_payload = self._pause_for_human(state, payload)
+                         if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
+-                            last_activity_at = time.monotonic()
++                            last_activity_at = now
+                             self.store.save(state)
+                             time.sleep(effective_poll_interval)
+                             continue
+@@ -630,10 +660,14 @@ class SupervisorLoop:
+                 state.last_mismatch_node_id = ""
+                 preserve_checkpoint_buffer = False
+ 
++                # Accepted checkpoint — clear delivery deadline (post-dedup)
++                if delivery_ack_deadline > 0:
++                    delivery_ack_deadline = 0
+                 if checkpoint.checkpoint_seq > 0:
+                     state.checkpoint_seq = checkpoint.checkpoint_seq
+-                # Clear delivery ack deadline — checkpoint proves agent is alive
+-                delivery_ack_deadline = 0
++                if (state.checkpoint_seq > state.last_injection_seq
++                        and state.delivery_state not in (DeliveryState.IDLE, DeliveryState.STARTED_PROCESSING)):
++                    self._set_delivery_state(state, DeliveryState.STARTED_PROCESSING, reason="checkpoint received")
+                 logger.info("checkpoint: %s (id=%s)", checkpoint.summary, checkpoint.checkpoint_id)
+                 if checkpoint.status in {"working", "step_done", "workflow_done"}:
+                     self._reset_recovery_tracking(state, clear_escalations=False)
+@@ -785,10 +819,12 @@ class SupervisorLoop:
+         # pause so a human/operator can move the run onto a delivery-capable
+         # surface or wire the required hook.
+         if getattr(terminal, "is_observation_only", False):
++            self._set_delivery_state(state, DeliveryState.INJECTED, reason="observation-only attempt")
+             try:
+                 terminal.inject(instruction.content)  # writes file, logs warning
+             except Exception as exc:
+                 logger.warning("observation-only inject failed: %s", exc)
++            self._set_delivery_state(state, DeliveryState.FAILED, reason="observation-only surface")
+             self.store.append_session_event(
+                 state.run_id, "injection_observation_only", instruction.to_dict()
+             )
+@@ -803,9 +839,11 @@ class SupervisorLoop:
+             self.store.save(state)
+             return False
+ 
++        self._set_delivery_state(state, DeliveryState.INJECTED, reason="sending to terminal")
+         try:
+             terminal.inject(instruction.content)
+         except Exception as exc:
++            self._set_delivery_state(state, DeliveryState.FAILED, reason=str(exc))
+             payload = {
+                 "instruction_id": instruction.instruction_id,
+                 "node_id": state.current_node_id,
+@@ -821,6 +859,9 @@ class SupervisorLoop:
+             self.store.save(state)
+             return False
+ 
++        # Read adapter-reported delivery state (tmux: SUBMITTED or ACKNOWLEDGED)
++        adapter_state = getattr(terminal, "last_delivery_state", None) or DeliveryState.SUBMITTED
++        self._set_delivery_state(state, adapter_state, reason="terminal confirmed")
+         self.store.append_session_event(
+             state.run_id, "injection", instruction.to_dict()
+         )
+diff --git a/supervisor/notifications.py b/supervisor/notifications.py
+index e172844..e6b53c0 100644
+--- a/supervisor/notifications.py
++++ b/supervisor/notifications.py
+@@ -23,6 +23,7 @@ class NotificationEvent:
+     spec_path: str = ""
+     workspace_root: str = ""
+     surface_type: str = ""
++    delivery_state: str = ""
+     timestamp: str = ""
+ 
+     def __post_init__(self) -> None:
+diff --git a/supervisor/pause_summary.py b/supervisor/pause_summary.py
+index f4ff376..3b82253 100644
+--- a/supervisor/pause_summary.py
++++ b/supervisor/pause_summary.py
+@@ -30,12 +30,24 @@ def is_waiting_for_review(state: dict[str, Any]) -> bool:
+ def status_reason(state: dict[str, Any]) -> str:
+     top_state = state.get("top_state", "")
+     if top_state == "PAUSED_FOR_HUMAN":
++        delivery = state.get("delivery_state", "IDLE")
++        if delivery == "FAILED":
++            return "delivery_failed"
++        if delivery == "TIMED_OUT":
++            return "delivery_timed_out"
+         return ""
+     if top_state == "COMPLETED":
+         return "workflow_done"
+     current_node = str(state.get("current_node_id", "")).strip()
+     if top_state == "RUNNING" and current_node:
+-        return f"working {current_node}"
++        delivery = state.get("delivery_state", "IDLE")
++        controller = state.get("controller_mode", "daemon")
++        prefix = "debug foreground" if controller == "foreground" else "working"
++        if delivery in ("INJECTED", "SUBMITTED"):
++            return f"delivering instruction to {current_node}"
++        if delivery == "ACKNOWLEDGED":
++            return f"agent acknowledged, awaiting checkpoint for {current_node}"
++        return f"{prefix} {current_node}"
+     return ""
+ 
+ 
+diff --git a/supervisor/progress.py b/supervisor/progress.py
+index b0cf909..3fa9d52 100644
+--- a/supervisor/progress.py
++++ b/supervisor/progress.py
+@@ -22,6 +22,7 @@ def write_progress(state, spec, runtime_dir: str) -> None:
+         "progress_pct": pct,
+         "current_attempt": state.current_attempt,
+         "escalations": len(state.human_escalations),
++        "delivery_state": state.delivery_state,
+     }
+     path = Path(runtime_dir) / "progress.json"
+     path.parent.mkdir(parents=True, exist_ok=True)
+diff --git a/supervisor/terminal/adapter.py b/supervisor/terminal/adapter.py
+index 9bd9eb0..d6c0378 100644
+--- a/supervisor/terminal/adapter.py
++++ b/supervisor/terminal/adapter.py
+@@ -12,6 +12,8 @@ import subprocess
+ import time
+ from dataclasses import dataclass, field
+ 
++from supervisor.domain.enums import DeliveryState
++
+ 
+ @dataclass
+ class PaneInfo:
+@@ -48,6 +50,7 @@ class TerminalAdapter:
+         self._socket = tmux_socket or self._detect_socket()
+         self._pane_id: str | None = None  # resolved on first use
+         self._read_guard: set[str] = set()  # pane ids that have been read
++        self.last_delivery_state: str = DeliveryState.IDLE
+ 
+     # ------------------------------------------------------------------
+     # Public API
+@@ -88,6 +91,7 @@ class TerminalAdapter:
+         self._require_read(target)
+         self._tmux("send-keys", "-t", target, "-l", "--", text)
+         self._read_guard.discard(target)
++        self.last_delivery_state = DeliveryState.INJECTED
+         self._confirm_injection(target, text)
+ 
+     def current_cwd(self) -> str:
+@@ -190,6 +194,7 @@ class TerminalAdapter:
+     def _confirm_injection(self, target: str, text: str) -> None:
+         markers = self._stuck_markers(text)
+         if not markers:
++            self.last_delivery_state = DeliveryState.SUBMITTED
+             return
+ 
+         for _ in range(2):
+@@ -199,15 +204,18 @@ class TerminalAdapter:
+                 snapshot = self._capture_tail(target, lines=30)
+                 status = self._submission_snapshot_status(snapshot, markers)
+                 if status == "progress":
++                    self.last_delivery_state = DeliveryState.ACKNOWLEDGED
+                     return
+                 if status == "clear":
+                     clean_snapshots += 1
+                     if clean_snapshots >= 2:
++                        self.last_delivery_state = DeliveryState.SUBMITTED
+                         return
+                 else:
+                     clean_snapshots = 0
+                 time.sleep(0.5)
+ 
++        self.last_delivery_state = DeliveryState.FAILED
+         raise InjectionConfirmationError(
+             f"submit not confirmed for pane '{target}'; injected text still visible near the tail"
+         )
+diff --git a/tests/test_app_cli.py b/tests/test_app_cli.py
+index 19abb9a..1458a48 100644
+--- a/tests/test_app_cli.py
++++ b/tests/test_app_cli.py
+@@ -99,9 +99,10 @@ def _write_foreground_running_state(tmp_path, *, run_id: str = "run_foreground")
+     }))
+ 
+ 
+-def test_status_mentions_local_completed_state_when_daemon_has_no_runs(
++def test_status_skips_completed_runs_when_daemon_has_no_active(
+     tmp_path, monkeypatch, capsys,
+ ):
++    """Completed runs are not shown in status — only active/paused/orphaned."""
+     monkeypatch.chdir(tmp_path)
+     monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonWithNoRuns)
+     _write_completed_state(tmp_path)
+@@ -110,12 +111,7 @@ def test_status_mentions_local_completed_state_when_daemon_has_no_runs(
+ 
+     assert result == 0
+     out = capsys.readouterr().out
+-    assert "Daemon running, no active runs." in out
+-    assert "Local state found:" in out
+-    assert "run_completed" in out
+-    assert "COMPLETED" in out
+-    assert "workflow_done" in out
+-    assert "thin-supervisor run summarize run_completed" in out
++    assert "no active runs" in out.lower()
+ 
+ 
+ def test_list_mentions_local_completed_state_when_daemon_has_no_runs(
+@@ -202,9 +198,10 @@ def test_status_daemon_down_fallback_marks_daemon_owned_running_state_as_orphane
+     assert "persisted run was left in progress without an active daemon worker" in out
+ 
+ 
+-def test_status_daemon_down_fallback_does_not_rewrite_foreground_running_state(
++def test_status_daemon_down_fallback_marks_dead_foreground_as_orphaned(
+     tmp_path, monkeypatch, capsys,
+ ):
++    """Foreground RUNNING state with dead process is shown as orphaned."""
+     monkeypatch.chdir(tmp_path)
+     monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
+     _write_foreground_running_state(tmp_path)
+@@ -214,8 +211,8 @@ def test_status_daemon_down_fallback_does_not_rewrite_foreground_running_state(
+     assert result == 0
+     out = capsys.readouterr().out
+     assert "run_foreground" in out
+-    assert "RUNNING" in out
+-    assert "persisted run was left in progress without an active daemon worker" not in out
++    # Dead foreground process is now detected as orphaned
++    assert "orphaned" in out.lower() or "PAUSED_FOR_HUMAN" in out
+ 
+ 
+ def test_legacy_run_requires_explicit_register_or_foreground(capsys):
+@@ -259,8 +256,8 @@ def test_ps_lists_registered_daemons(monkeypatch, capsys):
+     out = capsys.readouterr().out
+     assert "PID" in out
+     assert "/tmp/project-a" in out
+-    assert "/tmp/b.sock" in out
+-    assert "2" in out
++    assert "/tmp/project-b" in out
++    assert "active" in out
+ 
+ 
+ def test_pane_owner_reports_global_lock(monkeypatch, capsys):
+@@ -281,6 +278,60 @@ def test_pane_owner_reports_global_lock(monkeypatch, capsys):
+     assert "/tmp/project-c" in out
+ 
+ 
++def test_pane_owner_shows_controller_mode(monkeypatch, capsys):
++    """pane-owner output includes controller mode."""
++    monkeypatch.setattr(app, "_find_global_pane_owner", lambda pane: {
++        "pane_target": pane,
++        "pid": 444,
++        "cwd": "/tmp/project-d",
++        "run_id": "run_mode",
++        "spec_path": "/tmp/spec.yaml",
++        "controller_mode": "foreground",
++    }, raising=False)
++
++    result = app.cmd_pane_owner(argparse.Namespace(pane="%8"))
++
++    assert result == 0
++    out = capsys.readouterr().out
++    assert "Controller: foreground" in out
++    assert "run_mode" in out
++
++
++def test_pane_owner_shows_daemon_controller(monkeypatch, capsys):
++    """pane-owner output shows daemon as controller mode."""
++    monkeypatch.setattr(app, "_find_global_pane_owner", lambda pane: {
++        "pane_target": pane,
++        "pid": 555,
++        "cwd": "/tmp/project-e",
++        "run_id": "run_d",
++        "spec_path": "/tmp/spec.yaml",
++        "controller_mode": "daemon",
++    }, raising=False)
++
++    result = app.cmd_pane_owner(argparse.Namespace(pane="%9"))
++
++    assert result == 0
++    out = capsys.readouterr().out
++    assert "Controller: daemon" in out
++
++
++def test_foreground_help_text_says_debug():
++    """Foreground subcommand help text indicates debug-only."""
++    import io
++    parser = app.build_runtime_parser()
++    buf = io.StringIO()
++    parser.print_help(buf)
++    # Walk subparsers to find run->foreground help
++    for action in parser._subparsers._actions:
++        if not hasattr(action, "choices") or action.choices is None:
++            continue
++        run_parser = action.choices.get("run")
++        if run_parser:
++            run_parser.print_help(buf)
++    full_help = buf.getvalue().lower()
++    assert "debug" in full_help
++
++
+ def test_runtime_parser_does_not_expose_devtime_commands():
+     parser = app.build_runtime_parser()
+ 
+diff --git a/tests/test_bootstrap.py b/tests/test_bootstrap.py
+new file mode 100644
+index 0000000..341939e
+--- /dev/null
++++ b/tests/test_bootstrap.py
+@@ -0,0 +1,205 @@
++"""Tests for the zero-setup bootstrap API."""
++from __future__ import annotations
++
++from pathlib import Path
++from unittest.mock import patch, MagicMock
++
++from supervisor.bootstrap import bootstrap, BootstrapResult, _validate_pane
++
++
++def _step_by_name(result: BootstrapResult, name: str) -> dict | None:
++    for step in result.steps:
++        if step["name"] == name:
++            return step
++    return None
++
++
++def test_bootstrap_no_tmux(tmp_path, monkeypatch):
++    """Without $TMUX, bootstrap fails at step 1."""
++    monkeypatch.delenv("TMUX", raising=False)
++    monkeypatch.delenv("TMUX_PANE", raising=False)
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
++    result = bootstrap(cwd=str(tmp_path))
++    assert not result.ok
++    assert "tmux" in result.error.lower()
++    tmux_step = _step_by_name(result, "tmux_check")
++    assert tmux_step["status"] == "failed"
++
++
++def test_bootstrap_fresh_project(tmp_path, monkeypatch):
++    """Fresh project with no .supervisor/ gets auto-initialized."""
++    monkeypatch.setenv("TMUX", "/tmp/tmux-test/default,1234,0")
++    monkeypatch.setenv("TMUX_PANE", "%0")
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
++
++    with patch("supervisor.bootstrap._ensure_daemon_running"), \
++         patch("supervisor.bootstrap._validate_pane", return_value=(None, None)):
++        result = bootstrap(cwd=str(tmp_path))
++
++    assert result.ok, f"error: {result.error}"
++    assert (tmp_path / ".supervisor").exists()
++    assert (tmp_path / ".supervisor" / "config.yaml").exists()
++    init_step = _step_by_name(result, "init_repair")
++    assert init_step["status"] == "ok"
++
++
++def test_bootstrap_existing_project(tmp_path, monkeypatch):
++    """Existing project skips init."""
++    (tmp_path / ".supervisor").mkdir()
++    (tmp_path / ".supervisor" / "config.yaml").write_text("surface_type: tmux\n")
++    (tmp_path / ".supervisor" / "runtime").mkdir(parents=True)
++
++    monkeypatch.setenv("TMUX", "/tmp/tmux-test/default,1234,0")
++    monkeypatch.setenv("TMUX_PANE", "%1")
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
++
++    with patch("supervisor.bootstrap._ensure_daemon_running"), \
++         patch("supervisor.bootstrap._validate_pane", return_value=(None, None)):
++        result = bootstrap(cwd=str(tmp_path))
++
++    assert result.ok
++    init_step = _step_by_name(result, "init_repair")
++    assert init_step["status"] == "skipped"
++
++
++def test_bootstrap_daemon_already_running(tmp_path, monkeypatch):
++    """If daemon is running, skip auto-start."""
++    (tmp_path / ".supervisor").mkdir()
++    (tmp_path / ".supervisor" / "config.yaml").write_text("surface_type: tmux\n")
++
++    monkeypatch.setenv("TMUX", "/tmp/tmux-test/default,1234,0")
++    monkeypatch.setenv("TMUX_PANE", "%2")
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
++
++    mock_client = MagicMock()
++    mock_client.is_running.return_value = True
++
++    with patch("supervisor.daemon.client.DaemonClient", return_value=mock_client), \
++         patch("supervisor.bootstrap._validate_pane", return_value=(None, None)):
++        result = bootstrap(cwd=str(tmp_path))
++
++    assert result.ok
++    daemon_step = _step_by_name(result, "daemon_ensure")
++    assert daemon_step["status"] == "ok"
++
++
++def test_bootstrap_pane_detect(tmp_path, monkeypatch):
++    """Pane target comes from $TMUX_PANE."""
++    (tmp_path / ".supervisor").mkdir()
++    (tmp_path / ".supervisor" / "config.yaml").write_text("surface_type: tmux\n")
++
++    monkeypatch.setenv("TMUX", "/tmp/tmux-test/default,1234,0")
++    monkeypatch.setenv("TMUX_PANE", "%42")
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
++
++    with patch("supervisor.bootstrap._ensure_daemon_running"), \
++         patch("supervisor.bootstrap._validate_pane", return_value=(None, None)):
++        result = bootstrap(cwd=str(tmp_path))
++
++    assert result.ok
++    assert result.pane_target == "%42"
++    assert result.surface_type == "tmux"
++
++
++def test_bootstrap_no_pane(tmp_path, monkeypatch):
++    """Without $TMUX_PANE, bootstrap fails at pane detection."""
++    (tmp_path / ".supervisor").mkdir()
++    (tmp_path / ".supervisor" / "config.yaml").write_text("surface_type: tmux\n")
++
++    monkeypatch.setenv("TMUX", "/tmp/tmux-test/default,1234,0")
++    monkeypatch.delenv("TMUX_PANE", raising=False)
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
++
++    with patch("supervisor.bootstrap._ensure_daemon_running"), \
++         patch("supervisor.bootstrap._validate_pane", return_value=(None, None)):
++        result = bootstrap(cwd=str(tmp_path))
++
++    assert not result.ok
++    assert "pane" in result.error.lower()
++
++
++def test_bootstrap_pane_locked(tmp_path, monkeypatch):
++    """Bootstrap fails when pane is locked by another run."""
++    (tmp_path / ".supervisor").mkdir()
++    (tmp_path / ".supervisor" / "config.yaml").write_text("surface_type: tmux\n")
++
++    monkeypatch.setenv("TMUX", "/tmp/tmux-test/default,1234,0")
++    monkeypatch.setenv("TMUX_PANE", "%5")
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
++
++    with patch("supervisor.bootstrap._ensure_daemon_running"), \
++         patch("supervisor.bootstrap._validate_pane", return_value=("pane %5 is locked by run run_xyz", {"run_id": "run_xyz", "controller_mode": "daemon"})):
++        result = bootstrap(cwd=str(tmp_path))
++
++    assert not result.ok
++    assert "locked" in result.error
++
++
++def test_bootstrap_pane_locked_by_daemon(tmp_path, monkeypatch):
++    """Bootstrap shows observe suggestion for daemon-locked pane."""
++    (tmp_path / ".supervisor").mkdir()
++    (tmp_path / ".supervisor" / "config.yaml").write_text("surface_type: tmux\n")
++
++    monkeypatch.setenv("TMUX", "/tmp/tmux-test/default,1234,0")
++    monkeypatch.setenv("TMUX_PANE", "%6")
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
++
++    daemon_conflict = {
++        "run_id": "run_d1", "controller_mode": "daemon",
++        "spec_path": "s.yaml", "suggested_action": "thin-supervisor observe run_d1",
++    }
++    with patch("supervisor.bootstrap._ensure_daemon_running"), \
++         patch("supervisor.bootstrap._validate_pane",
++               return_value=("pane %6 is owned by daemon run run_d1", daemon_conflict)):
++        result = bootstrap(cwd=str(tmp_path))
++
++    assert not result.ok
++    assert "daemon" in result.error
++    assert result.conflict["run_id"] == "run_d1"
++    assert result.conflict["suggested_action"] == "thin-supervisor observe run_d1"
++
++
++def test_bootstrap_pane_locked_by_foreground(tmp_path, monkeypatch):
++    """Bootstrap shows stop suggestion for foreground-locked pane."""
++    (tmp_path / ".supervisor").mkdir()
++    (tmp_path / ".supervisor" / "config.yaml").write_text("surface_type: tmux\n")
++
++    monkeypatch.setenv("TMUX", "/tmp/tmux-test/default,1234,0")
++    monkeypatch.setenv("TMUX_PANE", "%7")
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
++
++    fg_conflict = {
++        "run_id": "run_fg", "controller_mode": "foreground",
++        "spec_path": "spec.yaml", "suggested_action": "kill 12345  # stop foreground debug run run_fg",
++    }
++    with patch("supervisor.bootstrap._ensure_daemon_running"), \
++         patch("supervisor.bootstrap._validate_pane",
++               return_value=("pane %7 is owned by foreground debug run run_fg", fg_conflict)):
++        result = bootstrap(cwd=str(tmp_path))
++
++    assert not result.ok
++    assert "foreground" in result.error
++    assert result.conflict["controller_mode"] == "foreground"
++
++
++def test_bootstrap_result_structure(tmp_path, monkeypatch):
++    """Bootstrap result has all expected fields."""
++    (tmp_path / ".supervisor").mkdir()
++    (tmp_path / ".supervisor" / "config.yaml").write_text("surface_type: tmux\n")
++
++    monkeypatch.setenv("TMUX", "/tmp/tmux-test/default,1234,0")
++    monkeypatch.setenv("TMUX_PANE", "%0")
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
++
++    with patch("supervisor.bootstrap._ensure_daemon_running"), \
++         patch("supervisor.bootstrap._validate_pane", return_value=(None, None)):
++        result = bootstrap(cwd=str(tmp_path))
++
++    assert isinstance(result.steps, list)
++    assert len(result.steps) >= 5
++    step_names = [s["name"] for s in result.steps]
++    assert "tmux_check" in step_names
++    assert "init_repair" in step_names
++    assert "config_load" in step_names
++    assert "daemon_ensure" in step_names
++    assert "pane_detect" in step_names
+diff --git a/tests/test_config.py b/tests/test_config.py
+index 2d0a9fc..25f06f0 100644
+--- a/tests/test_config.py
++++ b/tests/test_config.py
+@@ -1,7 +1,12 @@
+ """Tests for the config system."""
+ from __future__ import annotations
+ 
+-from supervisor.config import RuntimeConfig
++import yaml
++
++from supervisor.config import (
++    RuntimeConfig, global_config_path,
++    save_global_config, save_project_config,
++)
+ 
+ 
+ def test_defaults():
+@@ -54,3 +59,89 @@ def test_default_config_yaml():
+     assert "surface_target" in yaml_str
+     assert "judge_model" in yaml_str
+     assert "null" in yaml_str
++
++
++# ---------------------------------------------------------------------------
++# Global config layering
++# ---------------------------------------------------------------------------
++
++def test_global_config_inheritable_fields(tmp_path, monkeypatch):
++    """Global config sets inheritable field, project doesn't → inherited."""
++    gpath = tmp_path / "global.yaml"
++    gpath.write_text("worker_model: claude-opus-4-6\njudge_model: anthropic/haiku\n")
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(gpath))
++
++    cfg = RuntimeConfig.load(None)
++    assert cfg.worker_model == "claude-opus-4-6"
++    assert cfg.judge_model == "anthropic/haiku"
++
++
++def test_project_overrides_global(tmp_path, monkeypatch):
++    """Project config overrides global for same field."""
++    gpath = tmp_path / "global.yaml"
++    gpath.write_text("worker_model: global-model\n")
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(gpath))
++
++    ppath = tmp_path / "project.yaml"
++    ppath.write_text("worker_model: project-model\n")
++
++    cfg = RuntimeConfig.load(str(ppath))
++    assert cfg.worker_model == "project-model"
++
++
++def test_global_ignores_project_only_fields(tmp_path, monkeypatch):
++    """Global config cannot set project-only fields like surface_target."""
++    gpath = tmp_path / "global.yaml"
++    gpath.write_text("surface_target: should-be-ignored\nworker_model: inherited\n")
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(gpath))
++
++    cfg = RuntimeConfig.load(None)
++    assert cfg.surface_target == ""  # default, not from global
++    assert cfg.worker_model == "inherited"
++
++
++def test_env_overrides_global_and_project(tmp_path, monkeypatch):
++    """Env vars override both global and project."""
++    gpath = tmp_path / "global.yaml"
++    gpath.write_text("worker_model: from-global\n")
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(gpath))
++
++    ppath = tmp_path / "project.yaml"
++    ppath.write_text("worker_model: from-project\n")
++    monkeypatch.setenv("SUPERVISOR_WORKER_MODEL", "from-env")
++
++    cfg = RuntimeConfig.load(str(ppath))
++    assert cfg.worker_model == "from-env"
++
++
++def test_save_global_config_roundtrip(tmp_path, monkeypatch):
++    """save_global_config writes and subsequent load reads it."""
++    gpath = tmp_path / "defaults.yaml"
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(gpath))
++
++    save_global_config("worker_model", "test-model")
++    assert gpath.exists()
++
++    data = yaml.safe_load(gpath.read_text())
++    assert data["worker_model"] == "test-model"
++
++    # Load picks it up
++    cfg = RuntimeConfig.load(None)
++    assert cfg.worker_model == "test-model"
++
++
++def test_save_project_config_roundtrip(tmp_path):
++    """save_project_config writes to project .supervisor/config.yaml."""
++    save_project_config("poll_interval_sec", 5.0, project_dir=str(tmp_path))
++    ppath = tmp_path / ".supervisor" / "config.yaml"
++    assert ppath.exists()
++
++    data = yaml.safe_load(ppath.read_text())
++    assert data["poll_interval_sec"] == 5.0
++
++
++def test_global_config_path_env_override(tmp_path, monkeypatch):
++    """THIN_SUPERVISOR_GLOBAL_CONFIG overrides default path."""
++    custom = tmp_path / "custom.yaml"
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(custom))
++    assert global_config_path() == custom
+diff --git a/tests/test_credentials.py b/tests/test_credentials.py
+new file mode 100644
+index 0000000..bb5221b
+--- /dev/null
++++ b/tests/test_credentials.py
+@@ -0,0 +1,49 @@
++"""Tests for credential resolution and persistence."""
++from __future__ import annotations
++
++import yaml
++
++from supervisor.config import RuntimeConfig
++from supervisor.credentials import resolve_credentials, persist_credential
++
++
++def test_resolve_missing_defaults():
++    """Fresh config returns expected missing credentials."""
++    config = RuntimeConfig()
++    missing = resolve_credentials(config)
++    keys = {m.key for m in missing}
++    assert "worker_provider" in keys
++    assert "worker_model" in keys
++
++
++def test_resolve_all_set():
++    """Fully populated config returns no missing credentials."""
++    config = RuntimeConfig(
++        worker_provider="anthropic",
++        worker_model="claude-opus-4-6",
++        judge_model="anthropic/haiku",
++    )
++    missing = resolve_credentials(config)
++    assert len(missing) == 0
++
++
++def test_persist_global(tmp_path, monkeypatch):
++    """persist_credential with scope=global writes to global config."""
++    gpath = tmp_path / "defaults.yaml"
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(gpath))
++
++    persist_credential("worker_model", "test-model", scope="global")
++    assert gpath.exists()
++
++    data = yaml.safe_load(gpath.read_text())
++    assert data["worker_model"] == "test-model"
++
++
++def test_persist_project(tmp_path):
++    """persist_credential with scope=project writes to project config."""
++    persist_credential("poll_interval_sec", 5.0, scope="project", project_dir=str(tmp_path))
++    ppath = tmp_path / ".supervisor" / "config.yaml"
++    assert ppath.exists()
++
++    data = yaml.safe_load(ppath.read_text())
++    assert data["poll_interval_sec"] == 5.0
+diff --git a/tests/test_daemon_lifecycle.py b/tests/test_daemon_lifecycle.py
+new file mode 100644
+index 0000000..17b5bba
+--- /dev/null
++++ b/tests/test_daemon_lifecycle.py
+@@ -0,0 +1,105 @@
++"""Tests for daemon idle shutdown and lifecycle state."""
++from __future__ import annotations
++
++import time
++from unittest.mock import MagicMock, patch
++
++from supervisor.daemon.server import DaemonServer, DEFAULT_IDLE_SHUTDOWN_SEC
++
++
++def test_idle_shutdown_default():
++    """Default idle shutdown is 10 minutes."""
++    assert DEFAULT_IDLE_SHUTDOWN_SEC == 600
++
++
++def test_daemon_does_not_idle_exit_with_active_runs():
++    """Idle shutdown skipped when runs are active."""
++    server = DaemonServer.__new__(DaemonServer)
++    server._runs = {"run_1": MagicMock()}
++    server._lock = __import__("threading").Lock()
++    server.idle_shutdown_sec = 1
++    server._started_at = time.time() - 100
++    server._last_run_finished_at = 0
++    server._last_client_contact_at = time.time() - 100
++    server._shutdown = __import__("threading").Event()
++    server.sock_path = "/tmp/test.sock"
++
++    server._check_idle_shutdown()
++    assert not server._shutdown.is_set()
++
++
++def test_daemon_idle_exits_when_no_runs_and_timeout():
++    """Daemon sets shutdown event when idle long enough with zero runs."""
++    server = DaemonServer.__new__(DaemonServer)
++    server._runs = {}
++    server._lock = __import__("threading").Lock()
++    server.idle_shutdown_sec = 5
++    server._started_at = time.time() - 100
++    server._last_run_finished_at = time.time() - 10
++    server._last_client_contact_at = time.time() - 10
++    server._shutdown = __import__("threading").Event()
++    server.sock_path = "/tmp/test.sock"
++
++    with patch("supervisor.daemon.server.update_daemon"):
++        server._check_idle_shutdown()
++    assert server._shutdown.is_set()
++
++
++def test_daemon_idle_not_triggered_within_timeout():
++    """Daemon stays alive if idle time hasn't reached threshold."""
++    server = DaemonServer.__new__(DaemonServer)
++    server._runs = {}
++    server._lock = __import__("threading").Lock()
++    server.idle_shutdown_sec = 600
++    server._started_at = time.time()
++    server._last_run_finished_at = time.time()
++    server._last_client_contact_at = time.time()
++    server._shutdown = __import__("threading").Event()
++    server.sock_path = "/tmp/test.sock"
++
++    server._check_idle_shutdown()
++    assert not server._shutdown.is_set()
++
++
++def test_daemon_idle_disabled_with_zero_timeout():
++    """Idle shutdown disabled when idle_shutdown_sec=0."""
++    server = DaemonServer.__new__(DaemonServer)
++    server._runs = {}
++    server._lock = __import__("threading").Lock()
++    server.idle_shutdown_sec = 0
++    server._started_at = time.time() - 9999
++    server._last_run_finished_at = 0
++    server._last_client_contact_at = time.time() - 9999
++    server._shutdown = __import__("threading").Event()
++
++    server._check_idle_shutdown()
++    assert not server._shutdown.is_set()
++
++
++def test_daemon_metadata_includes_state():
++    """Daemon metadata includes state and idle_shutdown_sec."""
++    server = DaemonServer.__new__(DaemonServer)
++    server._runs = {"r1": MagicMock()}
++    server.sock_path = "/tmp/test.sock"
++    server.idle_shutdown_sec = 600
++
++    meta = server._daemon_metadata()
++    assert meta["state"] == "active"
++    assert meta["idle_shutdown_sec"] == 600
++
++    server._runs = {}
++    meta = server._daemon_metadata()
++    assert meta["state"] == "idle"
++
++
++def test_reap_updates_last_run_finished():
++    """Reaping finished runs updates _last_run_finished_at."""
++    server = DaemonServer.__new__(DaemonServer)
++    server._runs = {}
++    server._lock = __import__("threading").Lock()
++    server._last_run_finished_at = 0
++    server.sock_path = "/tmp/test.sock"
++
++    # Nothing to reap
++    server._reap_finished()
++    assert server._last_run_finished_at == 0  # unchanged
+diff --git a/tests/test_dashboard.py b/tests/test_dashboard.py
+new file mode 100644
+index 0000000..b0c8a2b
+--- /dev/null
++++ b/tests/test_dashboard.py
+@@ -0,0 +1,124 @@
++"""Tests for status bucketing and interactive dashboard."""
++from __future__ import annotations
++
++import argparse
++import json
++from pathlib import Path
++from unittest.mock import MagicMock, patch
++
++from supervisor import app
++
++
++class _DaemonWithRuns:
++    def is_running(self):
++        return True
++
++    def status(self):
++        return {
++            "ok": True,
++            "runs": [
++                {
++                    "run_id": "run_d1",
++                    "pane_target": "%3",
++                    "top_state": "RUNNING",
++                    "current_node": "step_1",
++                    "status_reason": "working step_1",
++                },
++            ],
++        }
++
++
++class _DaemonStopped:
++    def is_running(self):
++        return False
++
++
++def test_status_buckets_daemon_runs(monkeypatch, capsys):
++    """cmd_status shows daemon runs under 'Active runs:' section."""
++    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonWithRuns)
++    monkeypatch.setattr(app, "_find_local_run_summaries", lambda: [])
++
++    result = app.cmd_status(argparse.Namespace(config=None))
++
++    assert result == 0
++    out = capsys.readouterr().out
++    assert "Active runs:" in out
++    assert "[daemon]" in out
++    assert "run_d1" in out
++
++
++def test_status_buckets_orphaned_state(tmp_path, monkeypatch, capsys):
++    """cmd_status shows orphaned state under 'Orphaned local state:' section."""
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
++
++    # Create an orphaned daemon-owned run
++    run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_orphan"
++    run_dir.mkdir(parents=True)
++    (run_dir / "state.json").write_text(json.dumps({
++        "run_id": "run_orphan",
++        "spec_id": "test",
++        "mode": "strict_verifier",
++        "top_state": "RUNNING",
++        "current_node_id": "step_2",
++        "controller_mode": "daemon",
++    }))
++
++    result = app.cmd_status(argparse.Namespace(config=None))
++
++    assert result == 0
++    out = capsys.readouterr().out
++    assert "Orphaned" in out
++    assert "[orphaned]" in out
++    assert "run_orphan" in out
++
++
++def test_ps_shows_idle_state(monkeypatch, capsys):
++    """cmd_ps shows daemon STATE and IDLE columns."""
++    monkeypatch.setattr(app, "_list_global_daemons", lambda: [
++        {
++            "pid": 111,
++            "cwd": "/tmp/project-a",
++            "socket": "/tmp/a.sock",
++            "active_runs": 2,
++            "state": "active",
++            "idle_for_sec": 0,
++        },
++        {
++            "pid": 222,
++            "cwd": "/tmp/project-b",
++            "socket": "/tmp/b.sock",
++            "active_runs": 0,
++            "state": "idle",
++            "idle_for_sec": 480,
++        },
++    ], raising=False)
++
++    result = app.cmd_ps(argparse.Namespace())
++
++    assert result == 0
++    out = capsys.readouterr().out
++    assert "STATE" in out
++    assert "active" in out
++    assert "idle" in out
++    assert "480s" in out
++
++
++def test_dashboard_shows_numbered_list(tmp_path, monkeypatch, capsys):
++    """cmd_dashboard prints numbered run list."""
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonWithRuns)
++    monkeypatch.setattr(app, "_find_local_run_summaries", lambda: [])
++    monkeypatch.setattr(app, "_list_global_daemons", lambda: [])
++
++    # Simulate user pressing 'q' immediately
++    monkeypatch.setattr("builtins.input", lambda prompt: "q")
++
++    result = app.cmd_dashboard(argparse.Namespace())
++
++    assert result == 0
++    out = capsys.readouterr().out
++    assert "1." in out
++    assert "run_d1" in out
++    assert "[daemon]" in out
++    assert "inspect" in out
+diff --git a/tests/test_delivery_protocol.py b/tests/test_delivery_protocol.py
+new file mode 100644
+index 0000000..35ab39c
+--- /dev/null
++++ b/tests/test_delivery_protocol.py
+@@ -0,0 +1,406 @@
++"""Tests for the explicit delivery/ack protocol."""
++from __future__ import annotations
++
++import json
++import subprocess
++from pathlib import Path
++from unittest.mock import MagicMock, patch
++
++from supervisor.domain.enums import DeliveryState, TopState
++from supervisor.domain.models import SupervisorState
++from supervisor.loop import SupervisorLoop
++from supervisor.plan.loader import load_spec
++from supervisor.storage.state_store import StateStore
++from supervisor.interventions import AutoInterventionManager
++from supervisor.notifications import NotificationManager
++
++
++# ---------------------------------------------------------------------------
++# Helpers
++# ---------------------------------------------------------------------------
++
++class MockTerminal:
++    """Minimal mock terminal for delivery protocol tests."""
++
++    def __init__(self, outputs: list[str], *, fail_inject: bool = False):
++        self._outputs = list(outputs)
++        self._index = 0
++        self._read_done = False
++        self.injected: list[str] = []
++        self.fail_inject = fail_inject
++
++    def read(self, lines: int = 100) -> str:
++        self._read_done = True
++        if self._index < len(self._outputs):
++            text = self._outputs[self._index]
++            self._index += 1
++            return text
++        return ""
++
++    def inject(self, text: str) -> None:
++        assert self._read_done, "read guard violated"
++        if self.fail_inject:
++            self._read_done = False
++            raise RuntimeError("inject failed: terminal not responding")
++        self.injected.append(text)
++        self._read_done = False
++
++    def current_cwd(self) -> str:
++        return "/tmp"
++
++    def session_id(self) -> str:
++        return "mock-pane"
++
++
++def _make_loop(tmp_path, terminal):
++    spec = load_spec("specs/examples/linear_plan.example.yaml")
++    store = StateStore(str(tmp_path))
++    loop = SupervisorLoop(
++        store=store,
++        notification_manager=NotificationManager(),
++        auto_intervention_manager=AutoInterventionManager(mode="disabled"),
++    )
++    return loop, spec, store
++
++
++def _run_sidecar(loop, spec, store, terminal, *, timeout=5):
++    state = store.load_or_init(spec, spec_path="specs/examples/linear_plan.example.yaml", pane_target="mock-pane")
++    loop.run_sidecar(spec, state, terminal, poll_interval=0, idle_timeout_sec=timeout)
++    return state
++
++
++def _cp(status, node, seq=0):
++    lines = [
++        "<checkpoint>",
++        f"status: {status}",
++        f"current_node: {node}",
++        f"summary: test checkpoint",
++        f"checkpoint_seq: {seq}" if seq else "",
++        "evidence:",
++        "  - ran: echo ok",
++        "</checkpoint>",
++    ]
++    return "\n".join(line for line in lines if line) + "\n"
++
++
++# ---------------------------------------------------------------------------
++# Phase 1: Domain — DeliveryState enum
++# ---------------------------------------------------------------------------
++
++def test_delivery_state_enum_values():
++    assert DeliveryState.IDLE == "IDLE"
++    assert DeliveryState.INJECTED == "INJECTED"
++    assert DeliveryState.SUBMITTED == "SUBMITTED"
++    assert DeliveryState.ACKNOWLEDGED == "ACKNOWLEDGED"
++    assert DeliveryState.STARTED_PROCESSING == "STARTED_PROCESSING"
++    assert DeliveryState.FAILED == "FAILED"
++    assert DeliveryState.TIMED_OUT == "TIMED_OUT"
++
++
++def test_delivery_state_persisted_in_state_json(tmp_path):
++    """delivery_state survives save/load cycle."""
++    store = StateStore(str(tmp_path))
++    spec = load_spec("specs/examples/linear_plan.example.yaml")
++    state = store.load_or_init(spec, spec_path="specs/examples/linear_plan.example.yaml", pane_target="%0")
++    state.delivery_state = "ACKNOWLEDGED"
++    store.save(state)
++
++    loaded = json.loads((tmp_path / "state.json").read_text())
++    assert loaded["delivery_state"] == "ACKNOWLEDGED"
++
++    state2 = SupervisorState.from_dict(loaded)
++    assert state2.delivery_state == "ACKNOWLEDGED"
++
++
++def test_delivery_state_defaults_to_idle():
++    """Old state dicts without delivery_state default to IDLE."""
++    data = {
++        "run_id": "r1", "spec_id": "s1", "mode": "strict_verifier",
++        "top_state": "RUNNING", "current_node_id": "n1",
++    }
++    state = SupervisorState.from_dict(data)
++    assert state.delivery_state == "IDLE"
++
++
++# ---------------------------------------------------------------------------
++# Phase 2: Adapter — last_delivery_state
++# ---------------------------------------------------------------------------
++
++def test_terminal_adapter_sets_acknowledged_on_progress():
++    """Tmux adapter sets ACKNOWLEDGED when it sees progress markers."""
++    from supervisor.terminal.adapter import TerminalAdapter
++
++    def _mock_run(stdout="", **kw):
++        result = MagicMock(spec=subprocess.CompletedProcess)
++        result.stdout = stdout
++        result.returncode = 0
++        result.stderr = ""
++        return result
++
++    progress_output = "some output\n• Working on step_1\nesc to interrupt\n"
++    snapshots = [
++        _mock_run(stdout="before\n"),     # read()
++        _mock_run(stdout="before\n"),     # send-keys (inject text)
++        _mock_run(stdout="before\n"),     # send-keys Enter
++        _mock_run(stdout=progress_output),  # capture-pane check
++    ]
++    with patch("subprocess.run", side_effect=snapshots):
++        adapter = TerminalAdapter("%0", tmux_socket="/tmp/test.sock")
++        adapter._pane_id = "%0"
++        adapter._read_guard.add("%0")
++        adapter.inject("do the thing now please really")
++
++    assert adapter.last_delivery_state == "ACKNOWLEDGED"
++
++
++def test_terminal_adapter_sets_submitted_on_clear():
++    """Tmux adapter sets SUBMITTED when text clears from pane."""
++    from supervisor.terminal.adapter import TerminalAdapter
++
++    def _mock_run(stdout="", **kw):
++        result = MagicMock(spec=subprocess.CompletedProcess)
++        result.stdout = stdout
++        result.returncode = 0
++        result.stderr = ""
++        return result
++
++    clean_output = "totally clean prompt\n$ \n"
++    snapshots = [
++        _mock_run(stdout="before\n"),     # read()
++        _mock_run(stdout="before\n"),     # send-keys (inject text)
++        _mock_run(stdout="before\n"),     # send-keys Enter
++        _mock_run(stdout=clean_output),   # capture-pane check 1
++        _mock_run(stdout=clean_output),   # capture-pane check 2
++    ]
++    with patch("subprocess.run", side_effect=snapshots):
++        adapter = TerminalAdapter("%0", tmux_socket="/tmp/test.sock")
++        adapter._pane_id = "%0"
++        adapter._read_guard.add("%0")
++        adapter.inject("do the thing now please really")
++
++    assert adapter.last_delivery_state == "SUBMITTED"
++
++
++def test_open_relay_sets_submitted():
++    """OpenRelaySurface sets SUBMITTED after inject."""
++    from supervisor.adapters.open_relay_surface import OpenRelaySurface
++
++    surface = OpenRelaySurface("test-session")
++    with patch.object(surface, "_oly"):
++        surface.inject("hello")
++    assert surface.last_delivery_state == "SUBMITTED"
++
++
++def test_jsonl_observer_always_failed():
++    """JsonlObserver has last_delivery_state = FAILED by default."""
++    from supervisor.adapters.jsonl_observer import JsonlObserver
++
++    observer = JsonlObserver("/tmp/fake.jsonl")
++    assert observer.last_delivery_state == "FAILED"
++
++
++# ---------------------------------------------------------------------------
++# Phase 3: Loop — delivery state transitions
++# ---------------------------------------------------------------------------
++
++def test_delivery_state_failed_on_inject_error(tmp_path):
++    """Injection failure sets delivery_state to FAILED."""
++    terminal = MockTerminal([], fail_inject=True)
++    loop, spec, store = _make_loop(tmp_path, terminal)
++    state = _run_sidecar(loop, spec, store, terminal)
++
++    assert state.delivery_state == "FAILED"
++    assert state.top_state == TopState.PAUSED_FOR_HUMAN
++
++
++def test_delivery_state_submitted_on_success(tmp_path):
++    """Successful injection with no adapter state defaults to SUBMITTED."""
++    # step_done checkpoint → will complete
++    terminal = MockTerminal([_cp("step_done", "write_test")])
++    loop, spec, store = _make_loop(tmp_path, terminal)
++    state = _run_sidecar(loop, spec, store, terminal)
++
++    # Should have transitioned through SUBMITTED → STARTED_PROCESSING
++    assert state.delivery_state in ("SUBMITTED", "STARTED_PROCESSING", "IDLE")
++
++
++def test_delivery_state_started_processing_on_checkpoint(tmp_path):
++    """Checkpoint with seq > injection seq transitions to STARTED_PROCESSING."""
++    # Empty first read → init inject fires (sets last_injection_seq=0)
++    # Then working checkpoint with seq=1 arrives → 1 > 0 → STARTED_PROCESSING
++    # Then step_done completes the node
++    terminal = MockTerminal(["", _cp("working", "write_test", 1), _cp("step_done", "write_test", 2)])
++    loop, spec, store = _make_loop(tmp_path, terminal)
++    _run_sidecar(loop, spec, store, terminal)
++
++    # Check session events for delivery_state_change to STARTED_PROCESSING
++    session_path = tmp_path / "session_log.jsonl"
++    assert session_path.exists(), f"Expected session log at {session_path}"
++    events = [json.loads(line) for line in session_path.read_text().splitlines() if line.strip()]
++    all_types = [(e.get("event_type"), e.get("payload", {}).get("to", "")) for e in events]
++    delivery_changes = [e for e in events if e.get("event_type") == "delivery_state_change"]
++    states = [e["payload"]["to"] for e in delivery_changes]
++    assert "STARTED_PROCESSING" in states, f"states={states}, all_events={all_types}"
++
++
++def test_delivery_state_in_session_events(tmp_path):
++    """Delivery state changes are logged as session events."""
++    terminal = MockTerminal([_cp("step_done", "write_test")])
++    loop, spec, store = _make_loop(tmp_path, terminal)
++    _run_sidecar(loop, spec, store, terminal)
++
++    session_path = tmp_path / "session_log.jsonl"
++    assert session_path.exists(), f"Expected session log at {session_path}"
++    events = [json.loads(line) for line in session_path.read_text().splitlines() if line.strip()]
++    delivery_changes = [e for e in events if e.get("event_type") == "delivery_state_change"]
++    assert len(delivery_changes) >= 1
++    # Should see at least IDLE → INJECTED
++    first_change = delivery_changes[0]["payload"]
++    assert first_change["from"] == "IDLE"
++    assert first_change["to"] == "INJECTED"
++
++
++def test_observation_only_delivery_always_fails(tmp_path):
++    """Observation-only surfaces skip inject and don't claim delivery."""
++    from supervisor.adapters.jsonl_observer import JsonlObserver
++    observer = JsonlObserver("/tmp/fake.jsonl")
++    assert observer.last_delivery_state == DeliveryState.FAILED
++    assert observer.is_observation_only is True
++
++
++# ---------------------------------------------------------------------------
++# Phase 4: Observability
++# ---------------------------------------------------------------------------
++
++def test_delivery_state_in_progress_json(tmp_path):
++    """progress.json includes delivery_state field."""
++    from supervisor.progress import write_progress
++
++    spec = load_spec("specs/examples/linear_plan.example.yaml")
++    store = StateStore(str(tmp_path))
++    state = store.load_or_init(spec, spec_path="specs/examples/linear_plan.example.yaml", pane_target="%0")
++    state.delivery_state = "ACKNOWLEDGED"
++
++    write_progress(state, spec, str(tmp_path))
++
++    progress = json.loads((tmp_path / "progress.json").read_text())
++    assert progress["delivery_state"] == "ACKNOWLEDGED"
++
++
++def test_notification_event_carries_delivery_state():
++    """NotificationEvent includes delivery_state field."""
++    from supervisor.notifications import NotificationEvent
++
++    event = NotificationEvent(
++        event_type="human_pause",
++        run_id="r1",
++        top_state="PAUSED_FOR_HUMAN",
++        reason="test",
++        next_action="resume",
++        delivery_state="TIMED_OUT",
++    )
++    d = event.to_dict()
++    assert d["delivery_state"] == "TIMED_OUT"
++
++
++# ---------------------------------------------------------------------------
++# Phase 5: Pause summary
++# ---------------------------------------------------------------------------
++
++def test_pause_summary_delivery_failed():
++    """status_reason returns delivery_failed when delivery_state is FAILED."""
++    from supervisor.pause_summary import status_reason
++
++    state = {"top_state": "PAUSED_FOR_HUMAN", "delivery_state": "FAILED"}
++    assert status_reason(state) == "delivery_failed"
++
++
++def test_pause_summary_delivery_timed_out():
++    """status_reason returns delivery_timed_out when delivery_state is TIMED_OUT."""
++    from supervisor.pause_summary import status_reason
++
++    state = {"top_state": "PAUSED_FOR_HUMAN", "delivery_state": "TIMED_OUT"}
++    assert status_reason(state) == "delivery_timed_out"
++
++
++def test_status_reason_delivering_instruction():
++    """status_reason shows delivering state when RUNNING + INJECTED/SUBMITTED."""
++    from supervisor.pause_summary import status_reason
++
++    state = {"top_state": "RUNNING", "current_node_id": "step_1", "delivery_state": "SUBMITTED"}
++    assert "delivering instruction" in status_reason(state)
++
++    state2 = {"top_state": "RUNNING", "current_node_id": "step_1", "delivery_state": "ACKNOWLEDGED"}
++    assert "acknowledged" in status_reason(state2)
++
++
++def test_status_reason_foreground_debug():
++    """status_reason shows 'debug foreground' for foreground-owned RUNNING state."""
++    from supervisor.pause_summary import status_reason
++
++    state = {"top_state": "RUNNING", "current_node_id": "step_1", "controller_mode": "foreground"}
++    result = status_reason(state)
++    assert "debug foreground" in result
++
++    # Daemon-owned shows "working"
++    state2 = {"top_state": "RUNNING", "current_node_id": "step_1", "controller_mode": "daemon"}
++    result2 = status_reason(state2)
++    assert "working" in result2
++
++
++# ---------------------------------------------------------------------------
++# Phase 5: Daemon recovery
++# ---------------------------------------------------------------------------
++
++def test_daemon_recovery_includes_delivery_state_in_reason(tmp_path):
++    """Orphan recovery mentions delivery state when it was in-flight."""
++    from supervisor.daemon.server import DaemonServer
++
++    runs_dir = tmp_path / "runs"
++    run_dir = runs_dir / "run_abc"
++    run_dir.mkdir(parents=True)
++    state_data = {
++        "run_id": "run_abc", "spec_id": "test", "mode": "strict_verifier",
++        "top_state": "RUNNING", "current_node_id": "step_1",
++        "delivery_state": "INJECTED",
++        "controller_mode": "daemon",
++    }
++    (run_dir / "state.json").write_text(json.dumps(state_data))
++
++    daemon = DaemonServer.__new__(DaemonServer)
++    daemon.runs_dir = str(runs_dir)
++    recovered = daemon._recover_orphaned_runs()
++
++    assert recovered == 1
++    loaded = json.loads((run_dir / "state.json").read_text())
++    assert loaded["top_state"] == "PAUSED_FOR_HUMAN"
++    assert loaded["delivery_state"] == "IDLE"
++    escalation = loaded["human_escalations"][-1]
++    assert "delivery_state=INJECTED" in escalation["reason"]
++    assert escalation["delivery_state_at_crash"] == "INJECTED"
++
++
++def test_daemon_recovery_timed_out_delivery(tmp_path):
++    """Orphan recovery mentions delivery timeout when that was the state."""
++    from supervisor.daemon.server import DaemonServer
++
++    runs_dir = tmp_path / "runs"
++    run_dir = runs_dir / "run_xyz"
++    run_dir.mkdir(parents=True)
++    state_data = {
++        "run_id": "run_xyz", "spec_id": "test", "mode": "strict_verifier",
++        "top_state": "RUNNING", "current_node_id": "step_1",
++        "delivery_state": "TIMED_OUT",
++        "controller_mode": "daemon",
++    }
++    (run_dir / "state.json").write_text(json.dumps(state_data))
++
++    daemon = DaemonServer.__new__(DaemonServer)
++    daemon.runs_dir = str(runs_dir)
++    recovered = daemon._recover_orphaned_runs()
++
++    assert recovered == 1
++    loaded = json.loads((run_dir / "state.json").read_text())
++    assert loaded["delivery_state"] == "IDLE"
++    escalation = loaded["human_escalations"][-1]
++    assert "delivery timeout" in escalation["reason"]
+diff --git a/tests/test_global_registry.py b/tests/test_global_registry.py
+index 39e2050..a7e6a91 100644
+--- a/tests/test_global_registry.py
++++ b/tests/test_global_registry.py
+@@ -157,3 +157,66 @@ def test_daemon_server_rejects_cross_daemon_pane_conflict(tmp_path, monkeypatch)
+     server_a._reap_finished()
+     server_b._do_stop_all()
+     server_b._reap_finished()
++
++
++def test_pane_lock_includes_controller_mode(tmp_path, monkeypatch):
++    """Pane lock metadata includes controller_mode."""
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_DIR", str(tmp_path / "global"))
++
++    owner = {
++        "pid": os.getpid(),
++        "cwd": "/tmp/project",
++        "run_id": "run_abc",
++        "spec_path": "/tmp/spec.yaml",
++        "controller_mode": "daemon",
++    }
++    acquired, record = acquire_pane_lock("%10", owner)
++    assert acquired
++    assert record["controller_mode"] == "daemon"
++
++    found = find_pane_owner("%10")
++    assert found["controller_mode"] == "daemon"
++    release_pane_lock("%10", "run_abc")
++
++
++def test_foreground_lock_has_controller_mode(tmp_path, monkeypatch):
++    """Foreground pane lock includes controller_mode=foreground."""
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_DIR", str(tmp_path / "global"))
++
++    owner = {
++        "pid": os.getpid(),
++        "cwd": "/tmp/project",
++        "run_id": "run_fg",
++        "spec_path": "/tmp/spec.yaml",
++        "controller_mode": "foreground",
++    }
++    acquired, record = acquire_pane_lock("%11", owner)
++    assert acquired
++    assert record["controller_mode"] == "foreground"
++    release_pane_lock("%11", "run_fg")
++
++
++def test_foreground_rejects_locked_pane(tmp_path, monkeypatch):
++    """Cannot acquire pane lock when already locked by daemon."""
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_DIR", str(tmp_path / "global"))
++
++    daemon_owner = {
++        "pid": os.getpid(),
++        "cwd": "/tmp/project",
++        "run_id": "run_daemon",
++        "spec_path": "/tmp/spec.yaml",
++        "controller_mode": "daemon",
++    }
++    acquire_pane_lock("%12", daemon_owner)
++
++    fg_owner = {
++        "pid": os.getpid(),
++        "cwd": "/tmp/project",
++        "run_id": "run_fg",
++        "spec_path": "/tmp/spec.yaml",
++        "controller_mode": "foreground",
++    }
++    acquired, existing = acquire_pane_lock("%12", fg_owner)
++    assert not acquired
++    assert existing["controller_mode"] == "daemon"
++    release_pane_lock("%12", "run_daemon")
+diff --git a/tests/test_multi_project.py b/tests/test_multi_project.py
+new file mode 100644
+index 0000000..830e22a
+--- /dev/null
++++ b/tests/test_multi_project.py
+@@ -0,0 +1,97 @@
++"""Tests for multi-project config sharing and isolation."""
++from __future__ import annotations
++
++import yaml
++from unittest.mock import patch
++
++from supervisor.config import RuntimeConfig, save_global_config, save_project_config
++from supervisor.credentials import persist_credential, resolve_credentials
++from supervisor.bootstrap import bootstrap
++
++
++def test_two_projects_shared_global_config(tmp_path, monkeypatch):
++    """Two projects share global config for inheritable fields."""
++    gpath = tmp_path / "global.yaml"
++    gpath.write_text("worker_model: shared-model\n")
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(gpath))
++
++    proj_a = tmp_path / "project-a"
++    proj_b = tmp_path / "project-b"
++    proj_a.mkdir()
++    proj_b.mkdir()
++    (proj_a / ".supervisor").mkdir()
++    (proj_a / ".supervisor" / "config.yaml").write_text("surface_type: tmux\n")
++    (proj_b / ".supervisor").mkdir()
++    (proj_b / ".supervisor" / "config.yaml").write_text("surface_type: tmux\n")
++
++    cfg_a = RuntimeConfig.load(str(proj_a / ".supervisor" / "config.yaml"))
++    cfg_b = RuntimeConfig.load(str(proj_b / ".supervisor" / "config.yaml"))
++
++    assert cfg_a.worker_model == "shared-model"
++    assert cfg_b.worker_model == "shared-model"
++
++
++def test_project_local_override(tmp_path, monkeypatch):
++    """Project A overrides global, project B uses global."""
++    gpath = tmp_path / "global.yaml"
++    gpath.write_text("worker_model: global-model\n")
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(gpath))
++
++    proj_a = tmp_path / "project-a"
++    proj_b = tmp_path / "project-b"
++    proj_a.mkdir()
++    proj_b.mkdir()
++    (proj_a / ".supervisor").mkdir()
++    (proj_a / ".supervisor" / "config.yaml").write_text("worker_model: local-model-a\n")
++    (proj_b / ".supervisor").mkdir()
++    (proj_b / ".supervisor" / "config.yaml").write_text("surface_type: tmux\n")
++
++    cfg_a = RuntimeConfig.load(str(proj_a / ".supervisor" / "config.yaml"))
++    cfg_b = RuntimeConfig.load(str(proj_b / ".supervisor" / "config.yaml"))
++
++    assert cfg_a.worker_model == "local-model-a"
++    assert cfg_b.worker_model == "global-model"
++
++
++def test_global_credential_reuse(tmp_path, monkeypatch):
++    """Credential saved globally from project A is visible to project B."""
++    gpath = tmp_path / "global.yaml"
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(gpath))
++
++    persist_credential("worker_model", "shared-via-cred", scope="global")
++
++    proj_b = tmp_path / "project-b"
++    proj_b.mkdir()
++    (proj_b / ".supervisor").mkdir()
++    (proj_b / ".supervisor" / "config.yaml").write_text("surface_type: tmux\n")
++
++    cfg_b = RuntimeConfig.load(str(proj_b / ".supervisor" / "config.yaml"))
++    assert cfg_b.worker_model == "shared-via-cred"
++
++
++def test_bootstrap_two_projects(tmp_path, monkeypatch):
++    """Bootstrap in two dirs gets independent state but shared config."""
++    gpath = tmp_path / "global.yaml"
++    gpath.write_text("worker_model: shared\n")
++    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(gpath))
++    monkeypatch.setenv("TMUX", "/tmp/tmux-test/default,1234,0")
++    monkeypatch.setenv("TMUX_PANE", "%0")
++
++    proj_a = tmp_path / "project-a"
++    proj_b = tmp_path / "project-b"
++    proj_a.mkdir()
++    proj_b.mkdir()
++
++    with patch("supervisor.bootstrap._ensure_daemon_running"), \
++         patch("supervisor.bootstrap._validate_pane", return_value=(None, None)):
++        result_a = bootstrap(cwd=str(proj_a))
++        result_b = bootstrap(cwd=str(proj_b))
++
++    assert result_a.ok
++    assert result_b.ok
++    # Both got their own .supervisor/
++    assert (proj_a / ".supervisor").exists()
++    assert (proj_b / ".supervisor").exists()
++    # Both resolved shared global config
++    assert result_a.config.worker_model == "shared"
++    assert result_b.config.worker_model == "shared"
+diff --git a/tests/test_publish_workflow.py b/tests/test_publish_workflow.py
+new file mode 100644
+index 0000000..875a08d
+--- /dev/null
++++ b/tests/test_publish_workflow.py
+@@ -0,0 +1,40 @@
++from pathlib import Path
++
++import yaml
++
++
++def test_publish_workflow_uses_staged_pypi_release_flow():
++    workflow = yaml.safe_load(
++        Path(".github/workflows/publish.yml").read_text(encoding="utf-8")
++    )
++
++    trigger = workflow.get("on", workflow.get(True))
++    assert trigger is not None
++    assert "workflow_dispatch" in trigger
++
++    jobs = workflow["jobs"]
++    assert "build" in jobs
++    assert "publish-testpypi" in jobs
++    assert "publish-pypi" in jobs
++
++    assert jobs["publish-testpypi"]["environment"]["name"] == "testpypi"
++    assert jobs["publish-pypi"]["environment"]["name"] == "pypi"
++
++    build_steps = jobs["build"]["steps"]
++    assert any(step.get("run") == "python -m build" for step in build_steps)
++    assert any("actions/upload-artifact" in step.get("uses", "") for step in build_steps)
++
++    publish_test_steps = jobs["publish-testpypi"]["steps"]
++    assert any("actions/download-artifact" in step.get("uses", "") for step in publish_test_steps)
++    assert any(
++        step.get("with", {}).get("repository-url") == "https://test.pypi.org/legacy/"
++        for step in publish_test_steps
++        if "with" in step
++    )
++
++    publish_pypi_steps = jobs["publish-pypi"]["steps"]
++    assert any("actions/download-artifact" in step.get("uses", "") for step in publish_pypi_steps)
++    assert any(
++        "gh-action-pypi-publish" in step.get("uses", "")
++        for step in publish_pypi_steps
++    )
