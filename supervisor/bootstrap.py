@@ -23,6 +23,7 @@ class BootstrapResult:
     surface_type: str = ""
     missing_credentials: list[dict] = field(default_factory=list)
     error: str = ""
+    conflict: dict = field(default_factory=dict)  # {run_id, controller_mode, spec_path, suggested_action}
 
 
 def _step(name: str, status: str, message: str) -> dict:
@@ -105,11 +106,13 @@ def _do_bootstrap(result: BootstrapResult) -> None:
     result.surface_type = config.surface_type or "tmux"
 
     # Validate pane is accessible and not locked by another run
-    pane_issue = _validate_pane(pane)
+    pane_issue, pane_conflict = _validate_pane(pane)
     if pane_issue:
         result.steps.append(_step("pane_detect", "failed", pane_issue))
         result.ok = False
         result.error = pane_issue
+        if pane_conflict:
+            result.conflict = pane_conflict
         return
     result.steps.append(_step("pane_detect", "ok", f"pane={pane}"))
 
@@ -157,8 +160,11 @@ def _auto_init() -> None:
                 f.write("\n.supervisor/runtime/\n")
 
 
-def _validate_pane(pane: str) -> str | None:
-    """Validate that the pane is accessible and not locked. Returns issue or None."""
+def _validate_pane(pane: str) -> tuple[str | None, dict | None]:
+    """Validate pane accessibility and ownership.
+
+    Returns (issue_string, conflict_metadata) — both None if ok.
+    """
     # Check pane is actually accessible via tmux
     try:
         import subprocess
@@ -167,11 +173,11 @@ def _validate_pane(pane: str) -> str | None:
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
-            return f"pane {pane} is not accessible: {result.stderr.strip()}"
+            return f"pane {pane} is not accessible: {result.stderr.strip()}", None
     except FileNotFoundError:
-        return "tmux command not found"
+        return "tmux command not found", None
     except Exception as exc:
-        return f"pane validation failed: {exc}"
+        return f"pane validation failed: {exc}", None
 
     # Check pane is not locked by another run
     try:
@@ -181,20 +187,28 @@ def _validate_pane(pane: str) -> str | None:
             mode = owner.get("controller_mode", "unknown")
             run_id = owner.get("run_id", "?")
             spec = owner.get("spec_path", "?")
+            conflict = {
+                "run_id": run_id,
+                "controller_mode": mode,
+                "spec_path": spec,
+                "pid": owner.get("pid"),
+            }
             if mode == "foreground":
+                conflict["suggested_action"] = f"thin-supervisor run stop-foreground {run_id}"
                 return (
                     f"pane {pane} is owned by foreground debug run {run_id} "
                     f"(spec: {spec}); stop the foreground run or use a different pane"
-                )
+                ), conflict
+            conflict["suggested_action"] = f"thin-supervisor observe {run_id}"
             return (
                 f"pane {pane} is owned by daemon run {run_id} (spec: {spec}); "
                 f"use 'thin-supervisor observe {run_id}' to watch or "
                 f"'thin-supervisor run stop {run_id}' to release"
-            )
+            ), conflict
     except Exception:
         pass  # registry check is best-effort
 
-    return None
+    return None, None
 
 
 def _ensure_daemon_running(config: RuntimeConfig | None = None) -> None:

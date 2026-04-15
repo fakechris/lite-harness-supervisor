@@ -33,7 +33,7 @@ def test_bootstrap_fresh_project(tmp_path, monkeypatch):
     monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
 
     with patch("supervisor.bootstrap._ensure_daemon_running"), \
-         patch("supervisor.bootstrap._validate_pane", return_value=None):
+         patch("supervisor.bootstrap._validate_pane", return_value=(None, None)):
         result = bootstrap(cwd=str(tmp_path))
 
     assert result.ok, f"error: {result.error}"
@@ -54,7 +54,7 @@ def test_bootstrap_existing_project(tmp_path, monkeypatch):
     monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
 
     with patch("supervisor.bootstrap._ensure_daemon_running"), \
-         patch("supervisor.bootstrap._validate_pane", return_value=None):
+         patch("supervisor.bootstrap._validate_pane", return_value=(None, None)):
         result = bootstrap(cwd=str(tmp_path))
 
     assert result.ok
@@ -75,7 +75,7 @@ def test_bootstrap_daemon_already_running(tmp_path, monkeypatch):
     mock_client.is_running.return_value = True
 
     with patch("supervisor.daemon.client.DaemonClient", return_value=mock_client), \
-         patch("supervisor.bootstrap._validate_pane", return_value=None):
+         patch("supervisor.bootstrap._validate_pane", return_value=(None, None)):
         result = bootstrap(cwd=str(tmp_path))
 
     assert result.ok
@@ -93,7 +93,7 @@ def test_bootstrap_pane_detect(tmp_path, monkeypatch):
     monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
 
     with patch("supervisor.bootstrap._ensure_daemon_running"), \
-         patch("supervisor.bootstrap._validate_pane", return_value=None):
+         patch("supervisor.bootstrap._validate_pane", return_value=(None, None)):
         result = bootstrap(cwd=str(tmp_path))
 
     assert result.ok
@@ -111,7 +111,7 @@ def test_bootstrap_no_pane(tmp_path, monkeypatch):
     monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
 
     with patch("supervisor.bootstrap._ensure_daemon_running"), \
-         patch("supervisor.bootstrap._validate_pane", return_value=None):
+         patch("supervisor.bootstrap._validate_pane", return_value=(None, None)):
         result = bootstrap(cwd=str(tmp_path))
 
     assert not result.ok
@@ -128,7 +128,7 @@ def test_bootstrap_pane_locked(tmp_path, monkeypatch):
     monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
 
     with patch("supervisor.bootstrap._ensure_daemon_running"), \
-         patch("supervisor.bootstrap._validate_pane", return_value="pane %5 is locked by run run_xyz"):
+         patch("supervisor.bootstrap._validate_pane", return_value=("pane %5 is locked by run run_xyz", {"run_id": "run_xyz", "controller_mode": "daemon"})):
         result = bootstrap(cwd=str(tmp_path))
 
     assert not result.ok
@@ -144,14 +144,19 @@ def test_bootstrap_pane_locked_by_daemon(tmp_path, monkeypatch):
     monkeypatch.setenv("TMUX_PANE", "%6")
     monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
 
+    daemon_conflict = {
+        "run_id": "run_d1", "controller_mode": "daemon",
+        "spec_path": "s.yaml", "suggested_action": "thin-supervisor observe run_d1",
+    }
     with patch("supervisor.bootstrap._ensure_daemon_running"), \
          patch("supervisor.bootstrap._validate_pane",
-               return_value="pane %6 is owned by daemon run run_d1 (spec: s.yaml); use 'thin-supervisor observe run_d1'"):
+               return_value=("pane %6 is owned by daemon run run_d1", daemon_conflict)):
         result = bootstrap(cwd=str(tmp_path))
 
     assert not result.ok
     assert "daemon" in result.error
-    assert "observe" in result.error
+    assert result.conflict["run_id"] == "run_d1"
+    assert result.conflict["suggested_action"] == "thin-supervisor observe run_d1"
 
 
 def test_bootstrap_pane_locked_by_foreground(tmp_path, monkeypatch):
@@ -163,13 +168,18 @@ def test_bootstrap_pane_locked_by_foreground(tmp_path, monkeypatch):
     monkeypatch.setenv("TMUX_PANE", "%7")
     monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
 
+    fg_conflict = {
+        "run_id": "run_fg", "controller_mode": "foreground",
+        "spec_path": "spec.yaml", "suggested_action": "thin-supervisor run stop-foreground run_fg",
+    }
     with patch("supervisor.bootstrap._ensure_daemon_running"), \
          patch("supervisor.bootstrap._validate_pane",
-               return_value="pane %7 is owned by foreground debug run run_fg; stop the foreground run"):
+               return_value=("pane %7 is owned by foreground debug run run_fg", fg_conflict)):
         result = bootstrap(cwd=str(tmp_path))
 
     assert not result.ok
     assert "foreground" in result.error
+    assert result.conflict["controller_mode"] == "foreground"
 
 
 def test_bootstrap_result_structure(tmp_path, monkeypatch):
@@ -182,7 +192,7 @@ def test_bootstrap_result_structure(tmp_path, monkeypatch):
     monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
 
     with patch("supervisor.bootstrap._ensure_daemon_running"), \
-         patch("supervisor.bootstrap._validate_pane", return_value=None):
+         patch("supervisor.bootstrap._validate_pane", return_value=(None, None)):
         result = bootstrap(cwd=str(tmp_path))
 
     assert isinstance(result.steps, list)

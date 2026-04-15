@@ -111,6 +111,22 @@ def list_daemons() -> list[dict]:
     return sorted(records, key=lambda item: (item.get("cwd", ""), item.get("socket", "")))
 
 
+def list_pane_owners() -> list[dict]:
+    """List all active pane locks (stale locks with dead PIDs are cleaned up)."""
+    records: list[dict] = []
+    panes_dir = _panes_dir()
+    for path in sorted(panes_dir.glob("*.json")):
+        record = _read_json(path)
+        if not record:
+            path.unlink(missing_ok=True)
+            continue
+        if not _pid_alive(record.get("pid")):
+            path.unlink(missing_ok=True)
+            continue
+        records.append(record)
+    return records
+
+
 def find_pane_owner(pane_target: str) -> dict | None:
     path = _pane_path(pane_target)
     owner = _read_json(path)
