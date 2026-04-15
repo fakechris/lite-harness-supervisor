@@ -70,8 +70,8 @@ The Skill will:
 2. Generate a draft spec YAML with verification steps
 3. Self-review the plan (architect + critic passes)
 4. Ask you to approve
-5. Mark the spec approved with `thin-supervisor spec approve --spec .supervisor/specs/<slug>.yaml --by human`
-6. Attach immediately with `scripts/thin-supervisor-attach.sh <slug>`
+5. Run `thin-supervisor bootstrap` to auto-init, start daemon, and validate the surface
+6. Mark the spec approved and register the run
 7. Start emitting checkpoints as it works
 
 If a spec is still in `approval.status: draft`, execution commands reject it until you approve it.

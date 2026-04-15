@@ -475,10 +475,13 @@ class SupervisorLoop:
             transition_top_state(state, TopState.RUNNING, reason="initial handoff")
             self.store.save(state)
             pending_text = terminal.read(lines=read_lines)
-            cp = adapter.parse_checkpoint(pending_text, run_id=state.run_id, surface_id=surface_id)
-            # #2: validate run_id on startup to avoid stale pane content
+            # Only look at the tail of the pane for an init checkpoint.
+            # Full pane text may contain stale checkpoints from previous runs
+            # that would falsely suppress the init inject.
+            tail_text = "\n".join(pending_text.splitlines()[-50:]) if pending_text else ""
+            cp = adapter.parse_checkpoint(tail_text, run_id=state.run_id, surface_id=surface_id)
             if cp and cp.run_id and cp.run_id != state.run_id:
-                cp = None  # stale checkpoint from previous run
+                cp = None  # checkpoint from a different run
             if cp:
                 # The pane/session is already emitting progress for the current
                 # node, so avoid re-injecting the same instruction on the first
