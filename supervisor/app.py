@@ -673,6 +673,16 @@ def _list_global_daemons() -> list[dict]:
     return list_daemons()
 
 
+def _compute_idle_display(daemon: dict) -> str:
+    """Format idle duration from registry (kept fresh by daemon refresh loop)."""
+    idle = daemon.get("idle_for_sec", 0)
+    if idle >= 3600:
+        return f"{idle // 3600}h"
+    if idle >= 60:
+        return f"{idle // 60}m"
+    return f"{idle}s" if idle > 0 else "-"
+
+
 def _find_global_pane_owner(pane_target: str) -> dict | None:
     return find_pane_owner(pane_target)
 
@@ -694,8 +704,10 @@ def cmd_ps(args):
         print(f"  {'PID':<8} {'STATE':<8} {'RUNS':<6} {'IDLE':<8} {'CWD'}")
         for daemon in daemons:
             state = daemon.get("state", "active")
-            idle = daemon.get("idle_for_sec", 0)
-            idle_str = f"{idle}s" if idle > 0 else "-"
+            idle_str = "-"
+            if state == "idle" and daemon.get("active_runs", 0) == 0:
+                # Compute real-time idle from registry snapshot timestamp
+                idle_str = _compute_idle_display(daemon)
             print(
                 f"  {daemon.get('pid', '?'):<8} "
                 f"{state:<8} "
@@ -1524,6 +1536,7 @@ def cmd_status(args):
     daemon_runs: list[dict] = []
     foreground_runs: list[dict] = []
     orphaned_runs: list[dict] = []
+    completed_runs: list[dict] = []
 
     # Collect daemon-managed runs
     client = DaemonClient()
@@ -1543,11 +1556,11 @@ def cmd_status(args):
         elif state.get("controller_mode") == "foreground":
             foreground_runs.append(display)
         elif display.get("top_state") == "COMPLETED":
-            pass  # skip completed in status view
+            completed_runs.append(display)
         else:
             orphaned_runs.append(display)
 
-    if not daemon_runs and not foreground_runs and not orphaned_runs:
+    if not daemon_runs and not foreground_runs and not orphaned_runs and not completed_runs:
         if client.is_running():
             print("Daemon running, no active runs.")
         else:
@@ -1580,6 +1593,13 @@ def cmd_status(args):
                 print(f"    reason: {r['pause_reason']}")
             if r.get("next_action"):
                 print(f"    next:   {r['next_action']}")
+
+    if completed_runs:
+        print("Recently completed:")
+        for r in completed_runs:
+            print(f"  [done]  {r.get('run_id', '?')}  node={r.get('current_node_id', '')}")
+            if r.get("next_action"):
+                print(f"    next: {r['next_action']}")
 
     return 0
 
@@ -1722,7 +1742,12 @@ def _inspect_run(item: dict, args) -> None:
         print(f"Worktree:   {item['worktree']}")
 
     # Load state and session events via StateStore
-    run_dir = str(Path(RUNTIME_DIR) / "runs" / run_id)
+    # Use the worktree root to find the correct state directory
+    worktree = item.get("worktree", "").strip()
+    if worktree:
+        run_dir = str(Path(worktree) / ".supervisor" / "runtime" / "runs" / run_id)
+    else:
+        run_dir = str(Path(RUNTIME_DIR) / "runs" / run_id)
     try:
         store = StateStore(run_dir)
         state_data = store.load_raw()

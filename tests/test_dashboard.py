@@ -101,7 +101,7 @@ def test_ps_shows_idle_state(monkeypatch, capsys):
     assert "STATE" in out
     assert "active" in out
     assert "idle" in out
-    assert "480s" in out
+    assert "8m" in out
 
 
 def test_status_alive_foreground_not_orphaned(tmp_path, monkeypatch, capsys):
