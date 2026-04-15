@@ -674,13 +674,16 @@ def cmd_ps(args):
 
     if daemons:
         print("Daemons:")
-        print(f"  {'PID':<8} {'RUNS':<6} {'STARTED':<28} {'SOCKET':<32} {'CWD'}")
+        print(f"  {'PID':<8} {'STATE':<8} {'RUNS':<6} {'IDLE':<8} {'CWD'}")
         for daemon in daemons:
+            state = daemon.get("state", "active")
+            idle = daemon.get("idle_for_sec", 0)
+            idle_str = f"{idle}s" if idle > 0 else "-"
             print(
                 f"  {daemon.get('pid', '?'):<8} "
+                f"{state:<8} "
                 f"{daemon.get('active_runs', 0):<6} "
-                f"{daemon.get('started_at', ''):<28} "
-                f"{daemon.get('socket', ''):<32} "
+                f"{idle_str:<8} "
                 f"{daemon.get('cwd', '')}"
             )
 
@@ -1498,82 +1501,204 @@ def cmd_session(args):
 
 
 def cmd_status(args):
-    """Show all run states."""
+    """Show all run states, bucketed by controller mode."""
     from supervisor.daemon.client import DaemonClient
 
-    # Try daemon first
+    daemon_runs: list[dict] = []
+    foreground_runs: list[dict] = []
+    orphaned_runs: list[dict] = []
+
+    # Collect daemon-managed runs
     client = DaemonClient()
     if client.is_running():
         result = client.status()
         if result.get("ok"):
-            runs = result.get("runs", [])
-            if not runs:
-                print("Daemon running, no active runs.")
-                _print_local_state_hint()
-                return 0
-            print(f"{'RUN_ID':<20} {'PANE':<20} {'STATE':<18} {'NODE'}")
-            for r in runs:
-                print(f"{r['run_id']:<20} {r['pane_target']:<20} {r['top_state']:<18} {r.get('current_node', '')}")
-                if r.get("status_reason"):
-                    print(f"  status: {r['status_reason']}")
-                if r.get("pause_reason"):
-                    print(f"  reason: {r['pause_reason']}")
-                if r.get("next_action"):
-                    print(f"  next:   {r['next_action']}")
-            return 0
+            daemon_runs = result.get("runs", [])
 
-    # Fallback: scan run directories
-    runs_dir = Path(RUNTIME_DIR) / "runs"
-    if not runs_dir.exists():
-        # Legacy: check old-style state.json
-        state_path = Path(RUNTIME_DIR) / "state.json"
-        if state_path.exists():
-            try:
-                state = _summarize_local_state_for_hint(json.loads(state_path.read_text()))
-                print(f"Run:   {state.get('run_id', '?')}")
-                print(f"State: {state.get('top_state', '?')}")
-                print(f"Node:  {state.get('current_node_id', '?')}")
-                if state.get("status_reason"):
-                    print(f"Status: {state['status_reason']}")
-                if state.get("pause_reason"):
-                    print(f"Reason: {state['pause_reason']}")
-                if state.get("next_action"):
-                    print(f"Next:   {state['next_action']}")
-                return 0
-            except json.JSONDecodeError:
-                print("Error: state.json is corrupt.")
-                return 1
-        print("No runs found. Daemon not running.")
-        return 1
+    # Collect local state (foreground, orphaned, completed)
+    for state in _find_local_run_summaries():
+        display = _summarize_local_state_for_hint(state)
+        # Skip daemon-managed runs already shown above
+        if any(r["run_id"] == display.get("run_id") for r in daemon_runs):
+            continue
+        if display.get("orphaned_local_state"):
+            orphaned_runs.append(display)
+        elif state.get("controller_mode") == "foreground":
+            foreground_runs.append(display)
+        elif display.get("top_state") == "COMPLETED":
+            pass  # skip completed in status view
+        else:
+            orphaned_runs.append(display)
 
-    found = False
-    for run_dir in sorted(runs_dir.iterdir()):
-        state_path = run_dir / "state.json"
-        if state_path.exists():
-            try:
-                state = _summarize_local_state_for_hint(json.loads(state_path.read_text()))
-                if not found:
-                    print(f"{'RUN_ID':<20} {'PANE':<20} {'STATE':<18} {'NODE'}")
-                    found = True
-                print(f"{state.get('run_id', '?'):<20} {state.get('pane_target', '?'):<20} {state.get('top_state', '?'):<18} {state.get('current_node_id', '')}")
-                if state.get("status_reason"):
-                    print(f"  status: {state['status_reason']}")
-                if state.get("pause_reason"):
-                    print(f"  reason: {state['pause_reason']}")
-                if state.get("next_action"):
-                    print(f"  next:   {state['next_action']}")
-            except json.JSONDecodeError:
-                continue
+    if not daemon_runs and not foreground_runs and not orphaned_runs:
+        if client.is_running():
+            print("Daemon running, no active runs.")
+        else:
+            print("No runs found. Daemon not running.")
+        return 0
 
-    if not found:
-        print("No runs found.")
-        return 1
+    if daemon_runs:
+        print("Active runs:")
+        for r in daemon_runs:
+            print(f"  [daemon]  {r['run_id']}  {r['top_state']}  node={r.get('current_node', '')}  pane={r.get('pane_target', '?')}")
+            if r.get("status_reason"):
+                print(f"    status: {r['status_reason']}")
+            if r.get("pause_reason"):
+                print(f"    reason: {r['pause_reason']}")
+            if r.get("next_action"):
+                print(f"    next:   {r['next_action']}")
+
+    if foreground_runs:
+        print("Debug foreground runs:")
+        for r in foreground_runs:
+            print(f"  [foreground]  {r.get('run_id', '?')}  {r.get('top_state', '?')}  node={r.get('current_node_id', '')}  pane={r.get('pane_target', '?')}")
+            if r.get("status_reason"):
+                print(f"    status: {r['status_reason']}")
+
+    if orphaned_runs:
+        print("Orphaned local state:")
+        for r in orphaned_runs:
+            print(f"  [orphaned]  {r.get('run_id', '?')}  {r.get('top_state', '?')}  node={r.get('current_node_id', '')}  pane={r.get('pane_target', '?')}")
+            if r.get("pause_reason"):
+                print(f"    reason: {r['pause_reason']}")
+            if r.get("next_action"):
+                print(f"    next:   {r['next_action']}")
+
     return 0
 
 
 # ------------------------------------------------------------------
 # bridge (unchanged)
 # ------------------------------------------------------------------
+
+
+def cmd_dashboard(args):
+    """Interactive dashboard: numbered list of all runs, press a key to inspect."""
+    from supervisor.daemon.client import DaemonClient
+
+    items: list[dict] = []
+
+    # Collect daemon runs
+    client = DaemonClient()
+    if client.is_running():
+        result = client.status()
+        if result.get("ok"):
+            for r in result.get("runs", []):
+                items.append({
+                    "run_id": r["run_id"],
+                    "tag": "daemon",
+                    "state": r["top_state"],
+                    "node": r.get("current_node", ""),
+                    "pane": r.get("pane_target", "?"),
+                })
+
+    # Collect local state
+    for state in _find_local_run_summaries():
+        display = _summarize_local_state_for_hint(state)
+        if any(i["run_id"] == display.get("run_id") for i in items):
+            continue
+        if display.get("orphaned_local_state"):
+            tag = "orphaned"
+        elif state.get("controller_mode") == "foreground":
+            tag = "foreground"
+        else:
+            tag = "local"
+        items.append({
+            "run_id": display.get("run_id", "?"),
+            "tag": tag,
+            "state": display.get("top_state", "?"),
+            "node": display.get("current_node_id", ""),
+            "pane": display.get("pane_target", "?"),
+        })
+
+    # Show daemons header
+    daemons = _list_global_daemons()
+    if daemons:
+        print("Daemons:")
+        for d in daemons:
+            state = d.get("state", "active")
+            idle = d.get("idle_for_sec", 0)
+            idle_str = f"idle {idle}s" if idle > 0 else "active"
+            print(f"  PID={d.get('pid', '?')}  {idle_str}  runs={d.get('active_runs', 0)}  {d.get('cwd', '')}")
+        print()
+
+    if not items:
+        print("No runs found.")
+        return 0
+
+    # Print numbered list
+    print("Runs:")
+    for i, item in enumerate(items, 1):
+        print(f"  {i}. [{item['tag']}]  {item['run_id']}  {item['state']}  node={item['node']}  pane={item['pane']}")
+
+    print(f"\n[1-{len(items)}] inspect  [q] quit")
+
+    # Interactive loop
+    while True:
+        try:
+            choice = input("> ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if choice in ("q", "quit", ""):
+            break
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(items):
+                _inspect_run(items[idx], args)
+                # Re-show the list
+                print()
+                for i, item in enumerate(items, 1):
+                    print(f"  {i}. [{item['tag']}]  {item['run_id']}  {item['state']}  node={item['node']}  pane={item['pane']}")
+                print(f"\n[1-{len(items)}] inspect  [q] quit")
+            else:
+                print(f"  Invalid: choose 1-{len(items)}")
+        except ValueError:
+            print(f"  Invalid: choose 1-{len(items)} or q")
+
+    return 0
+
+
+def _inspect_run(item: dict, args) -> None:
+    """Print detailed info for a single run."""
+    run_id = item["run_id"]
+    tag = item["tag"]
+    print(f"\n{'='*60}")
+    print(f"Run:        {run_id}")
+    print(f"Controller: {tag}")
+    print(f"State:      {item['state']}")
+    print(f"Node:       {item['node']}")
+    print(f"Pane:       {item['pane']}")
+
+    # Try to load session events
+    run_dir = Path(RUNTIME_DIR) / "runs" / run_id
+    state_path = run_dir / "state.json"
+    session_path = run_dir / "session_log.jsonl"
+
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text())
+            print(f"Delivery:   {state.get('delivery_state', 'IDLE')}")
+            print(f"Spec:       {state.get('spec_path', '?')}")
+            print(f"Checkpoint: seq={state.get('checkpoint_seq', 0)}")
+            escalations = state.get("human_escalations", [])
+            if escalations:
+                last = escalations[-1] if isinstance(escalations[-1], dict) else {"reason": str(escalations[-1])}
+                print(f"Last pause: {last.get('reason', '?')}")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    if session_path.exists():
+        try:
+            lines = session_path.read_text().strip().splitlines()
+            recent = lines[-5:] if len(lines) > 5 else lines
+            print(f"\nRecent events ({len(lines)} total):")
+            for line in recent:
+                evt = json.loads(line)
+                print(f"  [{evt.get('event_type', '?')}] {evt.get('timestamp', '')[:19]}")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    print(f"{'='*60}")
 
 
 def cmd_bootstrap(args):
@@ -2024,6 +2149,7 @@ def build_runtime_parser() -> argparse.ArgumentParser:
     p_bridge.add_argument("extra", nargs="*")
 
     sub.add_parser("bootstrap", help="Auto-detect, init, start daemon, and validate surface")
+    sub.add_parser("dashboard", help="Interactive run dashboard — numbered list with drill-in")
 
     p_config = sub.add_parser("config", help="Read or write config values")
     config_sub = p_config.add_subparsers(dest="config_action")
@@ -2150,6 +2276,8 @@ def main():
         sys.exit(cmd_bridge(args))
     elif args.command == "bootstrap":
         sys.exit(cmd_bootstrap(args))
+    elif args.command == "dashboard":
+        sys.exit(cmd_dashboard(args))
     elif args.command == "config":
         if args.config_action == "set":
             sys.exit(cmd_config_set(args))
