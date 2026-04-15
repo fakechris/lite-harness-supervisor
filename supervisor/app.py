@@ -38,6 +38,20 @@ OPS_LOG_FILE = ".supervisor/runtime/ops_log.jsonl"
 
 
 # ------------------------------------------------------------------
+# foreground PID persistence
+# ------------------------------------------------------------------
+
+
+def _persist_foreground_pid(run_dir: str, pid: int) -> None:
+    """Write foreground controller PID into state.json for liveness detection."""
+    state_path = Path(run_dir) / "state.json"
+    if state_path.exists():
+        data = json.loads(state_path.read_text())
+        data["_foreground_pid"] = pid
+        state_path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+# ------------------------------------------------------------------
 # init / deinit
 # ------------------------------------------------------------------
 
@@ -327,6 +341,9 @@ def cmd_run_foreground(args):
             workspace_root=os.getcwd(),
             controller_mode="foreground",
         )
+        # Persist PID so status/dashboard can detect alive foreground runs
+        store.save(state)
+        _persist_foreground_pid(run_dir, os.getpid())
 
         from supervisor.adapters.surface_factory import create_surface
         terminal = create_surface(surface_type, pane_target)
@@ -1577,26 +1594,59 @@ def cmd_dashboard(args):
     from supervisor.daemon.client import DaemonClient
 
     items: list[dict] = []
+    seen_run_ids: set[str] = set()
 
-    # Collect daemon runs
-    client = DaemonClient()
-    if client.is_running():
-        result = client.status()
-        if result.get("ok"):
-            for r in result.get("runs", []):
-                items.append({
-                    "run_id": r["run_id"],
-                    "tag": "daemon",
-                    "state": r["top_state"],
-                    "node": r.get("current_node", ""),
-                    "pane": r.get("pane_target", "?"),
-                })
+    # Collect runs from ALL daemons across worktrees
+    daemons = _list_global_daemons()
+    for daemon in daemons:
+        sock = daemon.get("socket", "")
+        if not sock:
+            continue
+        try:
+            remote = DaemonClient(sock_path=sock)
+            result = remote.status()
+            if result.get("ok"):
+                for r in result.get("runs", []):
+                    rid = r["run_id"]
+                    if rid in seen_run_ids:
+                        continue
+                    seen_run_ids.add(rid)
+                    worktree = daemon.get("cwd", "")
+                    items.append({
+                        "run_id": rid,
+                        "tag": "daemon",
+                        "state": r["top_state"],
+                        "node": r.get("current_node", ""),
+                        "pane": r.get("pane_target", "?"),
+                        "worktree": worktree,
+                    })
+        except (ConnectionRefusedError, FileNotFoundError, OSError):
+            pass  # unreachable daemon — skip
 
-    # Collect local state
+    # Collect foreground runs from global pane lock registry
+    for owner in list_pane_owners():
+        if owner.get("controller_mode") != "foreground":
+            continue
+        rid = owner.get("run_id", "?")
+        if rid in seen_run_ids:
+            continue
+        seen_run_ids.add(rid)
+        items.append({
+            "run_id": rid,
+            "tag": "foreground",
+            "state": "RUNNING",
+            "node": "",
+            "pane": owner.get("pane_target", "?"),
+            "worktree": owner.get("cwd", ""),
+        })
+
+    # Collect local state (orphaned, etc.)
     for state in _find_local_run_summaries():
         display = _summarize_local_state_for_hint(state)
-        if any(i["run_id"] == display.get("run_id") for i in items):
+        rid = display.get("run_id", "?")
+        if rid in seen_run_ids:
             continue
+        seen_run_ids.add(rid)
         if display.get("orphaned_local_state"):
             tag = "orphaned"
         elif state.get("controller_mode") == "foreground":
@@ -1604,15 +1654,13 @@ def cmd_dashboard(args):
         else:
             tag = "local"
         items.append({
-            "run_id": display.get("run_id", "?"),
+            "run_id": rid,
             "tag": tag,
             "state": display.get("top_state", "?"),
             "node": display.get("current_node_id", ""),
             "pane": display.get("pane_target", "?"),
+            "worktree": display.get("workspace_root", ""),
         })
-
-    # Show daemons header
-    daemons = _list_global_daemons()
     if daemons:
         print("Daemons:")
         for d in daemons:
@@ -1629,7 +1677,8 @@ def cmd_dashboard(args):
     # Print numbered list
     print("Runs:")
     for i, item in enumerate(items, 1):
-        print(f"  {i}. [{item['tag']}]  {item['run_id']}  {item['state']}  node={item['node']}  pane={item['pane']}")
+        wt = f"  ({item['worktree']})" if item.get("worktree") else ""
+        print(f"  {i}. [{item['tag']}]  {item['run_id']}  {item['state']}  node={item['node']}  pane={item['pane']}{wt}")
 
     print(f"\n[1-{len(items)}] inspect  [q] quit")
 
@@ -1648,7 +1697,8 @@ def cmd_dashboard(args):
                 # Re-show the list
                 print()
                 for i, item in enumerate(items, 1):
-                    print(f"  {i}. [{item['tag']}]  {item['run_id']}  {item['state']}  node={item['node']}  pane={item['pane']}")
+                    wt = f"  ({item['worktree']})" if item.get("worktree") else ""
+                    print(f"  {i}. [{item['tag']}]  {item['run_id']}  {item['state']}  node={item['node']}  pane={item['pane']}{wt}")
                 print(f"\n[1-{len(items)}] inspect  [q] quit")
             else:
                 print(f"  Invalid: choose 1-{len(items)}")

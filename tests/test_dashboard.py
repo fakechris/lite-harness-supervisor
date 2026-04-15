@@ -104,12 +104,81 @@ def test_ps_shows_idle_state(monkeypatch, capsys):
     assert "480s" in out
 
 
-def test_dashboard_shows_numbered_list(tmp_path, monkeypatch, capsys):
-    """cmd_dashboard prints numbered run list."""
+def test_status_alive_foreground_not_orphaned(tmp_path, monkeypatch, capsys):
+    """Active foreground run with alive PID is shown as foreground, not orphaned."""
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonWithRuns)
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
+
+    # Create a foreground run with current process PID (alive)
+    run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_fg_alive"
+    run_dir.mkdir(parents=True)
+    import os
+    (run_dir / "state.json").write_text(json.dumps({
+        "run_id": "run_fg_alive",
+        "spec_id": "test",
+        "mode": "strict_verifier",
+        "top_state": "RUNNING",
+        "current_node_id": "step_1",
+        "controller_mode": "foreground",
+        "_foreground_pid": os.getpid(),  # current process is alive
+    }))
+
+    result = app.cmd_status(argparse.Namespace(config=None))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "Debug foreground" in out
+    assert "[foreground]" in out
+    assert "run_fg_alive" in out
+    assert "[orphaned]" not in out
+
+
+def test_status_dead_foreground_is_orphaned(tmp_path, monkeypatch, capsys):
+    """Dead foreground run (PID gone) is shown as orphaned."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
+
+    run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_fg_dead"
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(json.dumps({
+        "run_id": "run_fg_dead",
+        "spec_id": "test",
+        "mode": "strict_verifier",
+        "top_state": "RUNNING",
+        "current_node_id": "step_1",
+        "controller_mode": "foreground",
+        "_foreground_pid": 999999,  # dead PID
+    }))
+
+    result = app.cmd_status(argparse.Namespace(config=None))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "Orphaned" in out
+    assert "[orphaned]" in out
+
+
+def test_dashboard_shows_numbered_list(tmp_path, monkeypatch, capsys):
+    """cmd_dashboard prints numbered run list from cross-worktree scan."""
+    monkeypatch.chdir(tmp_path)
+
+    # Provide a daemon with a socket that our mock client will connect to
+    monkeypatch.setattr(app, "_list_global_daemons", lambda: [
+        {"pid": 999, "cwd": "/tmp/project-a", "socket": "/tmp/test.sock", "active_runs": 1, "state": "active"},
+    ])
+
+    # Mock DaemonClient to return runs when connected to any socket
+    mock_client = MagicMock()
+    mock_client.is_running.return_value = True
+    mock_client.status.return_value = {
+        "ok": True,
+        "runs": [
+            {"run_id": "run_d1", "pane_target": "%3", "top_state": "RUNNING", "current_node": "step_1"},
+        ],
+    }
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", lambda sock_path="": mock_client)
+    monkeypatch.setattr(app, "list_pane_owners", lambda: [])
     monkeypatch.setattr(app, "_find_local_run_summaries", lambda: [])
-    monkeypatch.setattr(app, "_list_global_daemons", lambda: [])
 
     # Simulate user pressing 'q' immediately
     monkeypatch.setattr("builtins.input", lambda prompt: "q")
@@ -122,3 +191,4 @@ def test_dashboard_shows_numbered_list(tmp_path, monkeypatch, capsys):
     assert "run_d1" in out
     assert "[daemon]" in out
     assert "inspect" in out
+    assert "/tmp/project-a" in out  # worktree shown
