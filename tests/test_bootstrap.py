@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from supervisor.bootstrap import bootstrap, BootstrapResult
+from supervisor.bootstrap import bootstrap, BootstrapResult, _validate_pane
 
 
 def _step_by_name(result: BootstrapResult, name: str) -> dict | None:
@@ -32,7 +32,8 @@ def test_bootstrap_fresh_project(tmp_path, monkeypatch):
     monkeypatch.setenv("TMUX_PANE", "%0")
     monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
 
-    with patch("supervisor.bootstrap._ensure_daemon_running"):
+    with patch("supervisor.bootstrap._ensure_daemon_running"), \
+         patch("supervisor.bootstrap._validate_pane", return_value=None):
         result = bootstrap(cwd=str(tmp_path))
 
     assert result.ok, f"error: {result.error}"
@@ -52,7 +53,8 @@ def test_bootstrap_existing_project(tmp_path, monkeypatch):
     monkeypatch.setenv("TMUX_PANE", "%1")
     monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
 
-    with patch("supervisor.bootstrap._ensure_daemon_running"):
+    with patch("supervisor.bootstrap._ensure_daemon_running"), \
+         patch("supervisor.bootstrap._validate_pane", return_value=None):
         result = bootstrap(cwd=str(tmp_path))
 
     assert result.ok
@@ -72,7 +74,8 @@ def test_bootstrap_daemon_already_running(tmp_path, monkeypatch):
     mock_client = MagicMock()
     mock_client.is_running.return_value = True
 
-    with patch("supervisor.daemon.client.DaemonClient", return_value=mock_client):
+    with patch("supervisor.daemon.client.DaemonClient", return_value=mock_client), \
+         patch("supervisor.bootstrap._validate_pane", return_value=None):
         result = bootstrap(cwd=str(tmp_path))
 
     assert result.ok
@@ -89,7 +92,8 @@ def test_bootstrap_pane_detect(tmp_path, monkeypatch):
     monkeypatch.setenv("TMUX_PANE", "%42")
     monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
 
-    with patch("supervisor.bootstrap._ensure_daemon_running"):
+    with patch("supervisor.bootstrap._ensure_daemon_running"), \
+         patch("supervisor.bootstrap._validate_pane", return_value=None):
         result = bootstrap(cwd=str(tmp_path))
 
     assert result.ok
@@ -106,11 +110,29 @@ def test_bootstrap_no_pane(tmp_path, monkeypatch):
     monkeypatch.delenv("TMUX_PANE", raising=False)
     monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
 
-    with patch("supervisor.bootstrap._ensure_daemon_running"):
+    with patch("supervisor.bootstrap._ensure_daemon_running"), \
+         patch("supervisor.bootstrap._validate_pane", return_value=None):
         result = bootstrap(cwd=str(tmp_path))
 
     assert not result.ok
     assert "pane" in result.error.lower()
+
+
+def test_bootstrap_pane_locked(tmp_path, monkeypatch):
+    """Bootstrap fails when pane is locked by another run."""
+    (tmp_path / ".supervisor").mkdir()
+    (tmp_path / ".supervisor" / "config.yaml").write_text("surface_type: tmux\n")
+
+    monkeypatch.setenv("TMUX", "/tmp/tmux-test/default,1234,0")
+    monkeypatch.setenv("TMUX_PANE", "%5")
+    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
+
+    with patch("supervisor.bootstrap._ensure_daemon_running"), \
+         patch("supervisor.bootstrap._validate_pane", return_value="pane %5 is locked by run run_xyz"):
+        result = bootstrap(cwd=str(tmp_path))
+
+    assert not result.ok
+    assert "locked" in result.error
 
 
 def test_bootstrap_result_structure(tmp_path, monkeypatch):
@@ -122,7 +144,8 @@ def test_bootstrap_result_structure(tmp_path, monkeypatch):
     monkeypatch.setenv("TMUX_PANE", "%0")
     monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
 
-    with patch("supervisor.bootstrap._ensure_daemon_running"):
+    with patch("supervisor.bootstrap._ensure_daemon_running"), \
+         patch("supervisor.bootstrap._validate_pane", return_value=None):
         result = bootstrap(cwd=str(tmp_path))
 
     assert isinstance(result.steps, list)

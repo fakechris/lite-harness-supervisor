@@ -152,30 +152,29 @@ confirmation question:
 Once the user has already approved in the conversation, do not ask again.
 Immediately mark the spec approved and continue to attach.
 
-As soon as the user approves, mark the spec approved and then attach the
+As soon as the user approves, bootstrap the environment and attach the
 supervisor BEFORE any implementation work:
 
 ```bash
+thin-supervisor bootstrap
 thin-supervisor spec approve --spec .supervisor/specs/<slug>.yaml --by human
-scripts/thin-supervisor-attach.sh <slug>
+thin-supervisor run register --spec .supervisor/specs/<slug>.yaml --pane "$(thin-supervisor bridge id)"
 ```
+
+`thin-supervisor bootstrap` auto-detects tmux, initializes `.supervisor/`
+if missing, starts the daemon if needed, and validates the execution surface.
 
 Execution commands will reject a draft spec. This is intentional: the
 approval step is part of the contract, not optional ceremony.
 
 Do not start coding, git cleanup, worktree edits, or long test runs
-until this command succeeds.
+until these commands succeed.
 
 ---
 
 ## Stage 4: Execute
 
-If attach already succeeded in Stage 3, do not run it again.
-Only use this command when execution starts from a spec that is not yet attached:
-
-```bash
-scripts/thin-supervisor-attach.sh <slug>
-```
+If attach already succeeded in Stage 3, do not run bootstrap or register again.
 
 ### Checkpoint protocol
 

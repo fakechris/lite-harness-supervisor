@@ -551,9 +551,6 @@ class SupervisorLoop:
 
             # 2. Parse checkpoint with identity
             checkpoints = adapter.parse_checkpoints(text, run_id=state.run_id, surface_id=surface_id)
-            # Any checkpoint (even deduped) proves agent is alive — clear delivery deadline
-            if checkpoints and delivery_ack_deadline > 0:
-                delivery_ack_deadline = 0
             if not checkpoints:
                 if effective_idle_timeout_sec and effective_idle_timeout_sec > 0:
                     idle_for = now - last_activity_at
@@ -660,6 +657,9 @@ class SupervisorLoop:
                 state.last_mismatch_node_id = ""
                 preserve_checkpoint_buffer = False
 
+                # Accepted checkpoint — clear delivery deadline (post-dedup)
+                if delivery_ack_deadline > 0:
+                    delivery_ack_deadline = 0
                 if checkpoint.checkpoint_seq > 0:
                     state.checkpoint_seq = checkpoint.checkpoint_seq
                 if (state.checkpoint_seq > state.last_injection_seq

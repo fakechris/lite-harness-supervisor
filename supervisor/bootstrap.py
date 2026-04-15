@@ -94,7 +94,7 @@ def _do_bootstrap(result: BootstrapResult) -> None:
         result.error = f"daemon start failed: {exc}"
         return
 
-    # Step 5: pane detect
+    # Step 5: pane detect + validate
     pane = os.environ.get("TMUX_PANE", "")
     if not pane:
         result.steps.append(_step("pane_detect", "failed", "$TMUX_PANE not set"))
@@ -103,6 +103,14 @@ def _do_bootstrap(result: BootstrapResult) -> None:
         return
     result.pane_target = pane
     result.surface_type = config.surface_type or "tmux"
+
+    # Validate pane is accessible and not locked by another run
+    pane_issue = _validate_pane(pane)
+    if pane_issue:
+        result.steps.append(_step("pane_detect", "failed", pane_issue))
+        result.ok = False
+        result.error = pane_issue
+        return
     result.steps.append(_step("pane_detect", "ok", f"pane={pane}"))
 
     # Step 6: credential check (optional, does not block)
@@ -147,6 +155,37 @@ def _auto_init() -> None:
         if ".supervisor/runtime" not in content:
             with gitignore.open("a") as f:
                 f.write("\n.supervisor/runtime/\n")
+
+
+def _validate_pane(pane: str) -> str | None:
+    """Validate that the pane is accessible and not locked. Returns issue or None."""
+    # Check pane is actually accessible via tmux
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["tmux", "display-message", "-t", pane, "-p", "#{pane_id}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return f"pane {pane} is not accessible: {result.stderr.strip()}"
+    except FileNotFoundError:
+        return "tmux command not found"
+    except Exception as exc:
+        return f"pane validation failed: {exc}"
+
+    # Check pane is not locked by another run
+    try:
+        from supervisor.global_registry import find_pane_owner
+        owner = find_pane_owner(pane)
+        if owner:
+            return (
+                f"pane {pane} is locked by run {owner.get('run_id', '?')} "
+                f"(spec: {owner.get('spec_path', '?')})"
+            )
+    except Exception:
+        pass  # registry check is best-effort
+
+    return None
 
 
 def _ensure_daemon_running(config: RuntimeConfig | None = None) -> None:
