@@ -478,7 +478,7 @@ class SupervisorLoop:
             # Only look at the tail of the pane for an init checkpoint.
             # Full pane text may contain stale checkpoints from previous runs
             # that would falsely suppress the init inject.
-            tail_text = "\n".join(pending_text.splitlines()[-20:]) if pending_text else ""
+            tail_text = "\n".join(pending_text.splitlines()[-50:]) if pending_text else ""
             cp = adapter.parse_checkpoint(tail_text, run_id=state.run_id, surface_id=surface_id)
             if cp and cp.run_id and cp.run_id != state.run_id:
                 cp = None  # checkpoint from a different run
