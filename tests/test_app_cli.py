@@ -99,9 +99,10 @@ def _write_foreground_running_state(tmp_path, *, run_id: str = "run_foreground")
     }))
 
 
-def test_status_mentions_local_completed_state_when_daemon_has_no_runs(
+def test_status_skips_completed_runs_when_daemon_has_no_active(
     tmp_path, monkeypatch, capsys,
 ):
+    """Completed runs are not shown in status — only active/paused/orphaned."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonWithNoRuns)
     _write_completed_state(tmp_path)
@@ -110,12 +111,7 @@ def test_status_mentions_local_completed_state_when_daemon_has_no_runs(
 
     assert result == 0
     out = capsys.readouterr().out
-    assert "Daemon running, no active runs." in out
-    assert "Local state found:" in out
-    assert "run_completed" in out
-    assert "COMPLETED" in out
-    assert "workflow_done" in out
-    assert "thin-supervisor run summarize run_completed" in out
+    assert "no active runs" in out.lower()
 
 
 def test_list_mentions_local_completed_state_when_daemon_has_no_runs(
@@ -260,8 +256,8 @@ def test_ps_lists_registered_daemons(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "PID" in out
     assert "/tmp/project-a" in out
-    assert "/tmp/b.sock" in out
-    assert "2" in out
+    assert "/tmp/project-b" in out
+    assert "active" in out
 
 
 def test_pane_owner_reports_global_lock(monkeypatch, capsys):

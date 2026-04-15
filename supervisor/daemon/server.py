@@ -11,6 +11,7 @@ import os
 import signal
 import socket
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -86,19 +87,27 @@ class RunEntry:
             return None
 
 
+DEFAULT_IDLE_SHUTDOWN_SEC = 600  # 10 minutes
+
+
 class DaemonServer:
     """Single-process daemon managing multiple supervisor runs."""
 
     def __init__(self, config: RuntimeConfig | None = None, *,
-                 sock_path: str = "", pid_path: str = "", runs_dir: str = ""):
+                 sock_path: str = "", pid_path: str = "", runs_dir: str = "",
+                 idle_shutdown_sec: int | None = None):
         self.config = config or RuntimeConfig()
         self.sock_path = sock_path or DEFAULT_SOCK_PATH
         self.pid_path = pid_path or DEFAULT_PID_PATH
         self.runs_dir = runs_dir or DEFAULT_RUNS_DIR
+        self.idle_shutdown_sec = idle_shutdown_sec if idle_shutdown_sec is not None else DEFAULT_IDLE_SHUTDOWN_SEC
         self._runs: dict[str, RunEntry] = {}
         self._lock = threading.Lock()
         self._shutdown = threading.Event()
         self._sock: socket.socket | None = None
+        self._started_at = time.time()
+        self._last_run_finished_at: float = 0
+        self._last_client_contact_at: float = time.time()
 
     def start(self) -> None:
         """Start the daemon: bind socket, write PID, accept connections."""
@@ -201,9 +210,11 @@ class DaemonServer:
                 conn, _ = self._sock.accept()
             except socket.timeout:
                 self._reap_finished()
+                self._check_idle_shutdown()
                 continue
             except OSError:
                 break
+            self._last_client_contact_at = time.time()
             try:
                 conn.settimeout(10)
                 self._handle_connection(conn)
@@ -724,11 +735,28 @@ class DaemonServer:
 
         # Phase 3: remove from registry (under lock)
         if reaped:
+            self._last_run_finished_at = time.time()
             with self._lock:
                 for rid in reaped:
                     self._runs.pop(rid, None)
                 self._update_daemon_record_locked()
             logger.info("reaped %d finished run(s)", len(reaped))
+
+    def _check_idle_shutdown(self) -> None:
+        """Auto-shutdown if idle for too long with zero active runs."""
+        if self.idle_shutdown_sec <= 0:
+            return
+        with self._lock:
+            active = len(self._runs)
+        if active > 0:
+            return
+        now = time.time()
+        last_activity = max(self._last_run_finished_at, self._last_client_contact_at, self._started_at)
+        idle_for = now - last_activity
+        if idle_for >= self.idle_shutdown_sec:
+            logger.info("idle shutdown: no active runs for %.0fs (threshold=%ds)", idle_for, self.idle_shutdown_sec)
+            update_daemon(self.sock_path, state="shutting_down", idle_for_sec=int(idle_for))
+            self._shutdown.set()
 
     def _handle_sigterm(self, signum, frame):
         logger.info("SIGTERM received, shutting down")
@@ -756,14 +784,15 @@ class DaemonServer:
         conn.sendall((json.dumps(data) + "\n").encode("utf-8"))
 
     def _daemon_metadata(self) -> dict:
+        from datetime import datetime, timezone
         return {
             "pid": os.getpid(),
             "cwd": os.getcwd(),
             "socket": self.sock_path,
-            "started_at": __import__("datetime").datetime.now(
-                __import__("datetime").timezone.utc
-            ).isoformat(),
+            "started_at": datetime.now(timezone.utc).isoformat(),
             "active_runs": len(self._runs),
+            "state": "active" if self._runs else "idle",
+            "idle_shutdown_sec": self.idle_shutdown_sec,
         }
 
     def _pane_owner_metadata(self, run_id: str, spec_path: str,
@@ -779,9 +808,13 @@ class DaemonServer:
         }
 
     def _update_daemon_record_locked(self) -> None:
+        now = time.time()
+        last_activity = max(self._last_run_finished_at, self._last_client_contact_at, self._started_at)
         update_daemon(
             self.sock_path,
             pid=os.getpid(),
             cwd=os.getcwd(),
             active_runs=len(self._runs),
+            state="active" if self._runs else "idle",
+            idle_for_sec=int(now - last_activity) if not self._runs else 0,
         )
