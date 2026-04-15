@@ -1524,9 +1524,17 @@ def cmd_bootstrap(args):
 
 def cmd_config_set(args):
     """Set a config value in global or project scope."""
+    from dataclasses import fields as dc_fields
+    from supervisor.config import RuntimeConfig, coerce_config_value
     from supervisor.credentials import persist_credential
 
-    persist_credential(args.key, args.value, scope=args.scope)
+    known = {f.name for f in dc_fields(RuntimeConfig)}
+    if args.key not in known:
+        print(f"Error: unknown config key '{args.key}'")
+        return 1
+
+    value = coerce_config_value(args.key, args.value)
+    persist_credential(args.key, value, scope=args.scope)
     print(f"Saved {args.key} to {args.scope} config.")
     return 0
 

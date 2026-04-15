@@ -86,7 +86,7 @@ def _do_bootstrap(result: BootstrapResult) -> None:
 
     # Step 4: daemon ensure
     try:
-        _ensure_daemon_running()
+        _ensure_daemon_running(config)
         result.steps.append(_step("daemon_ensure", "ok", "daemon running"))
     except Exception as exc:
         result.steps.append(_step("daemon_ensure", "failed", str(exc)))
@@ -106,32 +106,29 @@ def _do_bootstrap(result: BootstrapResult) -> None:
     result.steps.append(_step("pane_detect", "ok", f"pane={pane}"))
 
     # Step 6: credential check (optional, does not block)
-    try:
-        from supervisor.credentials import resolve_credentials
-        missing = resolve_credentials(config)
-        result.missing_credentials = [
-            {"key": m.key, "description": m.description, "scope": m.scope}
-            for m in missing
-        ]
-        if missing:
-            result.steps.append(_step(
-                "credentials", "ok",
-                f"{len(missing)} optional credential(s) not configured",
-            ))
-        else:
-            result.steps.append(_step("credentials", "ok", "all credentials configured"))
-    except ImportError:
-        result.steps.append(_step("credentials", "skipped", "credential module not available"))
+    from supervisor.credentials import resolve_credentials
+    missing = resolve_credentials(config)
+    result.missing_credentials = [
+        {"key": m.key, "description": m.description, "scope": m.scope}
+        for m in missing
+    ]
+    if missing:
+        result.steps.append(_step(
+            "credentials", "ok",
+            f"{len(missing)} optional credential(s) not configured",
+        ))
+    else:
+        result.steps.append(_step("credentials", "ok", "all credentials configured"))
 
 
 def _auto_init() -> None:
     """Minimal init — create scaffold without requiring argparse."""
     base = Path(SUPERVISOR_DIR)
     base.mkdir(parents=True, exist_ok=True)
-    Path(".supervisor/runtime").mkdir(parents=True, exist_ok=True)
-    Path(".supervisor/specs").mkdir(parents=True, exist_ok=True)
-    Path(".supervisor/clarify").mkdir(parents=True, exist_ok=True)
-    Path(".supervisor/plans").mkdir(parents=True, exist_ok=True)
+    (base / "runtime").mkdir(parents=True, exist_ok=True)
+    (base / "specs").mkdir(parents=True, exist_ok=True)
+    (base / "clarify").mkdir(parents=True, exist_ok=True)
+    (base / "plans").mkdir(parents=True, exist_ok=True)
 
     config_path = Path(CONFIG_FILE)
     if not config_path.exists():
@@ -152,7 +149,7 @@ def _auto_init() -> None:
                 f.write("\n.supervisor/runtime/\n")
 
 
-def _ensure_daemon_running() -> None:
+def _ensure_daemon_running(config: RuntimeConfig | None = None) -> None:
     """Ensure daemon is running, auto-start if needed."""
     from supervisor.daemon.client import DaemonClient
 
@@ -163,7 +160,8 @@ def _ensure_daemon_running() -> None:
     import time
     from supervisor.app import _fork_daemon
 
-    config = RuntimeConfig.load(CONFIG_FILE)
+    if config is None:
+        config = RuntimeConfig.load(CONFIG_FILE)
     _fork_daemon(config)
 
     for _ in range(30):

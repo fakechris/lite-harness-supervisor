@@ -29,9 +29,8 @@ def global_config_path() -> Path:
     return Path.home() / ".config" / "thin-supervisor" / "defaults.yaml"
 
 
-def save_global_config(key: str, value) -> Path:
-    """Write a single key to the global config, creating it if needed."""
-    path = global_config_path()
+def _update_config_file(path: Path, key: str, value) -> Path:
+    """Read-modify-write a single key in a YAML config file (atomic)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {}
     if path.exists():
@@ -46,25 +45,32 @@ def save_global_config(key: str, value) -> Path:
         os.unlink(tmp_path)
         raise
     return path
+
+
+def save_global_config(key: str, value) -> Path:
+    """Write a single key to the global config, creating it if needed."""
+    return _update_config_file(global_config_path(), key, value)
 
 
 def save_project_config(key: str, value, project_dir: str | Path = ".") -> Path:
     """Write a single key to the project config."""
     path = Path(project_dir) / ".supervisor" / "config.yaml"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = {}
-    if path.exists():
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    data[key] = value
-    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".yaml")
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            yaml.safe_dump(data, f, default_flow_style=False)
-        os.replace(tmp_path, str(path))
-    except Exception:
-        os.unlink(tmp_path)
-        raise
-    return path
+    return _update_config_file(path, key, value)
+
+
+def coerce_config_value(key: str, value: str):
+    """Coerce a string value to the correct type for a RuntimeConfig field."""
+    known = {f.name: f for f in fields(RuntimeConfig)}
+    if key not in known:
+        return value
+    ftype = known[key].type
+    if value.lower() in ("null", "none", "~"):
+        return None
+    if ftype in ("float", float):
+        return float(value)
+    if ftype in ("int", int):
+        return int(value)
+    return value
 
 
 @dataclass
