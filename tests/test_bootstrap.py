@@ -135,6 +135,43 @@ def test_bootstrap_pane_locked(tmp_path, monkeypatch):
     assert "locked" in result.error
 
 
+def test_bootstrap_pane_locked_by_daemon(tmp_path, monkeypatch):
+    """Bootstrap shows observe suggestion for daemon-locked pane."""
+    (tmp_path / ".supervisor").mkdir()
+    (tmp_path / ".supervisor" / "config.yaml").write_text("surface_type: tmux\n")
+
+    monkeypatch.setenv("TMUX", "/tmp/tmux-test/default,1234,0")
+    monkeypatch.setenv("TMUX_PANE", "%6")
+    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
+
+    with patch("supervisor.bootstrap._ensure_daemon_running"), \
+         patch("supervisor.bootstrap._validate_pane",
+               return_value="pane %6 is owned by daemon run run_d1 (spec: s.yaml); use 'thin-supervisor observe run_d1'"):
+        result = bootstrap(cwd=str(tmp_path))
+
+    assert not result.ok
+    assert "daemon" in result.error
+    assert "observe" in result.error
+
+
+def test_bootstrap_pane_locked_by_foreground(tmp_path, monkeypatch):
+    """Bootstrap shows stop suggestion for foreground-locked pane."""
+    (tmp_path / ".supervisor").mkdir()
+    (tmp_path / ".supervisor" / "config.yaml").write_text("surface_type: tmux\n")
+
+    monkeypatch.setenv("TMUX", "/tmp/tmux-test/default,1234,0")
+    monkeypatch.setenv("TMUX_PANE", "%7")
+    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_CONFIG", str(tmp_path / "g.yaml"))
+
+    with patch("supervisor.bootstrap._ensure_daemon_running"), \
+         patch("supervisor.bootstrap._validate_pane",
+               return_value="pane %7 is owned by foreground debug run run_fg; stop the foreground run"):
+        result = bootstrap(cwd=str(tmp_path))
+
+    assert not result.ok
+    assert "foreground" in result.error
+
+
 def test_bootstrap_result_structure(tmp_path, monkeypatch):
     """Bootstrap result has all expected fields."""
     (tmp_path / ".supervisor").mkdir()

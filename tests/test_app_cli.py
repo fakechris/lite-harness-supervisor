@@ -202,9 +202,10 @@ def test_status_daemon_down_fallback_marks_daemon_owned_running_state_as_orphane
     assert "persisted run was left in progress without an active daemon worker" in out
 
 
-def test_status_daemon_down_fallback_does_not_rewrite_foreground_running_state(
+def test_status_daemon_down_fallback_marks_dead_foreground_as_orphaned(
     tmp_path, monkeypatch, capsys,
 ):
+    """Foreground RUNNING state with dead process is shown as orphaned."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
     _write_foreground_running_state(tmp_path)
@@ -214,8 +215,8 @@ def test_status_daemon_down_fallback_does_not_rewrite_foreground_running_state(
     assert result == 0
     out = capsys.readouterr().out
     assert "run_foreground" in out
-    assert "RUNNING" in out
-    assert "persisted run was left in progress without an active daemon worker" not in out
+    # Dead foreground process is now detected as orphaned
+    assert "orphaned" in out.lower() or "PAUSED_FOR_HUMAN" in out
 
 
 def test_legacy_run_requires_explicit_register_or_foreground(capsys):
@@ -279,6 +280,60 @@ def test_pane_owner_reports_global_lock(monkeypatch, capsys):
     assert "%7" in out
     assert "run_lock" in out
     assert "/tmp/project-c" in out
+
+
+def test_pane_owner_shows_controller_mode(monkeypatch, capsys):
+    """pane-owner output includes controller mode."""
+    monkeypatch.setattr(app, "_find_global_pane_owner", lambda pane: {
+        "pane_target": pane,
+        "pid": 444,
+        "cwd": "/tmp/project-d",
+        "run_id": "run_mode",
+        "spec_path": "/tmp/spec.yaml",
+        "controller_mode": "foreground",
+    }, raising=False)
+
+    result = app.cmd_pane_owner(argparse.Namespace(pane="%8"))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "Controller: foreground" in out
+    assert "run_mode" in out
+
+
+def test_pane_owner_shows_daemon_controller(monkeypatch, capsys):
+    """pane-owner output shows daemon as controller mode."""
+    monkeypatch.setattr(app, "_find_global_pane_owner", lambda pane: {
+        "pane_target": pane,
+        "pid": 555,
+        "cwd": "/tmp/project-e",
+        "run_id": "run_d",
+        "spec_path": "/tmp/spec.yaml",
+        "controller_mode": "daemon",
+    }, raising=False)
+
+    result = app.cmd_pane_owner(argparse.Namespace(pane="%9"))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "Controller: daemon" in out
+
+
+def test_foreground_help_text_says_debug():
+    """Foreground subcommand help text indicates debug-only."""
+    import io
+    parser = app.build_runtime_parser()
+    buf = io.StringIO()
+    parser.print_help(buf)
+    # Walk subparsers to find run->foreground help
+    for action in parser._subparsers._actions:
+        if not hasattr(action, "choices") or action.choices is None:
+            continue
+        run_parser = action.choices.get("run")
+        if run_parser:
+            run_parser.print_help(buf)
+    full_help = buf.getvalue().lower()
+    assert "debug" in full_help
 
 
 def test_runtime_parser_does_not_expose_devtime_commands():

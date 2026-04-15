@@ -775,6 +775,7 @@ class DaemonServer:
             "run_id": run_id,
             "pane_target": pane_target,
             "spec_path": spec_path,
+            "controller_mode": "daemon",
         }
 
     def _update_daemon_record_locked(self) -> None:

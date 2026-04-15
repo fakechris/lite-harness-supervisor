@@ -157,3 +157,66 @@ def test_daemon_server_rejects_cross_daemon_pane_conflict(tmp_path, monkeypatch)
     server_a._reap_finished()
     server_b._do_stop_all()
     server_b._reap_finished()
+
+
+def test_pane_lock_includes_controller_mode(tmp_path, monkeypatch):
+    """Pane lock metadata includes controller_mode."""
+    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_DIR", str(tmp_path / "global"))
+
+    owner = {
+        "pid": os.getpid(),
+        "cwd": "/tmp/project",
+        "run_id": "run_abc",
+        "spec_path": "/tmp/spec.yaml",
+        "controller_mode": "daemon",
+    }
+    acquired, record = acquire_pane_lock("%10", owner)
+    assert acquired
+    assert record["controller_mode"] == "daemon"
+
+    found = find_pane_owner("%10")
+    assert found["controller_mode"] == "daemon"
+    release_pane_lock("%10", "run_abc")
+
+
+def test_foreground_lock_has_controller_mode(tmp_path, monkeypatch):
+    """Foreground pane lock includes controller_mode=foreground."""
+    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_DIR", str(tmp_path / "global"))
+
+    owner = {
+        "pid": os.getpid(),
+        "cwd": "/tmp/project",
+        "run_id": "run_fg",
+        "spec_path": "/tmp/spec.yaml",
+        "controller_mode": "foreground",
+    }
+    acquired, record = acquire_pane_lock("%11", owner)
+    assert acquired
+    assert record["controller_mode"] == "foreground"
+    release_pane_lock("%11", "run_fg")
+
+
+def test_foreground_rejects_locked_pane(tmp_path, monkeypatch):
+    """Cannot acquire pane lock when already locked by daemon."""
+    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_DIR", str(tmp_path / "global"))
+
+    daemon_owner = {
+        "pid": os.getpid(),
+        "cwd": "/tmp/project",
+        "run_id": "run_daemon",
+        "spec_path": "/tmp/spec.yaml",
+        "controller_mode": "daemon",
+    }
+    acquire_pane_lock("%12", daemon_owner)
+
+    fg_owner = {
+        "pid": os.getpid(),
+        "cwd": "/tmp/project",
+        "run_id": "run_fg",
+        "spec_path": "/tmp/spec.yaml",
+        "controller_mode": "foreground",
+    }
+    acquired, existing = acquire_pane_lock("%12", fg_owner)
+    assert not acquired
+    assert existing["controller_mode"] == "daemon"
+    release_pane_lock("%12", "run_daemon")

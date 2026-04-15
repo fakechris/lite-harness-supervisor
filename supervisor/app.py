@@ -276,7 +276,9 @@ def cmd_run_register(args):
 
 
 def cmd_run_foreground(args):
-    """Run a single sidecar in foreground (no daemon needed)."""
+    """Run a single sidecar in foreground (debug only, not for normal use)."""
+    from supervisor.global_registry import acquire_pane_lock, release_pane_lock
+
     spec_path = os.path.abspath(args.spec)
     try:
         spec = load_runnable_spec(spec_path)
@@ -293,60 +295,85 @@ def cmd_run_foreground(args):
     # Per-run isolated directory
     import uuid
     run_id = f"run_{uuid.uuid4().hex[:12]}"
-    run_dir = str(Path(RUNTIME_DIR) / "runs" / run_id)
-    store = StateStore(run_dir)
-    state = store.load_or_init(
-        spec,
-        spec_path=os.path.abspath(args.spec),
-        pane_target=pane_target,
-        surface_type=surface_type,
-        workspace_root=os.getcwd(),
-        controller_mode="foreground",
-    )
 
-    from supervisor.adapters.surface_factory import create_surface
-    terminal = create_surface(surface_type, pane_target)
-
-    diag = terminal.doctor()
-    if not diag["ok"]:
-        print(f"Surface issues: {diag['issues']}")
+    # Acquire pane lock to prevent conflicts with daemon-owned runs
+    pane_owner = {
+        "pid": os.getpid(),
+        "cwd": os.getcwd(),
+        "socket": "",
+        "run_id": run_id,
+        "spec_path": spec_path,
+        "controller_mode": "foreground",
+    }
+    acquired, existing = acquire_pane_lock(pane_target, pane_owner)
+    if not acquired:
+        mode = existing.get("controller_mode", "unknown") if existing else "unknown"
+        owner_run = existing.get("run_id", "?") if existing else "?"
+        print(f"Error: pane {pane_target} is locked by {mode} run {owner_run}.")
+        if mode == "daemon":
+            print("Use 'thin-supervisor run register' for normal execution.")
+        else:
+            print("Stop the existing run first.")
         return 1
 
-    from supervisor.domain.models import WorkerProfile
-    worker = WorkerProfile(
-        provider=config.worker_provider,
-        model_name=config.worker_model,
-        trust_level=config.worker_trust_level,
-    )
-    loop = SupervisorLoop(
-        store,
-        judge_model=config.judge_model,
-        judge_temperature=config.judge_temperature,
-        judge_max_tokens=config.judge_max_tokens,
-        worker_profile=worker,
-        notification_manager=NotificationManager.from_config(
-            config,
-            runtime_root=store.runtime_root,
-        ),
-        auto_intervention_manager=AutoInterventionManager(
-            mode=config.pause_handling_mode,
-            max_auto_interventions=config.max_auto_interventions,
-        ),
-    )
-
-    print(f"Foreground sidecar: run={run_id} pane={pane_target} spec={spec.id}")
-
     try:
-        final_state = loop.run_sidecar(
-            spec, state, terminal,
-            poll_interval=config.poll_interval_sec,
-            read_lines=config.read_lines,
-            idle_timeout_sec=config.default_agent_timeout_sec,
+        run_dir = str(Path(RUNTIME_DIR) / "runs" / run_id)
+        store = StateStore(run_dir)
+        state = store.load_or_init(
+            spec,
+            spec_path=os.path.abspath(args.spec),
+            pane_target=pane_target,
+            surface_type=surface_type,
+            workspace_root=os.getcwd(),
+            controller_mode="foreground",
         )
-        print(f"\nRun finished: {final_state.top_state.value}")
-    except KeyboardInterrupt:
-        store.save(state)
-        print("\nInterrupted. State saved.")
+
+        from supervisor.adapters.surface_factory import create_surface
+        terminal = create_surface(surface_type, pane_target)
+
+        diag = terminal.doctor()
+        if not diag["ok"]:
+            print(f"Surface issues: {diag['issues']}")
+            return 1
+
+        from supervisor.domain.models import WorkerProfile
+        worker = WorkerProfile(
+            provider=config.worker_provider,
+            model_name=config.worker_model,
+            trust_level=config.worker_trust_level,
+        )
+        loop = SupervisorLoop(
+            store,
+            judge_model=config.judge_model,
+            judge_temperature=config.judge_temperature,
+            judge_max_tokens=config.judge_max_tokens,
+            worker_profile=worker,
+            notification_manager=NotificationManager.from_config(
+                config,
+                runtime_root=store.runtime_root,
+            ),
+            auto_intervention_manager=AutoInterventionManager(
+                mode=config.pause_handling_mode,
+                max_auto_interventions=config.max_auto_interventions,
+            ),
+        )
+
+        print(f"[DEBUG MODE] Foreground controller — for debugging only")
+        print(f"  run={run_id} pane={pane_target} spec={spec.id}")
+
+        try:
+            final_state = loop.run_sidecar(
+                spec, state, terminal,
+                poll_interval=config.poll_interval_sec,
+                read_lines=config.read_lines,
+                idle_timeout_sec=config.default_agent_timeout_sec,
+            )
+            print(f"\nRun finished: {final_state.top_state.value}")
+        except KeyboardInterrupt:
+            store.save(state)
+            print("\nInterrupted. State saved.")
+    finally:
+        release_pane_lock(pane_target, run_id)
 
     return 0
 
@@ -526,19 +553,40 @@ def _find_local_run_summaries() -> list[dict]:
 
 def _summarize_local_state_for_hint(state: dict) -> dict:
     summary = summarize_state(state)
-    if (
-        summary.get("top_state") in {"RUNNING", "GATING", "VERIFYING"}
-        and state.get("controller_mode", "daemon") != "foreground"
-    ):
-        orphaned_reason = "persisted run was left in progress without an active daemon worker"
-        paused_view = dict(state)
-        paused_view["top_state"] = "PAUSED_FOR_HUMAN"
-        paused_view["human_escalations"] = list(paused_view.get("human_escalations", [])) + [
-            {"reason": orphaned_reason}
-        ]
-        summary = summarize_state(paused_view)
-        summary["orphaned_local_state"] = True
-        summary["orphaned_from"] = state.get("top_state", "")
+    if summary.get("top_state") in {"RUNNING", "GATING", "VERIFYING"}:
+        is_orphaned = False
+        controller = state.get("controller_mode", "daemon")
+        if controller == "foreground":
+            # Foreground is orphaned if the owning process is dead
+            import signal
+            pid = state.get("_foreground_pid", 0)
+            if pid:
+                try:
+                    os.kill(pid, 0)
+                except (OSError, ProcessLookupError):
+                    is_orphaned = True
+            else:
+                # No PID recorded — assume orphaned (legacy state)
+                is_orphaned = True
+        else:
+            # Daemon-owned — always orphaned when found in local scan
+            # (if daemon were managing it, it wouldn't be in local-only state)
+            is_orphaned = True
+
+        if is_orphaned:
+            reason = (
+                "foreground process no longer running"
+                if controller == "foreground"
+                else "persisted run was left in progress without an active daemon worker"
+            )
+            paused_view = dict(state)
+            paused_view["top_state"] = "PAUSED_FOR_HUMAN"
+            paused_view["human_escalations"] = list(paused_view.get("human_escalations", [])) + [
+                {"reason": reason}
+            ]
+            summary = summarize_state(paused_view)
+            summary["orphaned_local_state"] = True
+            summary["orphaned_from"] = state.get("top_state", "")
     return summary
 
 
@@ -550,8 +598,13 @@ def _print_local_state_hint() -> None:
     print("Local state found:")
     for state in summaries:
         display = _summarize_local_state_for_hint(state)
+        mode = display.get("controller_mode", "daemon")
+        mode_tag = "[foreground]" if mode == "foreground" else "[daemon]"
+        if display.get("orphaned_local_state"):
+            mode_tag = "[orphaned]"
         print(
             "  "
+            f"{mode_tag} "
             f"{display.get('run_id', '?')} "
             f"{display.get('top_state', '?')} "
             f"node={display.get('current_node_id', '') or '?'} "
@@ -633,13 +686,15 @@ def cmd_pane_owner(args):
         print(f"No owner found for pane {args.pane}.")
         return 1
 
-    print(f"Pane:     {owner.get('pane_target', args.pane)}")
-    print(f"Run:      {owner.get('run_id', '?')}")
-    print(f"PID:      {owner.get('pid', '?')}")
-    print(f"CWD:      {owner.get('cwd', '?')}")
-    print(f"Socket:   {owner.get('socket', '?')}")
-    print(f"Spec:     {owner.get('spec_path', '?')}")
-    print(f"Attached: {owner.get('acquired_at', '?')}")
+    mode = owner.get("controller_mode", "unknown")
+    print(f"Pane:       {owner.get('pane_target', args.pane)}")
+    print(f"Run:        {owner.get('run_id', '?')}")
+    print(f"Controller: {mode}")
+    print(f"PID:        {owner.get('pid', '?')}")
+    print(f"CWD:        {owner.get('cwd', '?')}")
+    print(f"Socket:     {owner.get('socket', '?')}")
+    print(f"Spec:       {owner.get('spec_path', '?')}")
+    print(f"Attached:   {owner.get('acquired_at', '?')}")
     return 0
 
 
@@ -1845,7 +1900,7 @@ def build_runtime_parser() -> argparse.ArgumentParser:
     p_register.add_argument("--surface", default=None, help="Override surface type (tmux|open_relay|jsonl)")
     p_register.add_argument("--config", default=None)
 
-    p_foreground = run_sub.add_parser("foreground", help="Run sidecar in foreground")
+    p_foreground = run_sub.add_parser("foreground", help="Run sidecar in foreground (debug only)")
     p_foreground.add_argument("--spec", required=True, help="Path to spec YAML")
     p_foreground.add_argument("--pane", default=None, help="Surface target")
     p_foreground.add_argument("--target", default=None, help="Alias for --pane")

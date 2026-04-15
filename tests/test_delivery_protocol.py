@@ -334,6 +334,20 @@ def test_status_reason_delivering_instruction():
     assert "acknowledged" in status_reason(state2)
 
 
+def test_status_reason_foreground_debug():
+    """status_reason shows 'debug foreground' for foreground-owned RUNNING state."""
+    from supervisor.pause_summary import status_reason
+
+    state = {"top_state": "RUNNING", "current_node_id": "step_1", "controller_mode": "foreground"}
+    result = status_reason(state)
+    assert "debug foreground" in result
+
+    # Daemon-owned shows "working"
+    state2 = {"top_state": "RUNNING", "current_node_id": "step_1", "controller_mode": "daemon"}
+    result2 = status_reason(state2)
+    assert "working" in result2
+
+
 # ---------------------------------------------------------------------------
 # Phase 5: Daemon recovery
 # ---------------------------------------------------------------------------

@@ -41,11 +41,13 @@ def status_reason(state: dict[str, Any]) -> str:
     current_node = str(state.get("current_node_id", "")).strip()
     if top_state == "RUNNING" and current_node:
         delivery = state.get("delivery_state", "IDLE")
+        controller = state.get("controller_mode", "daemon")
+        prefix = "debug foreground" if controller == "foreground" else "working"
         if delivery in ("INJECTED", "SUBMITTED"):
             return f"delivering instruction to {current_node}"
         if delivery == "ACKNOWLEDGED":
             return f"agent acknowledged, awaiting checkpoint for {current_node}"
-        return f"working {current_node}"
+        return f"{prefix} {current_node}"
     return ""
 
 
