@@ -48,6 +48,7 @@ class TerminalAdapter:
         self._socket = tmux_socket or self._detect_socket()
         self._pane_id: str | None = None  # resolved on first use
         self._read_guard: set[str] = set()  # pane ids that have been read
+        self.last_delivery_state: str = "IDLE"
 
     # ------------------------------------------------------------------
     # Public API
@@ -88,6 +89,7 @@ class TerminalAdapter:
         self._require_read(target)
         self._tmux("send-keys", "-t", target, "-l", "--", text)
         self._read_guard.discard(target)
+        self.last_delivery_state = "INJECTED"
         self._confirm_injection(target, text)
 
     def current_cwd(self) -> str:
@@ -190,6 +192,7 @@ class TerminalAdapter:
     def _confirm_injection(self, target: str, text: str) -> None:
         markers = self._stuck_markers(text)
         if not markers:
+            self.last_delivery_state = "SUBMITTED"
             return
 
         for _ in range(2):
@@ -199,15 +202,18 @@ class TerminalAdapter:
                 snapshot = self._capture_tail(target, lines=30)
                 status = self._submission_snapshot_status(snapshot, markers)
                 if status == "progress":
+                    self.last_delivery_state = "ACKNOWLEDGED"
                     return
                 if status == "clear":
                     clean_snapshots += 1
                     if clean_snapshots >= 2:
+                        self.last_delivery_state = "SUBMITTED"
                         return
                 else:
                     clean_snapshots = 0
                 time.sleep(0.5)
 
+        self.last_delivery_state = "FAILED"
         raise InjectionConfirmationError(
             f"submit not confirmed for pane '{target}'; injected text still visible near the tail"
         )

@@ -10,6 +10,15 @@ class TopState(str, Enum):
     FAILED = "FAILED"
     ABORTED = "ABORTED"
 
+class DeliveryState(str, Enum):
+    IDLE = "IDLE"                         # no pending injection
+    INJECTED = "INJECTED"                 # send-keys completed
+    SUBMITTED = "SUBMITTED"               # text left input area (clean snapshot)
+    ACKNOWLEDGED = "ACKNOWLEDGED"         # agent shows processing indicators
+    STARTED_PROCESSING = "STARTED_PROCESSING"  # checkpoint with seq > injection seq
+    FAILED = "FAILED"                     # injection error or observation-only
+    TIMED_OUT = "TIMED_OUT"               # 60s passed, no checkpoint
+
 class DecisionType(str, Enum):
     CONTINUE = "CONTINUE"
     RETRY = "RETRY"

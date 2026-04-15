@@ -36,6 +36,7 @@ class JsonlObserver:
         self._text_buffer = ""  # cross-read buffer for checkpoint spanning
         self._offset = 0  # bytes read so far
         self._detected_cwd: str | None = None
+        self.last_delivery_state: str = "FAILED"  # observation-only cannot deliver
 
     def read(self, lines: int = 100) -> str:
         """Read new content from JSONL file since last read.

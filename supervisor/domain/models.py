@@ -322,6 +322,7 @@ class SupervisorState:
     last_injected_attempt: int = -1
     # Delivery acknowledgement tracking
     last_injection_seq: int = 0
+    delivery_state: str = "IDLE"
     # P0-C: checkpoint sequence tracking
     checkpoint_seq: int = 0
     # P1-D: resume validation
@@ -365,6 +366,7 @@ class SupervisorState:
             last_injected_node_id=data.get("last_injected_node_id"),
             last_injected_attempt=data.get("last_injected_attempt", -1),
             last_injection_seq=data.get("last_injection_seq", 0),
+            delivery_state=data.get("delivery_state", "IDLE"),
             checkpoint_seq=data.get("checkpoint_seq", 0),
             spec_path=data.get("spec_path", ""),
             spec_hash=data.get("spec_hash", ""),
