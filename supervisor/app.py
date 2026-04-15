@@ -316,62 +316,62 @@ def cmd_run_foreground(args):
             print("Stop the existing run first.")
         return 1
 
-    run_dir = str(Path(RUNTIME_DIR) / "runs" / run_id)
-    store = StateStore(run_dir)
-    state = store.load_or_init(
-        spec,
-        spec_path=os.path.abspath(args.spec),
-        pane_target=pane_target,
-        surface_type=surface_type,
-        workspace_root=os.getcwd(),
-        controller_mode="foreground",
-    )
-
-    from supervisor.adapters.surface_factory import create_surface
-    terminal = create_surface(surface_type, pane_target)
-
-    diag = terminal.doctor()
-    if not diag["ok"]:
-        release_pane_lock(pane_target, run_id)
-        print(f"Surface issues: {diag['issues']}")
-        return 1
-
-    from supervisor.domain.models import WorkerProfile
-    worker = WorkerProfile(
-        provider=config.worker_provider,
-        model_name=config.worker_model,
-        trust_level=config.worker_trust_level,
-    )
-    loop = SupervisorLoop(
-        store,
-        judge_model=config.judge_model,
-        judge_temperature=config.judge_temperature,
-        judge_max_tokens=config.judge_max_tokens,
-        worker_profile=worker,
-        notification_manager=NotificationManager.from_config(
-            config,
-            runtime_root=store.runtime_root,
-        ),
-        auto_intervention_manager=AutoInterventionManager(
-            mode=config.pause_handling_mode,
-            max_auto_interventions=config.max_auto_interventions,
-        ),
-    )
-
-    print(f"[DEBUG MODE] Foreground controller — for debugging only")
-    print(f"  run={run_id} pane={pane_target} spec={spec.id}")
-
     try:
-        final_state = loop.run_sidecar(
-            spec, state, terminal,
-            poll_interval=config.poll_interval_sec,
-            read_lines=config.read_lines,
-            idle_timeout_sec=config.default_agent_timeout_sec,
+        run_dir = str(Path(RUNTIME_DIR) / "runs" / run_id)
+        store = StateStore(run_dir)
+        state = store.load_or_init(
+            spec,
+            spec_path=os.path.abspath(args.spec),
+            pane_target=pane_target,
+            surface_type=surface_type,
+            workspace_root=os.getcwd(),
+            controller_mode="foreground",
         )
-        print(f"\nRun finished: {final_state.top_state.value}")
-    except KeyboardInterrupt:
-        store.save(state)
-        print("\nInterrupted. State saved.")
+
+        from supervisor.adapters.surface_factory import create_surface
+        terminal = create_surface(surface_type, pane_target)
+
+        diag = terminal.doctor()
+        if not diag["ok"]:
+            print(f"Surface issues: {diag['issues']}")
+            return 1
+
+        from supervisor.domain.models import WorkerProfile
+        worker = WorkerProfile(
+            provider=config.worker_provider,
+            model_name=config.worker_model,
+            trust_level=config.worker_trust_level,
+        )
+        loop = SupervisorLoop(
+            store,
+            judge_model=config.judge_model,
+            judge_temperature=config.judge_temperature,
+            judge_max_tokens=config.judge_max_tokens,
+            worker_profile=worker,
+            notification_manager=NotificationManager.from_config(
+                config,
+                runtime_root=store.runtime_root,
+            ),
+            auto_intervention_manager=AutoInterventionManager(
+                mode=config.pause_handling_mode,
+                max_auto_interventions=config.max_auto_interventions,
+            ),
+        )
+
+        print(f"[DEBUG MODE] Foreground controller — for debugging only")
+        print(f"  run={run_id} pane={pane_target} spec={spec.id}")
+
+        try:
+            final_state = loop.run_sidecar(
+                spec, state, terminal,
+                poll_interval=config.poll_interval_sec,
+                read_lines=config.read_lines,
+                idle_timeout_sec=config.default_agent_timeout_sec,
+            )
+            print(f"\nRun finished: {final_state.top_state.value}")
+        except KeyboardInterrupt:
+            store.save(state)
+            print("\nInterrupted. State saved.")
     finally:
         release_pane_lock(pane_target, run_id)
 
@@ -553,19 +553,40 @@ def _find_local_run_summaries() -> list[dict]:
 
 def _summarize_local_state_for_hint(state: dict) -> dict:
     summary = summarize_state(state)
-    if (
-        summary.get("top_state") in {"RUNNING", "GATING", "VERIFYING"}
-        and state.get("controller_mode", "daemon") != "foreground"
-    ):
-        orphaned_reason = "persisted run was left in progress without an active daemon worker"
-        paused_view = dict(state)
-        paused_view["top_state"] = "PAUSED_FOR_HUMAN"
-        paused_view["human_escalations"] = list(paused_view.get("human_escalations", [])) + [
-            {"reason": orphaned_reason}
-        ]
-        summary = summarize_state(paused_view)
-        summary["orphaned_local_state"] = True
-        summary["orphaned_from"] = state.get("top_state", "")
+    if summary.get("top_state") in {"RUNNING", "GATING", "VERIFYING"}:
+        is_orphaned = False
+        controller = state.get("controller_mode", "daemon")
+        if controller == "foreground":
+            # Foreground is orphaned if the owning process is dead
+            import signal
+            pid = state.get("_foreground_pid", 0)
+            if pid:
+                try:
+                    os.kill(pid, 0)
+                except (OSError, ProcessLookupError):
+                    is_orphaned = True
+            else:
+                # No PID recorded — assume orphaned (legacy state)
+                is_orphaned = True
+        else:
+            # Daemon-owned — always orphaned when found in local scan
+            # (if daemon were managing it, it wouldn't be in local-only state)
+            is_orphaned = True
+
+        if is_orphaned:
+            reason = (
+                "foreground process no longer running"
+                if controller == "foreground"
+                else "persisted run was left in progress without an active daemon worker"
+            )
+            paused_view = dict(state)
+            paused_view["top_state"] = "PAUSED_FOR_HUMAN"
+            paused_view["human_escalations"] = list(paused_view.get("human_escalations", [])) + [
+                {"reason": reason}
+            ]
+            summary = summarize_state(paused_view)
+            summary["orphaned_local_state"] = True
+            summary["orphaned_from"] = state.get("top_state", "")
     return summary
 
 

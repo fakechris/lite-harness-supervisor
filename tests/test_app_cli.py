@@ -202,9 +202,10 @@ def test_status_daemon_down_fallback_marks_daemon_owned_running_state_as_orphane
     assert "persisted run was left in progress without an active daemon worker" in out
 
 
-def test_status_daemon_down_fallback_does_not_rewrite_foreground_running_state(
+def test_status_daemon_down_fallback_marks_dead_foreground_as_orphaned(
     tmp_path, monkeypatch, capsys,
 ):
+    """Foreground RUNNING state with dead process is shown as orphaned."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
     _write_foreground_running_state(tmp_path)
@@ -214,8 +215,8 @@ def test_status_daemon_down_fallback_does_not_rewrite_foreground_running_state(
     assert result == 0
     out = capsys.readouterr().out
     assert "run_foreground" in out
-    assert "RUNNING" in out
-    assert "persisted run was left in progress without an active daemon worker" not in out
+    # Dead foreground process is now detected as orphaned
+    assert "orphaned" in out.lower() or "PAUSED_FOR_HUMAN" in out
 
 
 def test_legacy_run_requires_explicit_register_or_foreground(capsys):
