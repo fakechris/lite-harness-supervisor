@@ -16,7 +16,7 @@ from supervisor.storage.state_store import StateStore
 from supervisor.loop import SupervisorLoop
 from supervisor.config import RuntimeConfig
 from supervisor.adapters.transcript_adapter import TranscriptAdapter
-from supervisor.global_registry import find_pane_owner, list_daemons
+from supervisor.global_registry import find_pane_owner, list_daemons, list_pane_owners
 from supervisor.interventions import AutoInterventionManager
 from supervisor.notifications import NotificationManager
 from supervisor.pause_summary import summarize_state
@@ -662,8 +662,6 @@ def _find_global_pane_owner(pane_target: str) -> dict | None:
 
 def cmd_ps(args):
     """List all globally registered daemon processes and foreground runs."""
-    from supervisor.global_registry import list_pane_owners
-
     daemons = _list_global_daemons()
     foreground_runs = [
         p for p in list_pane_owners()
@@ -1598,15 +1596,13 @@ def cmd_bootstrap(args):
         if result.conflict:
             mode = result.conflict.get("controller_mode", "unknown")
             run_id = result.conflict.get("run_id", "?")
-            action = result.conflict.get("suggested_action", "")
             print(f"\n  Existing run: {run_id} (controller: {mode})")
-            if action:
-                print(f"  Suggested:    {action}")
             if mode == "daemon":
-                print(f"  Or observe:   thin-supervisor observe {run_id}")
-                print(f"  Or stop:      thin-supervisor run stop {run_id}")
+                print(f"  Observe:  thin-supervisor observe {run_id}")
+                print(f"  Stop:     thin-supervisor run stop {run_id}")
             elif mode == "foreground":
-                print(f"  Or stop:      kill the foreground process (PID {result.conflict.get('pid', '?')})")
+                pid = result.conflict.get("pid", "?")
+                print(f"  Stop:     kill {pid}  # foreground debug process")
     return 0 if result.ok else 1
 
 

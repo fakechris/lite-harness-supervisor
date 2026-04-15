@@ -170,7 +170,7 @@ def test_bootstrap_pane_locked_by_foreground(tmp_path, monkeypatch):
 
     fg_conflict = {
         "run_id": "run_fg", "controller_mode": "foreground",
-        "spec_path": "spec.yaml", "suggested_action": "thin-supervisor run stop-foreground run_fg",
+        "spec_path": "spec.yaml", "suggested_action": "kill 12345  # stop foreground debug run run_fg",
     }
     with patch("supervisor.bootstrap._ensure_daemon_running"), \
          patch("supervisor.bootstrap._validate_pane",

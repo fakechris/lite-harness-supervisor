@@ -194,7 +194,8 @@ def _validate_pane(pane: str) -> tuple[str | None, dict | None]:
                 "pid": owner.get("pid"),
             }
             if mode == "foreground":
-                conflict["suggested_action"] = f"thin-supervisor run stop-foreground {run_id}"
+                fg_pid = owner.get("pid", "?")
+                conflict["suggested_action"] = f"kill {fg_pid}  # stop foreground debug run {run_id}"
                 return (
                     f"pane {pane} is owned by foreground debug run {run_id} "
                     f"(spec: {spec}); stop the foreground run or use a different pane"
