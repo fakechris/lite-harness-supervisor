@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.3.1 (2026-04-15)
+
+- Standardized the PyPI release flow so publishing only happens from `v*` tags.
+- Added a guard that requires the release tag to point to the current `main` HEAD.
+- Prepared the next release line after the `0.3.0` E2E cut.
+
 ### CLI Boundaries
 
 - Split runtime and operator workflows into separate entrypoints: `thin-supervisor` is now runtime-only, while `thin-supervisor-dev` owns oracle, learning, eval, canary, and promotion commands.
