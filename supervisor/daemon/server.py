@@ -14,7 +14,7 @@ import threading
 import uuid
 from pathlib import Path
 
-from supervisor.domain.enums import TopState
+from supervisor.domain.enums import DeliveryState, TopState
 from supervisor.domain.models import SupervisorState
 from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
@@ -153,15 +153,15 @@ class DaemonServer:
                 continue
 
             previous_top_state = state_data.get("top_state", state.top_state.value)
-            delivery = state_data.get("delivery_state", "IDLE")
+            delivery = state_data.get("delivery_state", DeliveryState.IDLE)
             transition_top_state(state, TopState.PAUSED_FOR_HUMAN, reason="daemon startup orphan recovery")
-            if delivery in ("INJECTED", "SUBMITTED"):
+            if delivery in (DeliveryState.INJECTED, DeliveryState.SUBMITTED):
                 recovery_detail = (
                     f"daemon restarted while delivery was in progress "
                     f"(delivery_state={delivery}, top_state={previous_top_state}); "
                     "instruction may not have been processed — explicit resume required"
                 )
-            elif delivery == "TIMED_OUT":
+            elif delivery == DeliveryState.TIMED_OUT:
                 recovery_detail = (
                     f"daemon restarted after delivery timeout "
                     f"(top_state={previous_top_state}); "
@@ -173,7 +173,7 @@ class DaemonServer:
                     f"({previous_top_state}); "
                     "explicit resume is required"
                 )
-            state.delivery_state = "IDLE"
+            state.delivery_state = DeliveryState.IDLE
             state.human_escalations.append({
                 "reason": recovery_detail,
                 "orphaned_from": previous_top_state,
@@ -466,7 +466,7 @@ class DaemonServer:
                         return {"ok": False, "error": f"pane {pane_target} locked by {existing_owner}"}
                     if state.top_state == TopState.PAUSED_FOR_HUMAN:
                         transition_top_state(state, TopState.RUNNING, reason="resume requested")
-                        state.delivery_state = "IDLE"
+                        state.delivery_state = DeliveryState.IDLE
                         state.auto_intervention_count = 0
                         state.node_mismatch_count = 0
                         state.last_mismatch_node_id = ""

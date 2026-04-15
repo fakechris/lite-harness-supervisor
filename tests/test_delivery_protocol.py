@@ -69,6 +69,20 @@ def _run_sidecar(loop, spec, store, terminal, *, timeout=5):
     return state
 
 
+def _cp(status, node, seq=0):
+    lines = [
+        "<checkpoint>",
+        f"status: {status}",
+        f"current_node: {node}",
+        f"summary: test checkpoint",
+        f"checkpoint_seq: {seq}" if seq else "",
+        "evidence:",
+        "  - ran: echo ok",
+        "</checkpoint>",
+    ]
+    return "\n".join(line for line in lines if line) + "\n"
+
+
 # ---------------------------------------------------------------------------
 # Phase 1: Domain — DeliveryState enum
 # ---------------------------------------------------------------------------
@@ -202,8 +216,7 @@ def test_delivery_state_failed_on_inject_error(tmp_path):
 def test_delivery_state_submitted_on_success(tmp_path):
     """Successful injection with no adapter state defaults to SUBMITTED."""
     # step_done checkpoint → will complete
-    checkpoint = '<checkpoint><status>step_done</status><current_node>write_test</current_node></checkpoint>'
-    terminal = MockTerminal([checkpoint])
+    terminal = MockTerminal([_cp("step_done", "write_test")])
     loop, spec, store = _make_loop(tmp_path, terminal)
     state = _run_sidecar(loop, spec, store, terminal)
 
@@ -212,26 +225,27 @@ def test_delivery_state_submitted_on_success(tmp_path):
 
 
 def test_delivery_state_started_processing_on_checkpoint(tmp_path):
-    """Checkpoint arrival transitions delivery_state to STARTED_PROCESSING."""
-    working_cp = '<checkpoint><status>working</status><current_node>write_test</current_node><checkpoint_seq>1</checkpoint_seq></checkpoint>'
-    done_cp = '<checkpoint><status>step_done</status><current_node>write_test</current_node><checkpoint_seq>2</checkpoint_seq></checkpoint>'
-    terminal = MockTerminal([working_cp, done_cp])
+    """Checkpoint with seq > injection seq transitions to STARTED_PROCESSING."""
+    # Empty first read → init inject fires (sets last_injection_seq=0)
+    # Then working checkpoint with seq=1 arrives → 1 > 0 → STARTED_PROCESSING
+    # Then step_done completes the node
+    terminal = MockTerminal(["", _cp("working", "write_test", 1), _cp("step_done", "write_test", 2)])
     loop, spec, store = _make_loop(tmp_path, terminal)
     _run_sidecar(loop, spec, store, terminal)
 
     # Check session events for delivery_state_change to STARTED_PROCESSING
-    session_path = tmp_path / "session.jsonl"
-    if session_path.exists():
-        events = [json.loads(line) for line in session_path.read_text().splitlines() if line.strip()]
-        delivery_changes = [e for e in events if e.get("event_type") == "delivery_state_change"]
-        states = [e["payload"]["to"] for e in delivery_changes]
-        assert "STARTED_PROCESSING" in states
+    session_path = tmp_path / "session_log.jsonl"
+    assert session_path.exists(), f"Expected session log at {session_path}"
+    events = [json.loads(line) for line in session_path.read_text().splitlines() if line.strip()]
+    all_types = [(e.get("event_type"), e.get("payload", {}).get("to", "")) for e in events]
+    delivery_changes = [e for e in events if e.get("event_type") == "delivery_state_change"]
+    states = [e["payload"]["to"] for e in delivery_changes]
+    assert "STARTED_PROCESSING" in states, f"states={states}, all_events={all_types}"
 
 
 def test_delivery_state_in_session_events(tmp_path):
     """Delivery state changes are logged as session events."""
-    checkpoint = '<checkpoint><status>step_done</status><current_node>write_test</current_node></checkpoint>'
-    terminal = MockTerminal([checkpoint])
+    terminal = MockTerminal([_cp("step_done", "write_test")])
     loop, spec, store = _make_loop(tmp_path, terminal)
     _run_sidecar(loop, spec, store, terminal)
 
@@ -248,12 +262,9 @@ def test_delivery_state_in_session_events(tmp_path):
 
 def test_observation_only_delivery_always_fails(tmp_path):
     """Observation-only surfaces skip inject and don't claim delivery."""
-    # Observation-only with no initial checkpoint → skips inject, no delivery attempted
-    # Observation-only with a checkpoint → skip inject, agent already running
-    # Either way, observation-only never goes through _inject_or_pause for init
     from supervisor.adapters.jsonl_observer import JsonlObserver
     observer = JsonlObserver("/tmp/fake.jsonl")
-    assert observer.last_delivery_state == "FAILED"
+    assert observer.last_delivery_state == DeliveryState.FAILED
     assert observer.is_observation_only is True
 
 

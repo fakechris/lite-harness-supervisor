@@ -10,6 +10,9 @@ import shutil
 import subprocess
 
 
+from supervisor.domain.enums import DeliveryState
+
+
 class OpenRelaySurfaceError(RuntimeError):
     pass
 
@@ -23,7 +26,7 @@ class OpenRelaySurface:
         self._session_id = session_id.strip()
         self._last_read_hash = ""  # for incremental dedup
         self._pending_echo_filters: list[str] = []
-        self.last_delivery_state: str = "IDLE"
+        self.last_delivery_state: str = DeliveryState.IDLE
 
     def read(self, lines: int = 100) -> str:
         """Read recent output, returning only new content since last read."""
@@ -42,7 +45,7 @@ class OpenRelaySurface:
     def inject(self, text: str) -> None:
         """Send text + Enter to the oly session."""
         self._oly("send", self._session_id, text, "key:enter")
-        self.last_delivery_state = "SUBMITTED"
+        self.last_delivery_state = DeliveryState.SUBMITTED
         if text:
             self._pending_echo_filters.append(text)
 
