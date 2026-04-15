@@ -178,9 +178,18 @@ def _validate_pane(pane: str) -> str | None:
         from supervisor.global_registry import find_pane_owner
         owner = find_pane_owner(pane)
         if owner:
+            mode = owner.get("controller_mode", "unknown")
+            run_id = owner.get("run_id", "?")
+            spec = owner.get("spec_path", "?")
+            if mode == "foreground":
+                return (
+                    f"pane {pane} is owned by foreground debug run {run_id} "
+                    f"(spec: {spec}); stop the foreground run or use a different pane"
+                )
             return (
-                f"pane {pane} is locked by run {owner.get('run_id', '?')} "
-                f"(spec: {owner.get('spec_path', '?')})"
+                f"pane {pane} is owned by daemon run {run_id} (spec: {spec}); "
+                f"use 'thin-supervisor observe {run_id}' to watch or "
+                f"'thin-supervisor run stop {run_id}' to release"
             )
     except Exception:
         pass  # registry check is best-effort

@@ -276,7 +276,9 @@ def cmd_run_register(args):
 
 
 def cmd_run_foreground(args):
-    """Run a single sidecar in foreground (no daemon needed)."""
+    """Run a single sidecar in foreground (debug only, not for normal use)."""
+    from supervisor.global_registry import acquire_pane_lock, release_pane_lock
+
     spec_path = os.path.abspath(args.spec)
     try:
         spec = load_runnable_spec(spec_path)
@@ -293,6 +295,27 @@ def cmd_run_foreground(args):
     # Per-run isolated directory
     import uuid
     run_id = f"run_{uuid.uuid4().hex[:12]}"
+
+    # Acquire pane lock to prevent conflicts with daemon-owned runs
+    pane_owner = {
+        "pid": os.getpid(),
+        "cwd": os.getcwd(),
+        "socket": "",
+        "run_id": run_id,
+        "spec_path": spec_path,
+        "controller_mode": "foreground",
+    }
+    acquired, existing = acquire_pane_lock(pane_target, pane_owner)
+    if not acquired:
+        mode = existing.get("controller_mode", "unknown") if existing else "unknown"
+        owner_run = existing.get("run_id", "?") if existing else "?"
+        print(f"Error: pane {pane_target} is locked by {mode} run {owner_run}.")
+        if mode == "daemon":
+            print("Use 'thin-supervisor run register' for normal execution.")
+        else:
+            print("Stop the existing run first.")
+        return 1
+
     run_dir = str(Path(RUNTIME_DIR) / "runs" / run_id)
     store = StateStore(run_dir)
     state = store.load_or_init(
@@ -309,6 +332,7 @@ def cmd_run_foreground(args):
 
     diag = terminal.doctor()
     if not diag["ok"]:
+        release_pane_lock(pane_target, run_id)
         print(f"Surface issues: {diag['issues']}")
         return 1
 
@@ -334,7 +358,8 @@ def cmd_run_foreground(args):
         ),
     )
 
-    print(f"Foreground sidecar: run={run_id} pane={pane_target} spec={spec.id}")
+    print(f"[DEBUG MODE] Foreground controller — for debugging only")
+    print(f"  run={run_id} pane={pane_target} spec={spec.id}")
 
     try:
         final_state = loop.run_sidecar(
@@ -347,6 +372,8 @@ def cmd_run_foreground(args):
     except KeyboardInterrupt:
         store.save(state)
         print("\nInterrupted. State saved.")
+    finally:
+        release_pane_lock(pane_target, run_id)
 
     return 0
 
@@ -550,8 +577,13 @@ def _print_local_state_hint() -> None:
     print("Local state found:")
     for state in summaries:
         display = _summarize_local_state_for_hint(state)
+        mode = display.get("controller_mode", "daemon")
+        mode_tag = "[foreground]" if mode == "foreground" else "[daemon]"
+        if display.get("orphaned_local_state"):
+            mode_tag = "[orphaned]"
         print(
             "  "
+            f"{mode_tag} "
             f"{display.get('run_id', '?')} "
             f"{display.get('top_state', '?')} "
             f"node={display.get('current_node_id', '') or '?'} "
@@ -633,13 +665,15 @@ def cmd_pane_owner(args):
         print(f"No owner found for pane {args.pane}.")
         return 1
 
-    print(f"Pane:     {owner.get('pane_target', args.pane)}")
-    print(f"Run:      {owner.get('run_id', '?')}")
-    print(f"PID:      {owner.get('pid', '?')}")
-    print(f"CWD:      {owner.get('cwd', '?')}")
-    print(f"Socket:   {owner.get('socket', '?')}")
-    print(f"Spec:     {owner.get('spec_path', '?')}")
-    print(f"Attached: {owner.get('acquired_at', '?')}")
+    mode = owner.get("controller_mode", "unknown")
+    print(f"Pane:       {owner.get('pane_target', args.pane)}")
+    print(f"Run:        {owner.get('run_id', '?')}")
+    print(f"Controller: {mode}")
+    print(f"PID:        {owner.get('pid', '?')}")
+    print(f"CWD:        {owner.get('cwd', '?')}")
+    print(f"Socket:     {owner.get('socket', '?')}")
+    print(f"Spec:       {owner.get('spec_path', '?')}")
+    print(f"Attached:   {owner.get('acquired_at', '?')}")
     return 0
 
 
@@ -1845,7 +1879,7 @@ def build_runtime_parser() -> argparse.ArgumentParser:
     p_register.add_argument("--surface", default=None, help="Override surface type (tmux|open_relay|jsonl)")
     p_register.add_argument("--config", default=None)
 
-    p_foreground = run_sub.add_parser("foreground", help="Run sidecar in foreground")
+    p_foreground = run_sub.add_parser("foreground", help="Run sidecar in foreground (debug only)")
     p_foreground.add_argument("--spec", required=True, help="Path to spec YAML")
     p_foreground.add_argument("--pane", default=None, help="Surface target")
     p_foreground.add_argument("--target", default=None, help="Alias for --pane")

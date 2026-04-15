@@ -281,6 +281,60 @@ def test_pane_owner_reports_global_lock(monkeypatch, capsys):
     assert "/tmp/project-c" in out
 
 
+def test_pane_owner_shows_controller_mode(monkeypatch, capsys):
+    """pane-owner output includes controller mode."""
+    monkeypatch.setattr(app, "_find_global_pane_owner", lambda pane: {
+        "pane_target": pane,
+        "pid": 444,
+        "cwd": "/tmp/project-d",
+        "run_id": "run_mode",
+        "spec_path": "/tmp/spec.yaml",
+        "controller_mode": "foreground",
+    }, raising=False)
+
+    result = app.cmd_pane_owner(argparse.Namespace(pane="%8"))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "Controller: foreground" in out
+    assert "run_mode" in out
+
+
+def test_pane_owner_shows_daemon_controller(monkeypatch, capsys):
+    """pane-owner output shows daemon as controller mode."""
+    monkeypatch.setattr(app, "_find_global_pane_owner", lambda pane: {
+        "pane_target": pane,
+        "pid": 555,
+        "cwd": "/tmp/project-e",
+        "run_id": "run_d",
+        "spec_path": "/tmp/spec.yaml",
+        "controller_mode": "daemon",
+    }, raising=False)
+
+    result = app.cmd_pane_owner(argparse.Namespace(pane="%9"))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "Controller: daemon" in out
+
+
+def test_foreground_help_text_says_debug():
+    """Foreground subcommand help text indicates debug-only."""
+    import io
+    parser = app.build_runtime_parser()
+    buf = io.StringIO()
+    parser.print_help(buf)
+    # Walk subparsers to find run->foreground help
+    for action in parser._subparsers._actions:
+        if not hasattr(action, "choices") or action.choices is None:
+            continue
+        run_parser = action.choices.get("run")
+        if run_parser:
+            run_parser.print_help(buf)
+    full_help = buf.getvalue().lower()
+    assert "debug" in full_help
+
+
 def test_runtime_parser_does_not_expose_devtime_commands():
     parser = app.build_runtime_parser()
 
