@@ -23,6 +23,7 @@ class NotificationEvent:
     spec_path: str = ""
     workspace_root: str = ""
     surface_type: str = ""
+    delivery_state: str = ""
     timestamp: str = ""
 
     def __post_init__(self) -> None:

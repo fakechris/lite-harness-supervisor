@@ -4,7 +4,7 @@ import logging
 import signal
 import time
 
-from supervisor.domain.enums import TopState, DecisionType
+from supervisor.domain.enums import DeliveryState, TopState, DecisionType
 from supervisor.domain.models import (
     Checkpoint, SupervisorDecision, HandoffInstruction,
     WorkerProfile, SupervisionPolicy, RoutingDecision, AcceptanceContract,
@@ -276,6 +276,17 @@ class SupervisorLoop:
         else:
             transition_top_state(state, TopState.RUNNING, reason="verification failed but retry budget remains")
 
+    def _set_delivery_state(self, state, new_state, *, reason: str = "") -> None:
+        value = new_state.value if isinstance(new_state, DeliveryState) else str(new_state)
+        old = state.delivery_state
+        if old == value:
+            return
+        state.delivery_state = value
+        self.store.append_session_event(
+            state.run_id, "delivery_state_change",
+            {"from": old, "to": value, "reason": reason},
+        )
+
     def _pause_for_human(self, state, payload: dict | None = None) -> dict:
         details = dict(payload or {})
         transition_top_state(state, TopState.PAUSED_FOR_HUMAN, reason="paused for human")
@@ -296,6 +307,7 @@ class SupervisorLoop:
             spec_path=state.spec_path,
             workspace_root=state.workspace_root,
             surface_type=state.surface_type,
+            delivery_state=state.delivery_state,
         ))
         return event_payload
 
@@ -317,18 +329,23 @@ class SupervisorLoop:
             spec_path=state.spec_path,
             workspace_root=state.workspace_root,
             surface_type=state.surface_type,
+            delivery_state=state.delivery_state,
         ))
 
     def _attempt_auto_intervention(self, spec, state, terminal, payload: dict | None) -> bool:
         plan = self.auto_intervention_manager.maybe_plan(spec, state, payload or {}, terminal)
         if not plan:
             return False
+        self._set_delivery_state(state, DeliveryState.INJECTED, reason="auto intervention")
         try:
             terminal.inject(plan.instruction)
         except Exception:
             logger.exception("auto intervention injection failed")
+            self._set_delivery_state(state, DeliveryState.FAILED, reason="auto intervention inject failed")
             return False
 
+        adapter_state = getattr(terminal, "last_delivery_state", None) or DeliveryState.SUBMITTED
+        self._set_delivery_state(state, adapter_state, reason="auto intervention confirmed")
         state.auto_intervention_count += 1
         transition_top_state(state, TopState.RUNNING, reason="auto intervention requested")
         record = {
@@ -348,6 +365,7 @@ class SupervisorLoop:
             spec_path=state.spec_path,
             workspace_root=state.workspace_root,
             surface_type=state.surface_type,
+            delivery_state=state.delivery_state,
         ))
         self.store.save(state)
         return True
@@ -500,11 +518,13 @@ class SupervisorLoop:
             if (delivery_ack_deadline > 0
                     and now > delivery_ack_deadline
                     and state.checkpoint_seq <= state.last_injection_seq):
+                self._set_delivery_state(state, DeliveryState.TIMED_OUT, reason="no checkpoint after injection")
                 payload = {
                     "reason": "no checkpoint received within delivery timeout after injection",
                     "node_id": state.current_node_id,
                     "timeout_sec": DELIVERY_ACK_TIMEOUT,
                     "injection_seq": state.last_injection_seq,
+                    "delivery_state": state.delivery_state,
                 }
                 self.store.append_session_event(state.run_id, "delivery_ack_timeout", payload)
                 logger.warning("delivery ack timeout: no checkpoint after injection for %ds", DELIVERY_ACK_TIMEOUT)
@@ -642,6 +662,9 @@ class SupervisorLoop:
 
                 if checkpoint.checkpoint_seq > 0:
                     state.checkpoint_seq = checkpoint.checkpoint_seq
+                if (state.checkpoint_seq > state.last_injection_seq
+                        and state.delivery_state not in (DeliveryState.IDLE, DeliveryState.STARTED_PROCESSING)):
+                    self._set_delivery_state(state, DeliveryState.STARTED_PROCESSING, reason="checkpoint received")
                 logger.info("checkpoint: %s (id=%s)", checkpoint.summary, checkpoint.checkpoint_id)
                 if checkpoint.status in {"working", "step_done", "workflow_done"}:
                     self._reset_recovery_tracking(state, clear_escalations=False)
@@ -793,10 +816,12 @@ class SupervisorLoop:
         # pause so a human/operator can move the run onto a delivery-capable
         # surface or wire the required hook.
         if getattr(terminal, "is_observation_only", False):
+            self._set_delivery_state(state, DeliveryState.INJECTED, reason="observation-only attempt")
             try:
                 terminal.inject(instruction.content)  # writes file, logs warning
             except Exception as exc:
                 logger.warning("observation-only inject failed: %s", exc)
+            self._set_delivery_state(state, DeliveryState.FAILED, reason="observation-only surface")
             self.store.append_session_event(
                 state.run_id, "injection_observation_only", instruction.to_dict()
             )
@@ -811,9 +836,11 @@ class SupervisorLoop:
             self.store.save(state)
             return False
 
+        self._set_delivery_state(state, DeliveryState.INJECTED, reason="sending to terminal")
         try:
             terminal.inject(instruction.content)
         except Exception as exc:
+            self._set_delivery_state(state, DeliveryState.FAILED, reason=str(exc))
             payload = {
                 "instruction_id": instruction.instruction_id,
                 "node_id": state.current_node_id,
@@ -829,6 +856,9 @@ class SupervisorLoop:
             self.store.save(state)
             return False
 
+        # Read adapter-reported delivery state (tmux: SUBMITTED or ACKNOWLEDGED)
+        adapter_state = getattr(terminal, "last_delivery_state", None) or DeliveryState.SUBMITTED
+        self._set_delivery_state(state, adapter_state, reason="terminal confirmed")
         self.store.append_session_event(
             state.run_id, "injection", instruction.to_dict()
         )

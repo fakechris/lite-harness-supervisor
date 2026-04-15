@@ -30,11 +30,21 @@ def is_waiting_for_review(state: dict[str, Any]) -> bool:
 def status_reason(state: dict[str, Any]) -> str:
     top_state = state.get("top_state", "")
     if top_state == "PAUSED_FOR_HUMAN":
+        delivery = state.get("delivery_state", "IDLE")
+        if delivery == "FAILED":
+            return "delivery_failed"
+        if delivery == "TIMED_OUT":
+            return "delivery_timed_out"
         return ""
     if top_state == "COMPLETED":
         return "workflow_done"
     current_node = str(state.get("current_node_id", "")).strip()
     if top_state == "RUNNING" and current_node:
+        delivery = state.get("delivery_state", "IDLE")
+        if delivery in ("INJECTED", "SUBMITTED"):
+            return f"delivering instruction to {current_node}"
+        if delivery == "ACKNOWLEDGED":
+            return f"agent acknowledged, awaiting checkpoint for {current_node}"
         return f"working {current_node}"
     return ""
 
