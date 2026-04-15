@@ -3,20 +3,20 @@ name: Publish to PyPI
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
-    inputs:
-      repository:
-        description: "Where to publish the built distributions"
-        required: true
-        default: "testpypi"
-        type: choice
-        options:
-          - testpypi
-          - pypi
-          - both
 
 jobs:
+  verify-main-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
   build:
+    needs: verify-main-tag
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,28 +31,9 @@ jobs:
           name: python-dist
           path: dist/*
 
-  publish-testpypi:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && (inputs.repository == 'testpypi' || inputs.repository == 'both')
-    permissions:
-      id-token: write
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/p/thin-supervisor
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: python-dist
-          path: dist
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-
   publish-pypi:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.repository == 'pypi' || inputs.repository == 'both'))
     permissions:
       id-token: write
     environment:
