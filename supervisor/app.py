@@ -16,7 +16,7 @@ from supervisor.storage.state_store import StateStore
 from supervisor.loop import SupervisorLoop
 from supervisor.config import RuntimeConfig
 from supervisor.adapters.transcript_adapter import TranscriptAdapter
-from supervisor.global_registry import find_pane_owner, list_daemons
+from supervisor.global_registry import find_pane_owner, list_daemons, list_pane_owners
 from supervisor.interventions import AutoInterventionManager
 from supervisor.notifications import NotificationManager
 from supervisor.pause_summary import summarize_state
@@ -661,21 +661,40 @@ def _find_global_pane_owner(pane_target: str) -> dict | None:
 
 
 def cmd_ps(args):
-    """List all globally registered daemon processes."""
+    """List all globally registered daemon processes and foreground runs."""
     daemons = _list_global_daemons()
-    if not daemons:
-        print("No registered daemons.")
+    foreground_runs = [
+        p for p in list_pane_owners()
+        if p.get("controller_mode") == "foreground"
+    ]
+
+    if not daemons and not foreground_runs:
+        print("No registered daemons or foreground runs.")
         return 0
 
-    print(f"{'PID':<8} {'RUNS':<6} {'STARTED':<28} {'SOCKET':<32} {'CWD'}")
-    for daemon in daemons:
-        print(
-            f"{daemon.get('pid', '?'):<8} "
-            f"{daemon.get('active_runs', 0):<6} "
-            f"{daemon.get('started_at', ''):<28} "
-            f"{daemon.get('socket', ''):<32} "
-            f"{daemon.get('cwd', '')}"
-        )
+    if daemons:
+        print("Daemons:")
+        print(f"  {'PID':<8} {'RUNS':<6} {'STARTED':<28} {'SOCKET':<32} {'CWD'}")
+        for daemon in daemons:
+            print(
+                f"  {daemon.get('pid', '?'):<8} "
+                f"{daemon.get('active_runs', 0):<6} "
+                f"{daemon.get('started_at', ''):<28} "
+                f"{daemon.get('socket', ''):<32} "
+                f"{daemon.get('cwd', '')}"
+            )
+
+    if foreground_runs:
+        print("Foreground debug runs:")
+        print(f"  {'PID':<8} {'RUN_ID':<20} {'PANE':<10} {'SPEC'}")
+        for run in foreground_runs:
+            print(
+                f"  {run.get('pid', '?'):<8} "
+                f"{run.get('run_id', '?'):<20} "
+                f"{run.get('pane_target', '?'):<10} "
+                f"{run.get('spec_path', '?')}"
+            )
+
     return 0
 
 
@@ -1574,6 +1593,16 @@ def cmd_bootstrap(args):
         print(f"\nReady. pane={result.pane_target} surface={result.surface_type}")
     else:
         print(f"\nBootstrap failed: {result.error}")
+        if result.conflict:
+            mode = result.conflict.get("controller_mode", "unknown")
+            run_id = result.conflict.get("run_id", "?")
+            print(f"\n  Existing run: {run_id} (controller: {mode})")
+            if mode == "daemon":
+                print(f"  Observe:  thin-supervisor observe {run_id}")
+                print(f"  Stop:     thin-supervisor run stop {run_id}")
+            elif mode == "foreground":
+                pid = result.conflict.get("pid", "?")
+                print(f"  Stop:     kill {pid}  # foreground debug process")
     return 0 if result.ok else 1
 
 
