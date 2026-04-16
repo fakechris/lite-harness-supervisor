@@ -35,6 +35,7 @@ from supervisor.global_registry import (
 from supervisor.interventions import AutoInterventionManager
 from supervisor.notifications import NotificationManager
 from supervisor.llm.explainer_client import ExplainerClient
+from supervisor.operator.actions import build_explainer_context_from_state
 from supervisor.operator.api import (
     recent_exchange,
     snapshot_from_state,
@@ -733,64 +734,13 @@ class DaemonServer:
     def _build_explainer_context(self, run_id: str, **extra) -> dict:
         """Build context dict for explainer calls.
 
-        Uses _resolve_run_store so reaped/completed runs are still explainable.
-        Loads the spec from disk when available for richer context.
-        Gathers lightweight codebase signals (git dirty, workspace path).
+        Delegates to the shared ``build_explainer_context_from_state``
+        after resolving state via ``_resolve_run_store``.
         """
         state, session_log = self._resolve_run_store(run_id)
-        state = state or {}
-        events = timeline_from_session_log(session_log, limit=10) if session_log else []
-
-        ctx: dict = {
-            "run_state": state,
-            "recent_events": [e.to_dict() for e in events],
-        }
-
-        # Load spec for richer context — prompt expects "spec_context"
-        spec_path = state.get("spec_path", "")
-        if spec_path:
-            try:
-                spec_data = load_spec(spec_path)
-                acceptance = getattr(spec_data, "acceptance", None)
-                all_nodes = getattr(spec_data, "nodes", []) or getattr(spec_data, "steps", [])
-                ctx["spec_context"] = {
-                    "id": getattr(spec_data, "id", ""),
-                    "goal": getattr(spec_data, "goal", ""),
-                    "nodes": [
-                        {"id": n.id, "objective": getattr(n, "objective", "")}
-                        for n in all_nodes
-                    ],
-                    "required_evidence": getattr(acceptance, "required_evidence", []) if acceptance else [],
-                    "forbidden_states": getattr(acceptance, "forbidden_states", []) if acceptance else [],
-                }
-            except Exception:
-                logger.debug("could not load spec for explainer context: %s", spec_path)
-
-        # Gather lightweight codebase signals — prompt expects "codebase_signals"
-        workspace = state.get("workspace_root", "")
-        codebase_signals: dict = {"workspace_root": workspace}
-        if workspace:
-            try:
-                import subprocess
-                result = subprocess.run(
-                    ["git", "status", "--porcelain"],
-                    cwd=workspace, capture_output=True, text=True, timeout=5,
-                )
-                if result.returncode == 0:
-                    dirty_files = [
-                        line.strip() for line in result.stdout.strip().splitlines()
-                        if line.strip()
-                    ]
-                    codebase_signals["git_dirty"] = bool(dirty_files)
-                    codebase_signals["dirty_file_count"] = len(dirty_files)
-                    # Include first few file paths for context
-                    codebase_signals["dirty_files_sample"] = dirty_files[:10]
-            except Exception:
-                pass
-        ctx["codebase_signals"] = codebase_signals
-
-        ctx.update(extra)
-        return ctx
+        return build_explainer_context_from_state(
+            state or {}, session_log, **extra,
+        )
 
     def _do_explain_run(self, request: dict) -> dict:
         run_id = request.get("run_id", "")

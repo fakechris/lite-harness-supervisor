@@ -156,17 +156,33 @@ def _make_explainer(ctx: RunContext):
     )
 
 
-def build_explainer_context(ctx: RunContext, **extra) -> dict[str, Any]:
+def build_explainer_context_from_state(
+    state: dict[str, Any],
+    session_log_path: Any,
+    *,
+    spec_path_fallback: str = "",
+    workspace_fallback: str = "",
+    **extra,
+) -> dict[str, Any]:
     """Build the full context dict for explainer calls.
 
-    Mirrors daemon's _build_explainer_context: includes run_state,
-    recent_events, spec_context, and codebase_signals.  This ensures
-    local/socketless runs get the same explanation quality as daemon runs.
+    Core implementation shared by both local operator actions and the daemon.
+    Includes run_state, recent_events, spec_context, and codebase_signals.
+
+    Parameters
+    ----------
+    state : dict
+        Run state dict (from state.json or in-memory).
+    session_log_path : Path
+        Path to session_log.jsonl.
+    spec_path_fallback : str
+        Fallback spec path if not in state.
+    workspace_fallback : str
+        Fallback workspace root if not in state.
     """
     from supervisor.operator.api import timeline_from_session_log
 
-    state = ctx.load_state()
-    events = timeline_from_session_log(ctx.session_log_path, limit=10)
+    events = timeline_from_session_log(session_log_path, limit=10) if session_log_path else []
 
     result: dict[str, Any] = {
         "run_state": state,
@@ -174,7 +190,7 @@ def build_explainer_context(ctx: RunContext, **extra) -> dict[str, Any]:
     }
 
     # Load spec for richer context — prompt expects "spec_context"
-    spec_path = state.get("spec_path", "") or ctx.spec_path
+    spec_path = state.get("spec_path", "") or spec_path_fallback
     if spec_path:
         try:
             from supervisor.plan.loader import load_spec
@@ -196,7 +212,7 @@ def build_explainer_context(ctx: RunContext, **extra) -> dict[str, Any]:
             pass
 
     # Gather lightweight codebase signals — prompt expects "codebase_signals"
-    workspace = state.get("workspace_root", "") or ctx.worktree
+    workspace = state.get("workspace_root", "") or workspace_fallback
     codebase_signals: dict[str, Any] = {"workspace_root": workspace}
     if workspace:
         try:
@@ -220,6 +236,32 @@ def build_explainer_context(ctx: RunContext, **extra) -> dict[str, Any]:
 
     result.update(extra)
     return result
+
+
+def build_explainer_context(
+    ctx: RunContext,
+    *,
+    state: dict[str, Any] | None = None,
+    session_log_path: Any = None,
+    **extra,
+) -> dict[str, Any]:
+    """Build explainer context from a RunContext.
+
+    Convenience wrapper around ``build_explainer_context_from_state``
+    that resolves state and paths from the RunContext when not provided.
+    """
+    if state is None:
+        state = ctx.load_state()
+    if session_log_path is None:
+        session_log_path = ctx.session_log_path
+
+    return build_explainer_context_from_state(
+        state,
+        session_log_path,
+        spec_path_fallback=ctx.spec_path,
+        workspace_fallback=ctx.worktree,
+        **extra,
+    )
 
 
 # ── async actions (always non-blocking) ──────────────────────────
