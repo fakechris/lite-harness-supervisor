@@ -1,0 +1,322 @@
+"""Tests for unified operator actions."""
+
+import json
+import time
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from supervisor.operator.actions import (
+    ActionUnavailable,
+    OperatorJob,
+    _local_jobs,
+    do_exchange,
+    do_inspect,
+    do_note_add,
+    do_note_list,
+    do_pause,
+    do_resume,
+    poll_job,
+    submit_drift,
+    submit_explain,
+    submit_explain_exchange,
+)
+from supervisor.operator.run_context import ActionMode, RunContext
+
+
+def _make_ctx(tag="daemon", has_daemon=True, **overrides):
+    """Build a RunContext with controlled capabilities."""
+    defaults = {
+        "run_id": "run_test123",
+        "worktree": "/tmp/ws",
+        "tag": tag,
+        "top_state": "RUNNING",
+        "pane_target": "%5",
+        "socket": "/tmp/sock" if tag == "daemon" else "",
+        "spec_path": "/specs/test.yaml",
+        "config_path": "/tmp/ws/.supervisor/config.yaml",
+    }
+    defaults.update(overrides)
+    ctx = RunContext(**defaults)
+    return ctx
+
+
+# ── do_inspect ───────────────────────────────────────────────────
+
+
+class TestDoInspect:
+    def test_daemon_path(self):
+        ctx = _make_ctx(tag="daemon")
+        mock_client = MagicMock()
+        mock_client.get_snapshot.return_value = {"ok": True, "run_id": "run_test123"}
+        mock_client.get_timeline.return_value = {"ok": True, "events": [{"seq": 1}]}
+        mock_client.is_running.return_value = True
+        with patch.object(ctx, "get_client", return_value=mock_client):
+            result = do_inspect(ctx)
+        assert "snapshot" in result
+        assert result["timeline"] == [{"seq": 1}]
+
+    def test_local_path(self, tmp_path):
+        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_local"
+        run_dir.mkdir(parents=True)
+        state = {"run_id": "run_local", "top_state": "COMPLETED", "spec_id": "s"}
+        (run_dir / "state.json").write_text(json.dumps(state))
+
+        ctx = _make_ctx(
+            tag="completed",
+            run_id="run_local",
+            worktree=str(tmp_path),
+            socket="",
+            state_dir=run_dir,
+            state_path=run_dir / "state.json",
+            session_log_path=run_dir / "session_log.jsonl",
+        )
+        with patch.object(ctx, "_has_daemon", return_value=False):
+            result = do_inspect(ctx)
+        assert result["snapshot"]["run_id"] == "run_local"
+
+    def test_missing_state_returns_empty(self, tmp_path):
+        ctx = _make_ctx(
+            tag="completed",
+            run_id="run_gone",
+            worktree=str(tmp_path),
+            socket="",
+            state_dir=tmp_path / "no_exist",
+            state_path=tmp_path / "no_exist" / "state.json",
+            session_log_path=tmp_path / "no_exist" / "session_log.jsonl",
+        )
+        with patch.object(ctx, "_has_daemon", return_value=False):
+            result = do_inspect(ctx)
+        assert result["snapshot"] == {}
+
+
+# ── do_exchange ──────────────────────────────────────────────────
+
+
+class TestDoExchange:
+    def test_daemon_path(self):
+        ctx = _make_ctx(tag="daemon")
+        mock_client = MagicMock()
+        mock_client.get_exchange.return_value = {"run_id": "run_test123", "ok": True}
+        mock_client.is_running.return_value = True
+        with patch.object(ctx, "get_client", return_value=mock_client):
+            result = do_exchange(ctx)
+        assert result["run_id"] == "run_test123"
+
+
+# ── do_pause / do_resume ─────────────────────────────────────────
+
+
+class TestDoPause:
+    def test_daemon_pauses(self):
+        ctx = _make_ctx(tag="daemon")
+        mock_client = MagicMock()
+        mock_client.stop_run.return_value = {"ok": True}
+        mock_client.is_running.return_value = True
+        with patch.object(ctx, "get_client", return_value=mock_client):
+            result = do_pause(ctx)
+        assert result["ok"]
+
+    def test_foreground_raises(self):
+        ctx = _make_ctx(tag="foreground", socket="")
+        with patch.object(ctx, "_has_daemon", return_value=False):
+            with pytest.raises(ActionUnavailable, match="foreground"):
+                do_pause(ctx)
+
+    def test_completed_raises(self):
+        ctx = _make_ctx(tag="completed", socket="")
+        with patch.object(ctx, "_has_daemon", return_value=False):
+            with pytest.raises(ActionUnavailable, match="completed"):
+                do_pause(ctx)
+
+
+class TestDoResume:
+    def test_daemon_resumes(self):
+        ctx = _make_ctx(tag="paused", top_state="PAUSED_FOR_HUMAN")
+        mock_client = MagicMock()
+        mock_client.resume.return_value = {"ok": True}
+        mock_client.is_running.return_value = True
+        with patch.object(ctx, "get_client", return_value=mock_client):
+            result = do_resume(ctx)
+        assert result["ok"]
+
+    def test_completed_raises(self):
+        ctx = _make_ctx(tag="completed", socket="")
+        with patch.object(ctx, "_has_daemon", return_value=False):
+            with pytest.raises(ActionUnavailable, match="completed"):
+                do_resume(ctx)
+
+    def test_no_spec_path_raises(self):
+        ctx = _make_ctx(tag="paused", spec_path="")
+        mock_client = MagicMock()
+        mock_client.is_running.return_value = True
+        with patch.object(ctx, "get_client", return_value=mock_client):
+            with pytest.raises(ActionUnavailable, match="spec_path"):
+                do_resume(ctx)
+
+    def test_no_pane_target_raises(self):
+        ctx = _make_ctx(tag="paused", pane_target="?")
+        mock_client = MagicMock()
+        mock_client.is_running.return_value = True
+        with patch.object(ctx, "get_client", return_value=mock_client):
+            with pytest.raises(ActionUnavailable, match="pane_target"):
+                do_resume(ctx)
+
+    def test_auto_start_calls_ensure_daemon(self):
+        ctx = _make_ctx(tag="orphaned", socket="")
+        mock_client = MagicMock()
+        mock_client.resume.return_value = {"ok": True}
+        with patch.object(ctx, "_has_daemon", return_value=False):
+            with patch.object(ctx, "ensure_daemon", return_value=mock_client):
+                result = do_resume(ctx)
+        assert result["ok"]
+
+
+# ── do_note_add / do_note_list ───────────────────────────────────
+
+
+class TestNotes:
+    def test_note_add_daemon(self):
+        ctx = _make_ctx(tag="daemon")
+        mock_client = MagicMock()
+        mock_client.note_add.return_value = {"ok": True}
+        mock_client.is_running.return_value = True
+        with patch.object(ctx, "get_client", return_value=mock_client):
+            result = do_note_add(ctx, "hello")
+        assert result["ok"]
+        mock_client.note_add.assert_called_once()
+
+    def test_note_add_unavailable_for_completed(self):
+        ctx = _make_ctx(tag="completed", socket="")
+        with patch.object(ctx, "_has_daemon", return_value=False):
+            with pytest.raises(ActionUnavailable, match="no daemon"):
+                do_note_add(ctx, "hello")
+
+    def test_note_list_daemon(self):
+        ctx = _make_ctx(tag="daemon")
+        mock_client = MagicMock()
+        mock_client.note_list.return_value = {"notes": [{"content": "a"}]}
+        mock_client.is_running.return_value = True
+        with patch.object(ctx, "get_client", return_value=mock_client):
+            result = do_note_list(ctx)
+        assert len(result) == 1
+
+    def test_note_list_unavailable_for_foreground(self):
+        ctx = _make_ctx(tag="foreground", socket="")
+        with patch.object(ctx, "_has_daemon", return_value=False):
+            with pytest.raises(ActionUnavailable, match="no daemon"):
+                do_note_list(ctx)
+
+
+# ── submit_explain / submit_drift / submit_explain_exchange ──────
+
+
+class TestSubmitExplain:
+    def test_daemon_path_returns_job(self):
+        ctx = _make_ctx(tag="daemon")
+        mock_client = MagicMock()
+        mock_client.explain_run.return_value = {"job_id": "job_abc", "ok": True}
+        mock_client.is_running.return_value = True
+        with patch.object(ctx, "get_client", return_value=mock_client):
+            job = submit_explain(ctx, language="en")
+        assert job.source == "daemon"
+        assert job.job_id == "job_abc"
+
+    def test_local_path_returns_job(self, tmp_path):
+        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_local"
+        run_dir.mkdir(parents=True)
+        state = {"run_id": "run_local", "top_state": "COMPLETED"}
+        (run_dir / "state.json").write_text(json.dumps(state))
+
+        ctx = _make_ctx(
+            tag="completed",
+            run_id="run_local",
+            worktree=str(tmp_path),
+            socket="",
+            state_dir=run_dir,
+            state_path=run_dir / "state.json",
+            session_log_path=run_dir / "session_log.jsonl",
+        )
+        with patch.object(ctx, "_has_daemon", return_value=False):
+            with patch.object(ctx, "load_config") as mock_cfg:
+                mock_cfg.return_value = MagicMock(
+                    explainer_model=None,
+                    explainer_temperature=0.3,
+                    explainer_max_tokens=1024,
+                )
+                job = submit_explain(ctx, language="zh")
+        assert job.source == "local"
+        assert job.job_id.startswith("job_")
+
+        # Wait for background thread to complete
+        for _ in range(50):
+            j = _local_jobs.get(job.job_id)
+            if j and j.status in ("completed", "failed"):
+                break
+            time.sleep(0.05)
+        j = _local_jobs.get(job.job_id)
+        assert j.status == "completed"
+
+
+class TestSubmitDrift:
+    def test_daemon_path(self):
+        ctx = _make_ctx(tag="daemon")
+        mock_client = MagicMock()
+        mock_client.assess_drift.return_value = {"job_id": "job_d1", "ok": True}
+        mock_client.is_running.return_value = True
+        with patch.object(ctx, "get_client", return_value=mock_client):
+            job = submit_drift(ctx)
+        assert job.source == "daemon"
+        assert job.job_id == "job_d1"
+
+
+class TestSubmitExplainExchange:
+    def test_daemon_path(self):
+        ctx = _make_ctx(tag="daemon")
+        mock_client = MagicMock()
+        mock_client.explain_exchange.return_value = {"job_id": "job_x1", "ok": True}
+        mock_client.is_running.return_value = True
+        with patch.object(ctx, "get_client", return_value=mock_client):
+            job = submit_explain_exchange(ctx)
+        assert job.source == "daemon"
+        assert job.job_id == "job_x1"
+
+
+# ── poll_job ─────────────────────────────────────────────────────
+
+
+class TestPollJob:
+    def test_daemon_poll(self):
+        ctx = _make_ctx(tag="daemon")
+        mock_client = MagicMock()
+        mock_client.get_job.return_value = {"status": "completed", "result": {"ok": True}}
+        mock_client.is_running.return_value = True
+        with patch.object(ctx, "get_client", return_value=mock_client):
+            result = poll_job(ctx, OperatorJob(job_id="job_abc", source="daemon"))
+        assert result["status"] == "completed"
+
+    def test_local_poll(self):
+        # Submit a quick local job directly
+        job_id = _local_jobs.submit("test", lambda: {"answer": 42})
+        for _ in range(50):
+            j = _local_jobs.get(job_id)
+            if j and j.status in ("completed", "failed"):
+                break
+            time.sleep(0.05)
+
+        ctx = _make_ctx(tag="completed")
+        result = poll_job(ctx, OperatorJob(job_id=job_id, source="local"))
+        assert result["status"] == "completed"
+
+    def test_missing_local_job(self):
+        ctx = _make_ctx(tag="completed")
+        result = poll_job(ctx, OperatorJob(job_id="job_nonexistent", source="local"))
+        assert result["status"] == "failed"
+
+    def test_daemon_unreachable(self):
+        ctx = _make_ctx(tag="daemon")
+        with patch.object(ctx, "get_client", return_value=None):
+            result = poll_job(ctx, OperatorJob(job_id="job_abc", source="daemon"))
+        assert result["status"] == "failed"
+        assert "unreachable" in result["error"]
