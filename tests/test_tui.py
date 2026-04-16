@@ -467,14 +467,15 @@ class TestScanRunsDirSort:
 
         # Make old_run's state.json *newer* than new_run's
         # (simulates: old dir, but recent activity)
-        import time
-        time.sleep(0.05)
         old_state.write_text(json.dumps({
             "run_id": "run_old",
             "top_state": "COMPLETED",
             "current_node_id": "",
             "updated": True,
         }))
+        # Explicitly set mtime to guarantee ordering (avoid fragile sleep)
+        new_mtime = new_state.stat().st_mtime
+        os.utime(old_state, (new_mtime + 10, new_mtime + 10))
 
         items: list[dict] = []
         seen: set[str] = set()

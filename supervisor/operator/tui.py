@@ -180,10 +180,31 @@ def _scan_runs_dir(runs_dir: Path, worktree: str, items: list[dict], seen: set[s
 
 
 def get_client_for_run(run: dict) -> DaemonClient | None:
-    """Get a DaemonClient that can reach this run."""
+    """Get a DaemonClient that can reach this run.
+
+    First tries the run's own socket. If empty, attempts to find a
+    daemon whose cwd matches the run's worktree (covers orphaned runs
+    that lost their daemon reference but have a daemon running in the
+    same worktree).
+    """
     sock = run.get("socket", "")
     if sock:
         return DaemonClient(sock_path=sock)
+    # Try to find a daemon by worktree match
+    wt = run.get("worktree", "")
+    if wt:
+        wt_resolved = str(Path(wt).resolve())
+        for daemon in list_daemons():
+            daemon_cwd = daemon.get("cwd", "")
+            if daemon_cwd and str(Path(daemon_cwd).resolve()) == wt_resolved:
+                daemon_sock = daemon.get("socket", "")
+                if daemon_sock:
+                    try:
+                        client = DaemonClient(sock_path=daemon_sock)
+                        if client.is_running():
+                            return client
+                    except (ConnectionRefusedError, FileNotFoundError, OSError):
+                        pass
     return None
 
 
@@ -721,7 +742,8 @@ def _curses_main(stdscr):
                     try:
                         st = json.loads(state_path.read_text(encoding="utf-8"))
                         spec_path = st.get("spec_path", "")
-                        pane_target = pane_target or st.get("pane_target", "")
+                        if not pane_target or pane_target == "?":
+                            pane_target = st.get("pane_target", "")
                     except (json.JSONDecodeError, OSError):
                         pass
                 if not spec_path:

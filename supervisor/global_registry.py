@@ -179,17 +179,31 @@ def _worktrees_path() -> Path:
 
 
 def register_worktree(worktree_path: str) -> None:
-    """Record a worktree path so the TUI can discover its runs later."""
+    """Record a worktree path so the TUI can discover its runs later.
+
+    Uses file locking to avoid lost writes when multiple daemons start
+    concurrently.
+    """
+    import fcntl
+
     if not worktree_path:
         return
     resolved = str(Path(worktree_path).resolve())
     path = _worktrees_path()
-    known = _read_json(path) or {"worktrees": []}
-    wts = known.get("worktrees", [])
-    if resolved not in wts:
-        wts.append(resolved)
-        known["worktrees"] = wts
-        _write_json(path, known)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.parent / ".known_worktrees.lock"
+    lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        known = _read_json(path) or {"worktrees": []}
+        wts = known.get("worktrees", [])
+        if resolved not in wts:
+            wts.append(resolved)
+            known["worktrees"] = wts
+            _write_json(path, known)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 def list_known_worktrees() -> list[str]:
