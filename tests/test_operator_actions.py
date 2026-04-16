@@ -452,3 +452,50 @@ class TestSubmitClarification:
         assert j.status == "completed"
         # Stub mode should include the question in the answer
         assert "what happened?" in j.result.get("answer", "")
+
+        # Verify clarification events written to session_log
+        session_log = run_dir / "session_log.jsonl"
+        assert session_log.exists()
+        events = [json.loads(line) for line in session_log.read_text().strip().splitlines()]
+        assert len(events) == 2
+        assert events[0]["event_type"] == "clarification_request"
+        assert events[0]["payload"]["question"] == "what happened?"
+        assert events[1]["event_type"] == "clarification_response"
+        assert "what happened?" in events[1]["payload"]["answer"]
+
+
+class TestClarificationSummarizers:
+    def test_request_summarizer(self):
+        from supervisor.operator.api import _summarize_event
+        summary = _summarize_event("clarification_request", {"question": "why paused?"})
+        assert "Q:" in summary
+        assert "why paused?" in summary
+
+    def test_response_summarizer(self):
+        from supervisor.operator.api import _summarize_event
+        summary = _summarize_event("clarification_response", {"answer": "agent idle"})
+        assert "A:" in summary
+        assert "agent idle" in summary
+
+
+class TestAppendTimelineEvent:
+    def test_writes_event(self, tmp_path):
+        from supervisor.operator.api import append_timeline_event
+        log_path = tmp_path / "session_log.jsonl"
+        append_timeline_event(log_path, "run_x", "test_event", {"key": "val"})
+        lines = log_path.read_text().strip().splitlines()
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["run_id"] == "run_x"
+        assert record["event_type"] == "test_event"
+        assert record["seq"] == 1
+        assert record["payload"]["key"] == "val"
+
+    def test_increments_seq(self, tmp_path):
+        from supervisor.operator.api import append_timeline_event
+        log_path = tmp_path / "session_log.jsonl"
+        append_timeline_event(log_path, "run_x", "ev1", {})
+        append_timeline_event(log_path, "run_x", "ev2", {})
+        lines = log_path.read_text().strip().splitlines()
+        assert json.loads(lines[0])["seq"] == 1
+        assert json.loads(lines[1])["seq"] == 2

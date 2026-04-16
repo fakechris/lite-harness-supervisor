@@ -90,6 +90,8 @@ _EVENT_SUMMARIES: dict[str, Any] = {
     "observation_delivery_stalled": lambda p: p.get("reason", "delivery stalled"),
     "orphaned_run_recovered": lambda _: "recovered after crash",
     "completed_after_review": lambda p: f"completed after review by {p.get('reviewer', '')}",
+    "clarification_request": lambda p: f"Q: {p.get('question', '')[:80]}",
+    "clarification_response": lambda p: f"A: {p.get('answer', '')[:80]}",
 }
 
 
@@ -101,6 +103,59 @@ def _summarize_event(event_type: str, payload: dict[str, Any]) -> str:
         except (KeyError, TypeError):
             pass
     return event_type.replace("_", " ")
+
+
+# ── timeline event writer ─────────────────────────────────────────
+
+import threading
+
+_append_lock = threading.Lock()
+
+
+def append_timeline_event(
+    session_log_path: Path,
+    run_id: str,
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    """Append a single event to session_log.jsonl.
+
+    Lightweight writer for operator-originated events (clarification, etc.)
+    that don't go through StateStore.  Thread-safe via module-level lock.
+    """
+    from datetime import datetime, timezone
+
+    with _append_lock:
+        seq = _read_max_seq(session_log_path) + 1
+        record = {
+            "run_id": run_id,
+            "seq": seq,
+            "event_type": event_type,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "payload": payload,
+        }
+        session_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with session_log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _read_max_seq(session_log_path: Path) -> int:
+    """Read the highest seq from the tail of session_log.jsonl."""
+    if not session_log_path.exists():
+        return 0
+    try:
+        lines = _tail_lines(session_log_path, max_lines=256)
+    except OSError:
+        return 0
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        seq = record.get("seq", 0)
+        if isinstance(seq, int):
+            return seq
+    return 0
 
 
 # ── public API ──────────────────────────────────────────────────────

@@ -264,15 +264,30 @@ def _compute_capabilities(
     reasons: dict[str, str] = {}
 
     if tag == "daemon":
-        # Daemon-managed run (active or other-worktree) — full daemon access
+        # Daemon-managed run — full daemon read access, pause/resume by state
         caps.inspect = ActionMode.SYNC_DAEMON
         caps.exchange = ActionMode.SYNC_DAEMON
         caps.explain = ActionMode.ASYNC_DAEMON
         caps.drift = ActionMode.ASYNC_DAEMON
-        caps.pause = ActionMode.SYNC_DAEMON
-        caps.resume = ActionMode.SYNC_DAEMON
         caps.note_add = ActionMode.SYNC_DAEMON
         caps.note_list = ActionMode.SYNC_DAEMON
+
+        active_states = {"RUNNING", "GATING", "VERIFYING", "READY"}
+        if top_state in active_states:
+            caps.pause = ActionMode.SYNC_DAEMON
+            caps.resume = ActionMode.UNAVAILABLE
+            reasons["resume"] = "run is active"
+        elif top_state == "PAUSED_FOR_HUMAN":
+            caps.pause = ActionMode.UNAVAILABLE
+            caps.resume = ActionMode.SYNC_DAEMON
+            reasons["pause"] = "already paused"
+        else:
+            # Terminal states shouldn't normally have tag=="daemon"
+            # (they'd be reaped), but guard defensively
+            caps.pause = ActionMode.UNAVAILABLE
+            caps.resume = ActionMode.UNAVAILABLE
+            reasons["pause"] = "run is not active"
+            reasons["resume"] = "run is not active"
 
     elif tag == "foreground":
         caps.inspect = ActionMode.SYNC_LOCAL
