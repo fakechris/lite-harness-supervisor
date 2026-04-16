@@ -110,16 +110,22 @@ class NotificationManager:
             elif kind == "tmux_display":
                 channels.append(TmuxDisplayNotificationChannel(tmux_socket=entry.get("tmux_socket")))
             elif kind == "telegram":
-                from supervisor.adapters.telegram_channel import TelegramNotificationChannel
-                channels.append(TelegramNotificationChannel(
-                    bot_token=entry.get("bot_token", ""),
-                    chat_id=entry.get("chat_id", ""),
-                ))
+                try:
+                    from supervisor.adapters.telegram_channel import TelegramNotificationChannel
+                    channels.append(TelegramNotificationChannel(
+                        bot_token=entry.get("bot_token", ""),
+                        chat_id=entry.get("chat_id", ""),
+                    ))
+                except (ValueError, Exception) as exc:
+                    logger.warning("skipping telegram channel: %s", exc)
             elif kind == "lark":
-                from supervisor.adapters.lark_channel import LarkNotificationChannel
-                channels.append(LarkNotificationChannel(
-                    webhook_url=entry.get("webhook_url", ""),
-                ))
+                try:
+                    from supervisor.adapters.lark_channel import LarkNotificationChannel
+                    channels.append(LarkNotificationChannel(
+                        webhook_url=entry.get("webhook_url", ""),
+                    ))
+                except (ValueError, Exception) as exc:
+                    logger.warning("skipping lark channel: %s", exc)
             else:
                 logger.warning("unknown notification channel kind: %s", kind)
         return cls(channels)

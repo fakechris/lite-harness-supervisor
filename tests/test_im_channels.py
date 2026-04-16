@@ -48,7 +48,8 @@ class TestTelegramChannel:
         msg = ch._format_message(event)
 
         assert "thin\\-supervisor" in msg
-        assert "run\\_abc123" in msg
+        # run_id is inside backtick code span — only backtick/backslash escaped
+        assert "`run_abc123`" in msg
         assert "PAUSED\\_FOR\\_HUMAN" in msg
 
     @patch("supervisor.adapters.telegram_channel.urllib_request.urlopen")

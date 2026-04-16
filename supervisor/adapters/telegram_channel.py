@@ -43,14 +43,14 @@ class TelegramNotificationChannel:
         emoji = _event_emoji(event.event_type)
         lines = [
             f"{emoji} *\\[thin\\-supervisor\\]* {_escape_md(event.top_state)}",
-            f"Run: `{_escape_md(event.run_id)}`",
+            f"Run: `{_escape_code(event.run_id)}`",
         ]
         if event.reason:
             lines.append(f"Reason: {_escape_md(event.reason)}")
         if event.next_action:
-            lines.append(f"Next: `{_escape_md(event.next_action)}`")
+            lines.append(f"Next: `{_escape_code(event.next_action)}`")
         if event.workspace_root:
-            lines.append(f"Worktree: `{_escape_md(event.workspace_root)}`")
+            lines.append(f"Worktree: `{_escape_code(event.workspace_root)}`")
         return "\n".join(lines)
 
     def _send_message(self, text: str) -> None:
@@ -96,3 +96,11 @@ def _escape_md(text: str) -> str:
             result.append("\\")
         result.append(ch)
     return "".join(result)
+
+
+def _escape_code(text: str) -> str:
+    """Escape text for use inside MarkdownV2 backtick code spans.
+
+    Only backticks and backslashes need escaping inside code spans.
+    """
+    return text.replace("\\", "\\\\").replace("`", "\\`")

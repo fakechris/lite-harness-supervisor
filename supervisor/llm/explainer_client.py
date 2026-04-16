@@ -31,7 +31,7 @@ def _parse_json(text: str) -> dict:
     text = text.strip()
     if text.startswith("```"):
         lines = text.splitlines()
-        lines = [l for l in lines if not l.startswith("```")]
+        lines = [line for line in lines if not line.startswith("```")]
         text = "\n".join(lines)
     try:
         return json.loads(text)
@@ -75,22 +75,37 @@ class ExplainerClient:
         """Explain what a run is currently doing."""
         if self.model is None:
             return self._stub_explain_run(context)
-        prompt = _load_prompt("explain_run.txt")
-        return self._call(prompt, context, fallback=self._stub_explain_run(context))
+        fallback = self._stub_explain_run(context)
+        try:
+            prompt = _load_prompt("explain_run.txt")
+        except FileNotFoundError:
+            logger.warning("explain_run prompt not found, falling back to stub")
+            return fallback
+        return self._call(prompt, context, fallback=fallback)
 
     def explain_exchange(self, context: dict[str, Any]) -> dict[str, Any]:
         """Explain a recent supervisor/worker exchange."""
         if self.model is None:
             return self._stub_explain_exchange(context)
-        prompt = _load_prompt("explain_exchange.txt")
-        return self._call(prompt, context, fallback=self._stub_explain_exchange(context))
+        fallback = self._stub_explain_exchange(context)
+        try:
+            prompt = _load_prompt("explain_exchange.txt")
+        except FileNotFoundError:
+            logger.warning("explain_exchange prompt not found, falling back to stub")
+            return fallback
+        return self._call(prompt, context, fallback=fallback)
 
     def assess_drift(self, context: dict[str, Any]) -> dict[str, Any]:
         """Assess whether a run is drifting from its approved plan."""
         if self.model is None:
             return self._stub_assess_drift(context)
-        prompt = _load_prompt("assess_drift.txt")
-        return self._call(prompt, context, fallback=self._stub_assess_drift(context))
+        fallback = self._stub_assess_drift(context)
+        try:
+            prompt = _load_prompt("assess_drift.txt")
+        except FileNotFoundError:
+            logger.warning("assess_drift prompt not found, falling back to stub")
+            return fallback
+        return self._call(prompt, context, fallback=fallback)
 
     # ------------------------------------------------------------------
     # LLM call

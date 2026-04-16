@@ -260,29 +260,22 @@ def _draw_status_bar(win, msg: str):
     win.noutrefresh()
 
 
-def _poll_job(client: DaemonClient, job_id: str, timeout: float = 10.0) -> dict:
-    """Poll a job until completed or timeout."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        result = client.get_job(job_id)
-        if result.get("status") in ("completed", "failed"):
-            return result
-        time.sleep(0.3)
-    return {"status": "timeout", "result": {}}
-
-
 def _curses_main(stdscr):
     """Main curses loop."""
     _init_colors()
     curses.curs_set(0)
-    stdscr.timeout(2000)  # 2s refresh interval
+    stdscr.timeout(500)  # 500ms for responsive job polling
 
     selected_idx = 0
     runs: list[dict] = []
     detail_lines: list[str] = ["(select a run)"]
     right_lines: list[str] = ["(press 'e' to explain, 'd' for drift)"]
     status_msg = " j/k:nav  e:explain  d:drift  p:pause  r:resume  q:quit "
+    default_status = status_msg
     last_refresh = 0.0
+
+    # Pending async job state (non-blocking)
+    pending_job: dict[str, Any] | None = None  # {"client": ..., "job_id": ..., "label": ...}
 
     while True:
         h, w = stdscr.getmaxyx()
@@ -294,6 +287,20 @@ def _curses_main(stdscr):
             if key in (ord("q"), ord("Q"), 27):
                 break
             continue
+
+        # Poll pending job (non-blocking)
+        if pending_job is not None:
+            try:
+                result = pending_job["client"].get_job(pending_job["job_id"])
+                if result.get("status") in ("completed", "failed"):
+                    right_lines = format_explanation(result.get("result", {}))
+                    status_msg = default_status
+                    pending_job = None
+                # else: still pending, keep spinner
+            except Exception as exc:
+                right_lines = [f"Error polling job: {exc}"]
+                status_msg = default_status
+                pending_job = None
 
         # Refresh run list periodically
         now = time.time()
@@ -331,7 +338,7 @@ def _curses_main(stdscr):
 
         key = stdscr.getch()
         if key == -1:
-            # Timeout — just refresh
+            # Timeout — just refresh / poll
             continue
 
         if key in (ord("q"), ord("Q"), 27):
@@ -367,43 +374,37 @@ def _curses_main(stdscr):
             else:
                 detail_lines = ["(no daemon connection for this run)"]
 
-        # e: explain run
-        if key == ord("e") and runs:
+        # e: explain run (non-blocking)
+        if key == ord("e") and runs and pending_job is None:
             run = runs[selected_idx]
             client = get_client_for_run(run)
             if client:
                 try:
-                    status_msg = " Explaining... "
-                    _draw_status_bar(status_win, status_msg[:w - 1])
-                    curses.doupdate()
                     resp = client.explain_run(run["run_id"])
                     if resp.get("ok") and resp.get("job_id"):
-                        result = _poll_job(client, resp["job_id"])
-                        right_lines = format_explanation(result.get("result", {}))
+                        pending_job = {"client": client, "job_id": resp["job_id"], "label": "explain"}
+                        status_msg = " Explaining... (waiting for result) "
+                        right_lines = ["(explaining...)"]
                     else:
                         right_lines = [f"Error: {resp.get('error', '?')}"]
                 except Exception as exc:
                     right_lines = [f"Error: {exc}"]
-                status_msg = " j/k:nav  e:explain  d:drift  p:pause  r:resume  q:quit "
 
-        # d: drift assessment
-        if key == ord("d") and runs:
+        # d: drift assessment (non-blocking)
+        if key == ord("d") and runs and pending_job is None:
             run = runs[selected_idx]
             client = get_client_for_run(run)
             if client:
                 try:
-                    status_msg = " Assessing drift... "
-                    _draw_status_bar(status_win, status_msg[:w - 1])
-                    curses.doupdate()
                     resp = client.assess_drift(run["run_id"])
                     if resp.get("ok") and resp.get("job_id"):
-                        result = _poll_job(client, resp["job_id"])
-                        right_lines = format_explanation(result.get("result", {}))
+                        pending_job = {"client": client, "job_id": resp["job_id"], "label": "drift"}
+                        status_msg = " Assessing drift... (waiting for result) "
+                        right_lines = ["(assessing drift...)"]
                     else:
                         right_lines = [f"Error: {resp.get('error', '?')}"]
                 except Exception as exc:
                     right_lines = [f"Error: {exc}"]
-                status_msg = " j/k:nav  e:explain  d:drift  p:pause  r:resume  q:quit "
 
         # p: pause
         if key == ord("p") and runs:

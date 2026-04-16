@@ -669,27 +669,46 @@ class DaemonServer:
     # Operator channel: canonical read APIs
     # ------------------------------------------------------------------
 
-    def _do_get_snapshot(self, run_id: str) -> dict:
-        """Return a RunSnapshot for a single run."""
+    def _resolve_run_store(self, run_id: str) -> tuple[dict | None, Path | None]:
+        """Resolve state dict and session_log path for a run.
+
+        Checks active runs first, falls back to on-disk state for
+        completed/reaped runs so operator reads work after reaping.
+        """
         with self._lock:
             entry = self._runs.get(run_id)
-        if not entry:
+        if entry:
+            return entry._read_state() or {}, entry.store.session_log_path
+
+        # Fallback: scan on-disk run directories
+        run_dir = Path(self.runs_dir) / run_id
+        state_path = run_dir / "state.json"
+        if state_path.exists():
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                return state, run_dir / "session_log.jsonl"
+            except (json.JSONDecodeError, OSError):
+                pass
+        return None, None
+
+    def _do_get_snapshot(self, run_id: str) -> dict:
+        """Return a RunSnapshot for a single run."""
+        state, session_log = self._resolve_run_store(run_id)
+        if state is None:
             return {"ok": False, "error": f"run {run_id} not found"}
-        state = entry._read_state() or {}
-        snap = snapshot_from_state(state, entry.store.session_log_path)
+        snap = snapshot_from_state(state, session_log)
         return {"ok": True, **snap.to_dict()}
 
     def _do_get_timeline(self, request: dict) -> dict:
         """Return RunTimelineEvents for a run."""
         run_id = request.get("run_id", "")
-        with self._lock:
-            entry = self._runs.get(run_id)
-        if not entry:
+        state, session_log = self._resolve_run_store(run_id)
+        if state is None:
             return {"ok": False, "error": f"run {run_id} not found"}
         limit = request.get("limit", 20)
         since_seq = request.get("since_seq", 0)
         events = timeline_from_session_log(
-            entry.store.session_log_path,
+            session_log,
             limit=limit,
             since_seq=since_seq,
         )
@@ -697,36 +716,58 @@ class DaemonServer:
 
     def _do_get_exchange(self, run_id: str) -> dict:
         """Return recent exchange summary for a run."""
-        with self._lock:
-            entry = self._runs.get(run_id)
-        if not entry:
+        state, session_log = self._resolve_run_store(run_id)
+        if state is None:
             return {"ok": False, "error": f"run {run_id} not found"}
-        state = entry._read_state() or {}
-        exchange = recent_exchange(state, entry.store.session_log_path)
+        exchange = recent_exchange(state, session_log)
         return {"ok": True, **exchange}
 
     # ------------------------------------------------------------------
     # Operator channel: async explainer jobs
     # ------------------------------------------------------------------
 
-    def _build_explainer_context(self, entry: RunEntry, **extra) -> dict:
-        """Build context dict for explainer calls."""
-        state = entry._read_state() or {}
-        events = timeline_from_session_log(entry.store.session_log_path, limit=10)
-        return {
+    def _build_explainer_context(self, run_id: str, **extra) -> dict:
+        """Build context dict for explainer calls.
+
+        Uses _resolve_run_store so reaped/completed runs are still explainable.
+        Loads the spec from disk when available for richer context.
+        """
+        state, session_log = self._resolve_run_store(run_id)
+        state = state or {}
+        events = timeline_from_session_log(session_log, limit=10) if session_log else []
+
+        ctx: dict = {
             "run_state": state,
             "recent_events": [e.to_dict() for e in events],
-            **extra,
         }
+
+        # Load spec for richer context (assess_drift needs it)
+        spec_path = state.get("spec_path", "")
+        if spec_path:
+            try:
+                spec_data = load_spec(spec_path)
+                ctx["spec"] = {
+                    "id": getattr(spec_data, "id", ""),
+                    "goal": getattr(spec_data, "goal", ""),
+                    "nodes": [
+                        {"id": n.id, "goal": getattr(n, "goal", "")}
+                        for n in getattr(spec_data, "nodes", [])
+                    ],
+                    "acceptance_criteria": getattr(spec_data, "acceptance_criteria", []),
+                }
+            except Exception:
+                logger.debug("could not load spec for explainer context: %s", spec_path)
+
+        ctx.update(extra)
+        return ctx
 
     def _do_explain_run(self, request: dict) -> dict:
         run_id = request.get("run_id", "")
         language = request.get("language", "en")
-        with self._lock:
-            entry = self._runs.get(run_id)
-        if not entry:
+        state, _ = self._resolve_run_store(run_id)
+        if state is None:
             return {"ok": False, "error": f"run {run_id} not found"}
-        ctx = self._build_explainer_context(entry, language=language)
+        ctx = self._build_explainer_context(run_id, language=language)
         job_id = self._job_tracker.submit(
             "explain_run",
             lambda: self._explainer.explain_run(ctx),
@@ -736,13 +777,11 @@ class DaemonServer:
     def _do_explain_exchange(self, request: dict) -> dict:
         run_id = request.get("run_id", "")
         language = request.get("language", "en")
-        with self._lock:
-            entry = self._runs.get(run_id)
-        if not entry:
+        state, session_log = self._resolve_run_store(run_id)
+        if state is None:
             return {"ok": False, "error": f"run {run_id} not found"}
-        state = entry._read_state() or {}
-        exchange = recent_exchange(state, entry.store.session_log_path)
-        ctx = self._build_explainer_context(entry, exchange=exchange, language=language)
+        exchange = recent_exchange(state, session_log)
+        ctx = self._build_explainer_context(run_id, exchange=exchange, language=language)
         job_id = self._job_tracker.submit(
             "explain_exchange",
             lambda: self._explainer.explain_exchange(ctx),
@@ -752,11 +791,10 @@ class DaemonServer:
     def _do_assess_drift(self, request: dict) -> dict:
         run_id = request.get("run_id", "")
         language = request.get("language", "en")
-        with self._lock:
-            entry = self._runs.get(run_id)
-        if not entry:
+        state, _ = self._resolve_run_store(run_id)
+        if state is None:
             return {"ok": False, "error": f"run {run_id} not found"}
-        ctx = self._build_explainer_context(entry, language=language)
+        ctx = self._build_explainer_context(run_id, language=language)
         job_id = self._job_tracker.submit(
             "assess_drift",
             lambda: self._explainer.assess_drift(ctx),

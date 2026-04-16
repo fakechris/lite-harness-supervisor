@@ -22,3 +22,5 @@ Guidelines:
 - If language is "zh", respond entirely in Chinese
 - Translate technical terms as needed for the target language
 - Focus on the "why" behind supervisor decisions
+- Do not speculate beyond what is evidenced in the context provided
+- If information is missing, say so rather than guessing

@@ -67,11 +67,13 @@ class JobTracker:
                     job.status = "completed"
                     job.result = result
                     job.completed_at = datetime.now(timezone.utc).isoformat()
+                    self._evict_old()
             except Exception as exc:
                 with self._lock:
                     job.status = "failed"
                     job.error = str(exc)
                     job.completed_at = datetime.now(timezone.utc).isoformat()
+                    self._evict_old()
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
@@ -79,11 +81,14 @@ class JobTracker:
 
     def get(self, job_id: str) -> Job | None:
         with self._lock:
-            return self._jobs.get(job_id)
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            return Job(**job.to_dict())
 
     def list_jobs(self, *, kind: str | None = None, limit: int = 20) -> list[Job]:
         with self._lock:
-            jobs = list(self._jobs.values())
+            jobs = [Job(**j.to_dict()) for j in self._jobs.values()]
         if kind:
             jobs = [j for j in jobs if j.kind == kind]
         jobs.sort(key=lambda j: j.created_at, reverse=True)
