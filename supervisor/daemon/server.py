@@ -731,6 +731,7 @@ class DaemonServer:
 
         Uses _resolve_run_store so reaped/completed runs are still explainable.
         Loads the spec from disk when available for richer context.
+        Gathers lightweight codebase signals (git dirty, workspace path).
         """
         state, session_log = self._resolve_run_store(run_id)
         state = state or {}
@@ -741,22 +742,47 @@ class DaemonServer:
             "recent_events": [e.to_dict() for e in events],
         }
 
-        # Load spec for richer context (assess_drift needs it)
+        # Load spec for richer context — prompt expects "spec_context"
         spec_path = state.get("spec_path", "")
         if spec_path:
             try:
                 spec_data = load_spec(spec_path)
-                ctx["spec"] = {
+                acceptance = getattr(spec_data, "acceptance", None)
+                ctx["spec_context"] = {
                     "id": getattr(spec_data, "id", ""),
                     "goal": getattr(spec_data, "goal", ""),
                     "nodes": [
-                        {"id": n.id, "goal": getattr(n, "goal", "")}
+                        {"id": n.id, "objective": getattr(n, "objective", "")}
                         for n in getattr(spec_data, "nodes", [])
                     ],
-                    "acceptance_criteria": getattr(spec_data, "acceptance_criteria", []),
+                    "required_evidence": getattr(acceptance, "required_evidence", []) if acceptance else [],
+                    "forbidden_states": getattr(acceptance, "forbidden_states", []) if acceptance else [],
                 }
             except Exception:
                 logger.debug("could not load spec for explainer context: %s", spec_path)
+
+        # Gather lightweight codebase signals — prompt expects "codebase_signals"
+        workspace = state.get("workspace_root", "")
+        codebase_signals: dict = {"workspace_root": workspace}
+        if workspace:
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=workspace, capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0:
+                    dirty_files = [
+                        line.strip() for line in result.stdout.strip().splitlines()
+                        if line.strip()
+                    ]
+                    codebase_signals["git_dirty"] = bool(dirty_files)
+                    codebase_signals["dirty_file_count"] = len(dirty_files)
+                    # Include first few file paths for context
+                    codebase_signals["dirty_files_sample"] = dirty_files[:10]
+            except Exception:
+                pass
+        ctx["codebase_signals"] = codebase_signals
 
         ctx.update(extra)
         return ctx
@@ -767,25 +793,29 @@ class DaemonServer:
         state, _ = self._resolve_run_store(run_id)
         if state is None:
             return {"ok": False, "error": f"run {run_id} not found"}
-        ctx = self._build_explainer_context(run_id, language=language)
-        job_id = self._job_tracker.submit(
-            "explain_run",
-            lambda: self._explainer.explain_run(ctx),
-        )
+
+        def _job():
+            ctx = self._build_explainer_context(run_id, language=language)
+            return self._explainer.explain_run(ctx)
+
+        job_id = self._job_tracker.submit("explain_run", _job)
         return {"ok": True, "job_id": job_id}
 
     def _do_explain_exchange(self, request: dict) -> dict:
         run_id = request.get("run_id", "")
         language = request.get("language", "en")
-        state, session_log = self._resolve_run_store(run_id)
+        state, _ = self._resolve_run_store(run_id)
         if state is None:
             return {"ok": False, "error": f"run {run_id} not found"}
-        exchange = recent_exchange(state, session_log)
-        ctx = self._build_explainer_context(run_id, exchange=exchange, language=language)
-        job_id = self._job_tracker.submit(
-            "explain_exchange",
-            lambda: self._explainer.explain_exchange(ctx),
-        )
+
+        def _job():
+            ctx = self._build_explainer_context(run_id, language=language)
+            state2, session_log2 = self._resolve_run_store(run_id)
+            exchange = recent_exchange(state2 or {}, session_log2)
+            ctx["exchange"] = exchange
+            return self._explainer.explain_exchange(ctx)
+
+        job_id = self._job_tracker.submit("explain_exchange", _job)
         return {"ok": True, "job_id": job_id}
 
     def _do_assess_drift(self, request: dict) -> dict:
@@ -794,11 +824,12 @@ class DaemonServer:
         state, _ = self._resolve_run_store(run_id)
         if state is None:
             return {"ok": False, "error": f"run {run_id} not found"}
-        ctx = self._build_explainer_context(run_id, language=language)
-        job_id = self._job_tracker.submit(
-            "assess_drift",
-            lambda: self._explainer.assess_drift(ctx),
-        )
+
+        def _job():
+            ctx = self._build_explainer_context(run_id, language=language)
+            return self._explainer.assess_drift(ctx)
+
+        job_id = self._job_tracker.submit("assess_drift", _job)
         return {"ok": True, "job_id": job_id}
 
     def _do_get_job(self, job_id: str) -> dict:

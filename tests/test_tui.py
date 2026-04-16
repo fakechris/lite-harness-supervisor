@@ -5,6 +5,8 @@ from supervisor.operator.tui import (
     format_snapshot,
     format_timeline,
     format_explanation,
+    format_exchange,
+    collect_runs,
 )
 
 
@@ -162,3 +164,80 @@ class TestFormatExplanation:
     def test_empty(self):
         lines = format_explanation({})
         assert len(lines) == 2  # header + "(none)"
+
+
+class TestFormatExchange:
+    def test_basic(self):
+        exchange = {
+            "run_id": "run_abc",
+            "last_checkpoint_summary": "step 1 completed",
+            "last_instruction_summary": "continue to step 2",
+            "checkpoint_excerpt": "wrote files",
+            "instruction_excerpt": "instruction to step_2",
+            "recent_event_count": 5,
+        }
+        lines = format_exchange(exchange)
+        text = "\n".join(lines)
+        assert "Exchange:" in text
+        assert "step 1 completed" in text
+        assert "continue to step 2" in text
+
+    def test_empty_exchange(self):
+        lines = format_exchange({})
+        text = "\n".join(lines)
+        assert "(none)" in text
+
+
+class TestCollectRunsLocal:
+    def test_collect_with_disk_runs(self, tmp_path):
+        """Verify collect_runs picks up on-disk state files."""
+        import json
+        import supervisor.operator.tui as tui_mod
+
+        # Temporarily override runtime dir
+        orig = tui_mod._RUNTIME_DIR
+        tui_mod._RUNTIME_DIR = tmp_path
+
+        runs_dir = tmp_path / "runs" / "run_test123"
+        runs_dir.mkdir(parents=True)
+        state = {
+            "run_id": "run_test123",
+            "top_state": "PAUSED_FOR_HUMAN",
+            "current_node_id": "step_1",
+            "pane_target": "%5",
+            "workspace_root": "/tmp/ws",
+        }
+        (runs_dir / "state.json").write_text(json.dumps(state))
+
+        try:
+            items = collect_runs(daemons=[])
+            assert len(items) == 1
+            assert items[0]["run_id"] == "run_test123"
+            assert items[0]["tag"] == "paused"
+            assert items[0]["top_state"] == "PAUSED_FOR_HUMAN"
+        finally:
+            tui_mod._RUNTIME_DIR = orig
+
+    def test_collect_completed_run(self, tmp_path):
+        import json
+        import supervisor.operator.tui as tui_mod
+
+        orig = tui_mod._RUNTIME_DIR
+        tui_mod._RUNTIME_DIR = tmp_path
+
+        runs_dir = tmp_path / "runs" / "run_done999"
+        runs_dir.mkdir(parents=True)
+        state = {
+            "run_id": "run_done999",
+            "top_state": "COMPLETED",
+            "current_node_id": "",
+            "done_node_ids": ["step_1", "step_2"],
+        }
+        (runs_dir / "state.json").write_text(json.dumps(state))
+
+        try:
+            items = collect_runs(daemons=[])
+            assert len(items) == 1
+            assert items[0]["tag"] == "completed"
+        finally:
+            tui_mod._RUNTIME_DIR = orig

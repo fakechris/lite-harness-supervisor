@@ -151,11 +151,30 @@ class ExplainerClient:
     @staticmethod
     def _stub_explain_run(context: dict[str, Any]) -> dict[str, Any]:
         state = context.get("run_state", {})
+        lang = context.get("language", "en")
+        zh = lang == "zh"
         top_state = state.get("top_state", "UNKNOWN")
         current_node = state.get("current_node_id", "")
         done = state.get("done_node_ids", [])
         cp = state.get("last_agent_checkpoint", {})
         cp_summary = cp.get("summary", "") if isinstance(cp, dict) else ""
+
+        if zh:
+            activity = f"状态: {top_state}, 节点: {current_node}"
+            if cp_summary:
+                activity += f" — {cp_summary}"
+            done_str = ", ".join(done) if done else "(无)"
+            return {
+                "explanation": (
+                    f"运行处于 {top_state} 状态，当前节点 '{current_node}'。"
+                    f"已完成节点: {done_str}。"
+                    + (f" 最近检查点: {cp_summary}" if cp_summary else "")
+                ),
+                "current_activity": activity,
+                "recent_progress": f"已完成 {len(done)} 个节点: {done_str}" if done else "尚未完成任何节点",
+                "next_expected": "等待 worker 的下一个检查点",
+                "confidence": 0.3,
+            }
 
         activity = f"State: {top_state}, node: {current_node}"
         if cp_summary:
@@ -176,8 +195,22 @@ class ExplainerClient:
     @staticmethod
     def _stub_explain_exchange(context: dict[str, Any]) -> dict[str, Any]:
         exchange = context.get("exchange", {})
+        lang = context.get("language", "en")
+        zh = lang == "zh"
         cp = exchange.get("last_checkpoint_summary", "")
         instr = exchange.get("last_instruction_summary", "")
+
+        if zh:
+            return {
+                "explanation": (
+                    f"Worker 检查点: {cp or '(无)'}。"
+                    f"Supervisor 指令: {instr or '(无)'}。"
+                ),
+                "worker_intent": cp or "(无检查点)",
+                "supervisor_response": instr or "(无指令)",
+                "outcome": "交换细节请查看原始时间线事件",
+                "confidence": 0.2,
+            }
 
         return {
             "explanation": (
@@ -193,32 +226,46 @@ class ExplainerClient:
     @staticmethod
     def _stub_assess_drift(context: dict[str, Any]) -> dict[str, Any]:
         state = context.get("run_state", {})
+        lang = context.get("language", "en")
+        zh = lang == "zh"
         retry_budget = state.get("retry_budget", {})
         used_global = retry_budget.get("used_global", 0) if isinstance(retry_budget, dict) else 0
         mismatch = state.get("node_mismatch_count", 0)
         auto_interventions = state.get("auto_intervention_count", 0)
 
         reasons: list[str] = []
-        if used_global > 3:
-            reasons.append(f"High retry count ({used_global} global retries used)")
-        if mismatch > 0:
-            reasons.append(f"Node mismatch detected ({mismatch} times)")
-        if auto_interventions > 1:
-            reasons.append(f"Multiple auto-interventions ({auto_interventions})")
+        if zh:
+            if used_global > 3:
+                reasons.append(f"重试次数较多（已用 {used_global} 次全局重试）")
+            if mismatch > 0:
+                reasons.append(f"节点不匹配（{mismatch} 次）")
+            if auto_interventions > 1:
+                reasons.append(f"多次自动干预（{auto_interventions} 次）")
 
-        if not reasons:
-            status = "on_track"
-            action = "No action needed"
-        elif len(reasons) == 1 and used_global <= 5:
-            status = "watch"
-            action = "Monitor for further issues"
+            if not reasons:
+                status, action = "on_track", "无需操作"
+            elif len(reasons) == 1 and used_global <= 5:
+                status, action = "watch", "继续观察"
+            else:
+                status, action = "drifting", "建议检查运行状态并考虑暂停"
         else:
-            status = "drifting"
-            action = "Review run state and consider pausing"
+            if used_global > 3:
+                reasons.append(f"High retry count ({used_global} global retries used)")
+            if mismatch > 0:
+                reasons.append(f"Node mismatch detected ({mismatch} times)")
+            if auto_interventions > 1:
+                reasons.append(f"Multiple auto-interventions ({auto_interventions})")
+
+            if not reasons:
+                status, action = "on_track", "No action needed"
+            elif len(reasons) == 1 and used_global <= 5:
+                status, action = "watch", "Monitor for further issues"
+            else:
+                status, action = "drifting", "Review run state and consider pausing"
 
         return {
             "status": status,
-            "reasons": reasons or ["No drift signals detected"],
+            "reasons": reasons or (["未检测到偏移信号"] if zh else ["No drift signals detected"]),
             "evidence": [
                 f"retries_used={used_global}",
                 f"node_mismatches={mismatch}",

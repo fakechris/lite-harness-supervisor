@@ -3,7 +3,7 @@
 Three-pane layout:
   Left:   run list
   Center: selected run snapshot + timeline
-  Right:  explanation / drift / next action
+  Right:  explanation / drift / exchange / next action
   Bottom: command line
 
 Uses curses for terminal rendering. Falls back gracefully
@@ -12,17 +12,27 @@ if terminal is too small.
 from __future__ import annotations
 
 import curses
+import json
 import time
+from pathlib import Path
 from typing import Any
 
 from supervisor.daemon.client import DaemonClient
 from supervisor.global_registry import list_daemons, list_pane_owners
+from supervisor.pause_summary import summarize_state
+
+# Default runtime dir — same as app.py
+_RUNTIME_DIR = Path(".supervisor/runtime")
 
 
 # ── Data collection ────────────────────────────────────────────────
 
 def collect_runs(daemons: list[dict] | None = None) -> list[dict]:
-    """Collect all runs from daemons and foreground pane owners."""
+    """Collect all runs from daemons, foreground owners, and local disk state.
+
+    Includes orphaned and completed runs from disk so the TUI covers
+    the same scope as the existing CLI status/dashboard commands.
+    """
     items: list[dict] = []
     seen: set[str] = set()
 
@@ -71,7 +81,50 @@ def collect_runs(daemons: list[dict] | None = None) -> list[dict]:
             "socket": "",
         })
 
+    # Scan local disk state for orphaned/completed runs not in daemon registry
+    _collect_local_runs(items, seen)
+
     return items
+
+
+def _collect_local_runs(items: list[dict], seen: set[str]) -> None:
+    """Scan on-disk run directories for orphaned/completed runs."""
+    runs_dir = _RUNTIME_DIR / "runs"
+    if not runs_dir.is_dir():
+        return
+    for run_dir in sorted(runs_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        state_path = run_dir / "state.json"
+        if not state_path.exists():
+            continue
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        rid = state.get("run_id", "")
+        if not rid or rid in seen:
+            continue
+        seen.add(rid)
+        top = state.get("top_state", "UNKNOWN")
+        summary = summarize_state(state)
+        # Determine tag
+        if top in ("COMPLETED", "FAILED", "ABORTED"):
+            tag = "completed"
+        elif top in ("RUNNING", "GATING", "VERIFYING"):
+            tag = "orphaned"
+        elif top == "PAUSED_FOR_HUMAN":
+            tag = "paused"
+        else:
+            tag = "local"
+        items.append({
+            "run_id": rid,
+            "tag": tag,
+            "top_state": top,
+            "current_node": state.get("current_node_id", ""),
+            "pane_target": state.get("pane_target", "?"),
+            "worktree": state.get("workspace_root", ""),
+            "socket": "",
+            "status_reason": summary.get("status_reason", ""),
+        })
 
 
 def get_client_for_run(run: dict) -> DaemonClient | None:
@@ -143,6 +196,60 @@ def format_timeline(events: list[dict]) -> list[str]:
         summary = ev.get("summary", "")[:60]
         lines.append(f"  {ts} [{etype}] {summary}")
     return lines
+
+
+def format_exchange(exchange: dict[str, Any]) -> list[str]:
+    """Format a recent exchange dict into display lines."""
+    lines = ["Exchange:"]
+    cp = exchange.get("last_checkpoint_summary", "")
+    instr = exchange.get("last_instruction_summary", "")
+    lines.append(f"  Checkpoint: {cp[:120] or '(none)'}")
+    lines.append(f"  Instruction: {instr[:120] or '(none)'}")
+    excerpt_cp = exchange.get("checkpoint_excerpt", "")
+    excerpt_instr = exchange.get("instruction_excerpt", "")
+    if excerpt_cp:
+        lines.append(f"  CP excerpt: {excerpt_cp[:100]}")
+    if excerpt_instr:
+        lines.append(f"  Instr excerpt: {excerpt_instr[:100]}")
+    lines.append(f"  Recent events: {exchange.get('recent_event_count', 0)}")
+    return lines
+
+
+def _load_local_detail(run: dict) -> list[str]:
+    """Load snapshot + timeline from disk for non-daemon runs."""
+    from supervisor.operator.api import snapshot_from_state, timeline_from_session_log
+    rid = run.get("run_id", "")
+    runs_dir = _RUNTIME_DIR / "runs" / rid
+    state_path = runs_dir / "state.json"
+    session_log = runs_dir / "session_log.jsonl"
+    if not state_path.exists():
+        return [f"No local state for {rid}"]
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        snap = snapshot_from_state(state, session_log)
+        lines = format_snapshot(snap.to_dict())
+        events = timeline_from_session_log(session_log, limit=15)
+        lines.extend(format_timeline([e.to_dict() for e in events]))
+        return lines
+    except Exception as exc:
+        return [f"Error reading local state: {exc}"]
+
+
+def _format_local_exchange(run: dict) -> list[str]:
+    """Read exchange from disk for local (non-daemon) runs."""
+    from supervisor.operator.api import recent_exchange
+    rid = run.get("run_id", "")
+    runs_dir = _RUNTIME_DIR / "runs" / rid
+    state_path = runs_dir / "state.json"
+    session_log = runs_dir / "session_log.jsonl"
+    if not state_path.exists():
+        return ["(no local state available)"]
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        exchange = recent_exchange(state, session_log)
+        return format_exchange(exchange)
+    except Exception as exc:
+        return [f"Error reading local exchange: {exc}"]
 
 
 def format_explanation(result: dict[str, Any]) -> list[str]:
@@ -270,7 +377,7 @@ def _curses_main(stdscr):
     runs: list[dict] = []
     detail_lines: list[str] = ["(select a run)"]
     right_lines: list[str] = ["(press 'e' to explain, 'd' for drift)"]
-    status_msg = " j/k:nav  e:explain  d:drift  p:pause  r:resume  q:quit "
+    status_msg = " j/k:nav  e:explain  x:exchange  d:drift  p:pause  q:quit "
     default_status = status_msg
     last_refresh = 0.0
 
@@ -375,7 +482,8 @@ def _curses_main(stdscr):
                 except Exception as exc:
                     detail_lines = [f"Error: {exc}"]
             else:
-                detail_lines = ["(no daemon connection for this run)"]
+                # Local/orphaned/completed run — read from disk
+                detail_lines = _load_local_detail(run)
 
         # e: explain run (non-blocking)
         if key == ord("e") and runs and pending_job is None:
@@ -392,6 +500,25 @@ def _curses_main(stdscr):
                         right_lines = [f"Error: {resp.get('error', '?')}"]
                 except Exception as exc:
                     right_lines = [f"Error: {exc}"]
+
+        # x: explain exchange (non-blocking)
+        if key == ord("x") and runs and pending_job is None:
+            run = runs[selected_idx]
+            client = get_client_for_run(run)
+            if client:
+                try:
+                    resp = client.explain_exchange(run["run_id"])
+                    if resp.get("ok") and resp.get("job_id"):
+                        pending_job = {"client": client, "job_id": resp["job_id"], "label": "exchange"}
+                        status_msg = " Explaining exchange... (waiting for result) "
+                        right_lines = ["(explaining exchange...)"]
+                    else:
+                        right_lines = [f"Error: {resp.get('error', '?')}"]
+                except Exception as exc:
+                    right_lines = [f"Error: {exc}"]
+            else:
+                # Foreground/local run — show sync exchange from disk
+                right_lines = _format_local_exchange(run)
 
         # d: drift assessment (non-blocking)
         if key == ord("d") and runs and pending_job is None:
