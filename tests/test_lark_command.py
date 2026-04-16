@@ -258,7 +258,7 @@ class TestHttpTextMessageRouting:
             server, port = self._start_server(ch)
             try:
                 payload = {
-                    "header": {"event_type": "im.message.receive_v1"},
+                    "header": {"event_type": "im.message.receive_v1", "event_id": "evt_1"},
                     "event": {
                         "message": {
                             "chat_id": "oc_xxx",
@@ -270,6 +270,9 @@ class TestHttpTextMessageRouting:
                 }
                 status = self._post(port, payload)
                 assert status == 200
+                # Command dispatches in background thread — wait briefly
+                import time
+                time.sleep(0.2)
                 mock_handle.assert_called_once_with("/runs", "oc_xxx", "msg_evt_1")
             finally:
                 server.shutdown()
@@ -290,6 +293,35 @@ class TestHttpTextMessageRouting:
                     mock_card.assert_called_once()
                 finally:
                     server.shutdown()
+
+    def test_duplicate_event_ignored(self):
+        """Duplicate events (same event_id) should not re-dispatch."""
+        ch = _make_channel(callback_port=0)
+        with patch.object(ch, "handle_text_command") as mock_handle:
+            server, port = self._start_server(ch)
+            try:
+                payload = {
+                    "header": {"event_type": "im.message.receive_v1", "event_id": "evt_dup"},
+                    "event": {
+                        "message": {
+                            "chat_id": "oc_xxx",
+                            "message_id": "msg_1",
+                            "message_type": "text",
+                            "content": json.dumps({"text": "/runs"}),
+                        },
+                    },
+                }
+                # First request
+                self._post(port, payload)
+                import time
+                time.sleep(0.2)
+                assert mock_handle.call_count == 1
+                # Second request (retry) — same event_id
+                self._post(port, payload)
+                time.sleep(0.2)
+                assert mock_handle.call_count == 1  # still 1, not 2
+            finally:
+                server.shutdown()
 
     def test_unauthorized_text_event_ignored(self):
         ch = _make_channel(callback_port=0, allowed_chat_ids=["oc_xxx"])
@@ -343,6 +375,29 @@ class TestJobCompletion:
 
 
 # ── Helper functions ─────────────────────────────────────────────
+
+
+class TestEventDedup:
+    def test_first_event_not_duplicate(self):
+        ch = _make_channel()
+        assert not ch._is_duplicate_event("evt_1")
+
+    def test_second_event_is_duplicate(self):
+        ch = _make_channel()
+        ch._is_duplicate_event("evt_1")
+        assert ch._is_duplicate_event("evt_1")
+
+    def test_empty_event_id_never_duplicate(self):
+        ch = _make_channel()
+        assert not ch._is_duplicate_event("")
+        assert not ch._is_duplicate_event("")
+
+    def test_bounded_set_pruning(self):
+        ch = _make_channel()
+        # Fill past 1000
+        for i in range(1100):
+            ch._is_duplicate_event(f"evt_{i}")
+        assert len(ch._seen_event_ids) <= 600  # pruned to ~500
 
 
 class TestSignatureVerification:

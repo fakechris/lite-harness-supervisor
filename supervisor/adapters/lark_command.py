@@ -188,6 +188,26 @@ class LarkCommandChannel:
         self._server_thread: threading.Thread | None = None
         self._server: ThreadingHTTPServer | None = None
         self._poller = AsyncJobPoller()
+        # Event dedup: bounded set of recently-seen event IDs to prevent
+        # duplicate command execution on Lark retries.
+        self._seen_event_ids: set[str] = set()
+        self._seen_event_ids_lock = threading.Lock()
+
+    def _is_duplicate_event(self, event_id: str) -> bool:
+        """Check if event was already processed.  Returns True if duplicate."""
+        if not event_id:
+            return False
+        with self._seen_event_ids_lock:
+            if event_id in self._seen_event_ids:
+                return True
+            self._seen_event_ids.add(event_id)
+            # Bound the set to prevent unbounded growth
+            if len(self._seen_event_ids) > 1000:
+                # Drop oldest ~half (set is unordered, but this is fine
+                # for dedup — we just need recent events)
+                to_keep = list(self._seen_event_ids)[-500:]
+                self._seen_event_ids = set(to_keep)
+            return False
 
     # ── NotificationChannel protocol ──────────────────────────────
 
@@ -449,7 +469,14 @@ class _LarkCallbackHandler(BaseHTTPRequestHandler):
         event_type = header.get("event_type", "")
 
         if event_type == "im.message.receive_v1":
-            # Text message from event subscription
+            # Text message from event subscription.
+            # Respond 200 immediately (Lark requires <3s), then dispatch
+            # in background to avoid blocking and retry-induced duplicates.
+            event_id = header.get("event_id", "")
+            if self.channel._is_duplicate_event(event_id):
+                self._respond(200, {})
+                return
+
             event = payload.get("event", {})
             message = event.get("message", {})
             chat_id = message.get("chat_id", "")
@@ -460,16 +487,22 @@ class _LarkCallbackHandler(BaseHTTPRequestHandler):
                 self._respond(200, {})
                 return
 
+            text = ""
             if msg_type == "text":
                 try:
                     content = json.loads(message.get("content", "{}"))
                     text = content.get("text", "")
                 except (json.JSONDecodeError, TypeError):
-                    text = ""
-                if text:
-                    self.channel.handle_text_command(text, chat_id, message_id)
+                    pass
 
+            # Respond first, then dispatch asynchronously
             self._respond(200, {})
+            if text:
+                threading.Thread(
+                    target=self.channel.handle_text_command,
+                    args=(text, chat_id, message_id),
+                    daemon=True,
+                ).start()
             return
 
         # Card action callback (top-level "action" key)
