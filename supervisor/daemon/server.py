@@ -793,25 +793,29 @@ class DaemonServer:
         state, _ = self._resolve_run_store(run_id)
         if state is None:
             return {"ok": False, "error": f"run {run_id} not found"}
-        ctx = self._build_explainer_context(run_id, language=language)
-        job_id = self._job_tracker.submit(
-            "explain_run",
-            lambda: self._explainer.explain_run(ctx),
-        )
+
+        def _job():
+            ctx = self._build_explainer_context(run_id, language=language)
+            return self._explainer.explain_run(ctx)
+
+        job_id = self._job_tracker.submit("explain_run", _job)
         return {"ok": True, "job_id": job_id}
 
     def _do_explain_exchange(self, request: dict) -> dict:
         run_id = request.get("run_id", "")
         language = request.get("language", "en")
-        state, session_log = self._resolve_run_store(run_id)
+        state, _ = self._resolve_run_store(run_id)
         if state is None:
             return {"ok": False, "error": f"run {run_id} not found"}
-        exchange = recent_exchange(state, session_log)
-        ctx = self._build_explainer_context(run_id, exchange=exchange, language=language)
-        job_id = self._job_tracker.submit(
-            "explain_exchange",
-            lambda: self._explainer.explain_exchange(ctx),
-        )
+
+        def _job():
+            ctx = self._build_explainer_context(run_id, language=language)
+            state2, session_log2 = self._resolve_run_store(run_id)
+            exchange = recent_exchange(state2 or {}, session_log2)
+            ctx["exchange"] = exchange
+            return self._explainer.explain_exchange(ctx)
+
+        job_id = self._job_tracker.submit("explain_exchange", _job)
         return {"ok": True, "job_id": job_id}
 
     def _do_assess_drift(self, request: dict) -> dict:
@@ -820,11 +824,12 @@ class DaemonServer:
         state, _ = self._resolve_run_store(run_id)
         if state is None:
             return {"ok": False, "error": f"run {run_id} not found"}
-        ctx = self._build_explainer_context(run_id, language=language)
-        job_id = self._job_tracker.submit(
-            "assess_drift",
-            lambda: self._explainer.assess_drift(ctx),
-        )
+
+        def _job():
+            ctx = self._build_explainer_context(run_id, language=language)
+            return self._explainer.assess_drift(ctx)
+
+        job_id = self._job_tracker.submit("assess_drift", _job)
         return {"ok": True, "job_id": job_id}
 
     def _do_get_job(self, job_id: str) -> dict:

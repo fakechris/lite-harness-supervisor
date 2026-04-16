@@ -92,7 +92,7 @@ def _collect_local_runs(items: list[dict], seen: set[str]) -> None:
     runs_dir = _RUNTIME_DIR / "runs"
     if not runs_dir.is_dir():
         return
-    for run_dir in sorted(runs_dir.iterdir()):
+    for run_dir in sorted(runs_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
         state_path = run_dir / "state.json"
         if not state_path.exists():
             continue
