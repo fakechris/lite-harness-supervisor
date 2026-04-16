@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import MagicMock
 
 from supervisor.config import RuntimeConfig
 from supervisor.notifications import (
@@ -132,3 +133,67 @@ def test_notification_manager_builds_channels_from_config(tmp_path):
     manager = NotificationManager.from_config(config, runtime_root=tmp_path)
 
     assert len(manager.channels) == 2
+
+
+def test_command_channels_skipped_when_shared_provided(tmp_path):
+    """When command_channels is provided, from_config should not create
+    new command channel instances — it uses the shared ones instead."""
+    from supervisor.config import RuntimeConfig
+    config = RuntimeConfig(
+        notification_channels=[
+            {"kind": "jsonl"},
+            {"kind": "telegram", "mode": "command", "bot_token": "tok", "chat_id": "123"},
+        ]
+    )
+
+    shared = [MagicMock()]  # pre-created shared command channel
+    manager = NotificationManager.from_config(
+        config, runtime_root=tmp_path, command_channels=shared,
+    )
+    # Should have jsonl + shared, but NOT a new telegram command channel
+    assert len(manager.channels) == 2
+    assert manager.channels[1] is shared[0]
+
+
+def test_command_channels_created_when_no_shared(tmp_path):
+    """When command_channels=None, from_config creates them inline."""
+    from supervisor.config import RuntimeConfig
+    config = RuntimeConfig(
+        notification_channels=[
+            {"kind": "telegram", "mode": "command", "bot_token": "tok", "chat_id": "123"},
+        ]
+    )
+    manager = NotificationManager.from_config(config, runtime_root=tmp_path)
+    assert len(manager.channels) == 1
+    from supervisor.adapters.telegram_command import TelegramCommandChannel
+    assert isinstance(manager.channels[0], TelegramCommandChannel)
+
+
+def test_create_command_channels():
+    """create_command_channels extracts only mode=command entries."""
+    from supervisor.config import RuntimeConfig
+    config = RuntimeConfig(
+        notification_channels=[
+            {"kind": "jsonl"},
+            {"kind": "telegram", "bot_token": "tok", "chat_id": "123"},
+            {"kind": "telegram", "mode": "command", "bot_token": "tok2", "chat_id": "456"},
+            {"kind": "lark", "webhook_url": "https://example.com"},
+        ]
+    )
+    channels = NotificationManager.create_command_channels(config)
+    assert len(channels) == 1
+    from supervisor.adapters.telegram_command import TelegramCommandChannel
+    assert isinstance(channels[0], TelegramCommandChannel)
+
+
+def test_start_all_and_stop_all():
+    """start_all/stop_all call start()/stop() on command channels."""
+    ch = MagicMock()
+    ch.start = MagicMock()
+    ch.stop = MagicMock()
+    manager = NotificationManager([ch])
+    result = manager.start_all()
+    assert result is manager  # returns self
+    ch.start.assert_called_once()
+    manager.stop_all()
+    ch.stop.assert_called_once()

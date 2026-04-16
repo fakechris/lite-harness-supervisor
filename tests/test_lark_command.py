@@ -221,6 +221,131 @@ class TestTextCommandHandling:
             # parse_command returns ("", []) for non-commands
 
 
+# ── HTTP handler text message routing ────────────────────────────
+
+
+class TestHttpTextMessageRouting:
+    """Verify that the HTTP callback handler routes im.message.receive_v1
+    events to handle_text_command() via real HTTP requests."""
+
+    def _start_server(self, channel):
+        """Start a test HTTP server on a random port. Returns (server, port)."""
+        from functools import partial
+        from http.server import ThreadingHTTPServer
+        from supervisor.adapters.lark_command import _LarkCallbackHandler
+        handler = partial(_LarkCallbackHandler, channel=channel)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        port = server.server_address[1]
+        channel._callback_port = port
+        import threading
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        return server, port
+
+    def _post(self, port: int, payload: dict) -> int:
+        import http.client
+        body = json.dumps(payload).encode("utf-8")
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("POST", "/", body=body, headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        status = resp.status
+        conn.close()
+        return status
+
+    def test_text_event_routes_to_handle_text_command(self):
+        ch = _make_channel(callback_port=0)
+        with patch.object(ch, "handle_text_command") as mock_handle:
+            server, port = self._start_server(ch)
+            try:
+                payload = {
+                    "header": {"event_type": "im.message.receive_v1", "event_id": "evt_1"},
+                    "event": {
+                        "message": {
+                            "chat_id": "oc_xxx",
+                            "message_id": "msg_evt_1",
+                            "message_type": "text",
+                            "content": json.dumps({"text": "/runs"}),
+                        },
+                    },
+                }
+                status = self._post(port, payload)
+                assert status == 200
+                # Command dispatches in background thread — wait briefly
+                import time
+                time.sleep(0.2)
+                mock_handle.assert_called_once_with("/runs", "oc_xxx", "msg_evt_1")
+            finally:
+                server.shutdown()
+
+    def test_card_action_does_not_trigger_text_handler(self):
+        ch = _make_channel(callback_port=0)
+        with patch.object(ch, "handle_text_command") as mock_text:
+            with patch.object(ch, "handle_card_action", return_value=None) as mock_card:
+                server, port = self._start_server(ch)
+                try:
+                    payload = {
+                        "action": {"value": {"cmd": "inspect", "run_id": "abc"}},
+                        "event": {"open_chat_id": "oc_xxx", "open_message_id": "msg_1"},
+                    }
+                    status = self._post(port, payload)
+                    assert status == 200
+                    mock_text.assert_not_called()
+                    mock_card.assert_called_once()
+                finally:
+                    server.shutdown()
+
+    def test_duplicate_event_ignored(self):
+        """Duplicate events (same event_id) should not re-dispatch."""
+        ch = _make_channel(callback_port=0)
+        with patch.object(ch, "handle_text_command") as mock_handle:
+            server, port = self._start_server(ch)
+            try:
+                payload = {
+                    "header": {"event_type": "im.message.receive_v1", "event_id": "evt_dup"},
+                    "event": {
+                        "message": {
+                            "chat_id": "oc_xxx",
+                            "message_id": "msg_1",
+                            "message_type": "text",
+                            "content": json.dumps({"text": "/runs"}),
+                        },
+                    },
+                }
+                # First request
+                self._post(port, payload)
+                import time
+                time.sleep(0.2)
+                assert mock_handle.call_count == 1
+                # Second request (retry) — same event_id
+                self._post(port, payload)
+                time.sleep(0.2)
+                assert mock_handle.call_count == 1  # still 1, not 2
+            finally:
+                server.shutdown()
+
+    def test_unauthorized_text_event_ignored(self):
+        ch = _make_channel(callback_port=0, allowed_chat_ids=["oc_xxx"])
+        with patch.object(ch, "handle_text_command") as mock_handle:
+            server, port = self._start_server(ch)
+            try:
+                payload = {
+                    "header": {"event_type": "im.message.receive_v1"},
+                    "event": {
+                        "message": {
+                            "chat_id": "oc_unauthorized",
+                            "message_id": "msg_1",
+                            "message_type": "text",
+                            "content": json.dumps({"text": "/runs"}),
+                        },
+                    },
+                }
+                status = self._post(port, payload)
+                assert status == 200
+                mock_handle.assert_not_called()
+            finally:
+                server.shutdown()
+
+
 # ── Job completion callback ──────────────────────────────────────
 
 
@@ -250,6 +375,29 @@ class TestJobCompletion:
 
 
 # ── Helper functions ─────────────────────────────────────────────
+
+
+class TestEventDedup:
+    def test_first_event_not_duplicate(self):
+        ch = _make_channel()
+        assert not ch._is_duplicate_event("evt_1")
+
+    def test_second_event_is_duplicate(self):
+        ch = _make_channel()
+        ch._is_duplicate_event("evt_1")
+        assert ch._is_duplicate_event("evt_1")
+
+    def test_empty_event_id_never_duplicate(self):
+        ch = _make_channel()
+        assert not ch._is_duplicate_event("")
+        assert not ch._is_duplicate_event("")
+
+    def test_bounded_set_pruning(self):
+        ch = _make_channel()
+        # Fill past 1000
+        for i in range(1100):
+            ch._is_duplicate_event(f"evt_{i}")
+        assert len(ch._seen_event_ids) <= 600  # pruned to ~500
 
 
 class TestSignatureVerification:

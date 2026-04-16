@@ -123,6 +123,10 @@ class DaemonServer:
             max_tokens=self.config.explainer_max_tokens,
         )
         self._job_tracker = JobTracker()
+        # Command channels are per-daemon singletons (one polling thread /
+        # one HTTP server), shared across all runs.
+        self._command_channels = NotificationManager.create_command_channels(self.config)
+        NotificationManager(self._command_channels).start_all()
 
     def start(self) -> None:
         """Start the daemon: bind socket, write PID, accept connections."""
@@ -383,7 +387,8 @@ class DaemonServer:
                 notification_manager=NotificationManager.from_config(
                     self.config,
                     runtime_root=entry.store.runtime_root,
-                ).start_all(),
+                    command_channels=self._command_channels,
+                ),
                 auto_intervention_manager=AutoInterventionManager(
                     mode=self.config.pause_handling_mode,
                     max_auto_interventions=self.config.max_auto_interventions,
@@ -988,6 +993,7 @@ class DaemonServer:
             t.join(timeout=5)
         for entry in entries:
             release_pane_lock(entry.pane_target, entry.run_id)
+        NotificationManager(self._command_channels).stop_all()
         if self._sock:
             self._sock.close()
         Path(self.sock_path).unlink(missing_ok=True)
