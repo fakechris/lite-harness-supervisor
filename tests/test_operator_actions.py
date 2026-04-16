@@ -11,6 +11,7 @@ from supervisor.operator.actions import (
     ActionUnavailable,
     OperatorJob,
     _local_jobs,
+    build_explainer_context,
     do_exchange,
     do_inspect,
     do_note_add,
@@ -18,6 +19,7 @@ from supervisor.operator.actions import (
     do_pause,
     do_resume,
     poll_job,
+    submit_clarification,
     submit_drift,
     submit_explain,
     submit_explain_exchange,
@@ -320,3 +322,133 @@ class TestPollJob:
             result = poll_job(ctx, OperatorJob(job_id="job_abc", source="daemon"))
         assert result["status"] == "failed"
         assert "unreachable" in result["error"]
+
+
+# ── build_explainer_context ──────────────────────────────────────
+
+
+class TestBuildExplainerContext:
+    def test_includes_run_state_and_events(self, tmp_path):
+        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_ctx"
+        run_dir.mkdir(parents=True)
+        state = {"run_id": "run_ctx", "top_state": "RUNNING", "spec_path": ""}
+        (run_dir / "state.json").write_text(json.dumps(state))
+
+        ctx = _make_ctx(
+            tag="completed", run_id="run_ctx", worktree=str(tmp_path),
+            socket="", state_dir=run_dir, state_path=run_dir / "state.json",
+            session_log_path=run_dir / "session_log.jsonl",
+        )
+        with patch.object(ctx, "_has_daemon", return_value=False):
+            result = build_explainer_context(ctx, language="en")
+        assert result["run_state"]["run_id"] == "run_ctx"
+        assert "recent_events" in result
+        assert "codebase_signals" in result
+        assert result.get("language") == "en"
+
+    def test_loads_spec_context_when_available(self, tmp_path):
+        """Verify spec_context is populated from spec file."""
+        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_spec"
+        run_dir.mkdir(parents=True)
+
+        # Create a minimal spec file
+        spec_dir = tmp_path / ".supervisor" / "specs"
+        spec_dir.mkdir(parents=True)
+        spec_file = spec_dir / "test.yaml"
+        spec_file.write_text(
+            "kind: linear_plan\n"
+            "id: test-spec\n"
+            "goal: test goal\n"
+            "steps:\n"
+            "  - id: step_1\n"
+            "    type: instruct\n"
+            "    objective: do something\n"
+            "    instruction: do it\n"
+        )
+
+        state = {
+            "run_id": "run_spec", "top_state": "RUNNING",
+            "spec_path": str(spec_file),
+        }
+        (run_dir / "state.json").write_text(json.dumps(state))
+
+        ctx = _make_ctx(
+            tag="completed", run_id="run_spec", worktree=str(tmp_path),
+            socket="", spec_path=str(spec_file),
+            state_dir=run_dir, state_path=run_dir / "state.json",
+            session_log_path=run_dir / "session_log.jsonl",
+        )
+        with patch.object(ctx, "_has_daemon", return_value=False):
+            result = build_explainer_context(ctx)
+        assert "spec_context" in result
+        assert result["spec_context"]["id"] == "test-spec"
+        assert result["spec_context"]["goal"] == "test goal"
+        assert len(result["spec_context"]["nodes"]) == 1
+
+    def test_missing_spec_still_works(self, tmp_path):
+        """Context building doesn't fail when spec file is missing."""
+        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_nospec"
+        run_dir.mkdir(parents=True)
+        state = {
+            "run_id": "run_nospec", "top_state": "COMPLETED",
+            "spec_path": "/nonexistent/spec.yaml",
+        }
+        (run_dir / "state.json").write_text(json.dumps(state))
+
+        ctx = _make_ctx(
+            tag="completed", run_id="run_nospec", worktree=str(tmp_path),
+            socket="", state_dir=run_dir, state_path=run_dir / "state.json",
+            session_log_path=run_dir / "session_log.jsonl",
+        )
+        with patch.object(ctx, "_has_daemon", return_value=False):
+            result = build_explainer_context(ctx)
+        # Should succeed without spec_context
+        assert "run_state" in result
+        assert "spec_context" not in result
+
+
+# ── submit_clarification ─────────────────────────────────────────
+
+
+class TestSubmitClarification:
+    def test_daemon_path(self):
+        ctx = _make_ctx(tag="daemon")
+        mock_client = MagicMock()
+        mock_client.request_clarification.return_value = {"job_id": "job_c1", "ok": True}
+        mock_client.is_running.return_value = True
+        with patch.object(ctx, "get_client", return_value=mock_client):
+            job = submit_clarification(ctx, "why is this paused?")
+        assert job.source == "daemon"
+        assert job.job_id == "job_c1"
+
+    def test_local_path(self, tmp_path):
+        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_c"
+        run_dir.mkdir(parents=True)
+        state = {"run_id": "run_c", "top_state": "COMPLETED"}
+        (run_dir / "state.json").write_text(json.dumps(state))
+
+        ctx = _make_ctx(
+            tag="completed", run_id="run_c", worktree=str(tmp_path),
+            socket="", state_dir=run_dir, state_path=run_dir / "state.json",
+            session_log_path=run_dir / "session_log.jsonl",
+        )
+        with patch.object(ctx, "_has_daemon", return_value=False):
+            with patch.object(ctx, "load_config") as mock_cfg:
+                mock_cfg.return_value = MagicMock(
+                    explainer_model=None,
+                    explainer_temperature=0.3,
+                    explainer_max_tokens=1024,
+                )
+                job = submit_clarification(ctx, "what happened?", language="zh")
+        assert job.source == "local"
+
+        # Wait for completion
+        for _ in range(50):
+            j = _local_jobs.get(job.job_id)
+            if j and j.status in ("completed", "failed"):
+                break
+            time.sleep(0.05)
+        j = _local_jobs.get(job.job_id)
+        assert j.status == "completed"
+        # Stub mode should include the question in the answer
+        assert "what happened?" in j.result.get("answer", "")

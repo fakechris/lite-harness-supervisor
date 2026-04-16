@@ -141,7 +141,7 @@ def do_note_list(ctx: RunContext) -> list[dict[str, Any]]:
     return resp.get("notes", [])
 
 
-# ── async actions (always non-blocking) ──────────────────────────
+# ── shared context building ──────────────────────────────────────
 
 
 def _make_explainer(ctx: RunContext):
@@ -156,6 +156,117 @@ def _make_explainer(ctx: RunContext):
     )
 
 
+def build_explainer_context_from_state(
+    state: dict[str, Any],
+    session_log_path: Any,
+    *,
+    spec_path_fallback: str = "",
+    workspace_fallback: str = "",
+    **extra,
+) -> dict[str, Any]:
+    """Build the full context dict for explainer calls.
+
+    Core implementation shared by both local operator actions and the daemon.
+    Includes run_state, recent_events, spec_context, and codebase_signals.
+
+    Parameters
+    ----------
+    state : dict
+        Run state dict (from state.json or in-memory).
+    session_log_path : Path
+        Path to session_log.jsonl.
+    spec_path_fallback : str
+        Fallback spec path if not in state.
+    workspace_fallback : str
+        Fallback workspace root if not in state.
+    """
+    from supervisor.operator.api import timeline_from_session_log
+
+    events = timeline_from_session_log(session_log_path, limit=10) if session_log_path else []
+
+    result: dict[str, Any] = {
+        "run_state": state,
+        "recent_events": [e.to_dict() for e in events],
+    }
+
+    # Load spec for richer context — prompt expects "spec_context"
+    spec_path = state.get("spec_path", "") or spec_path_fallback
+    if spec_path:
+        try:
+            from supervisor.plan.loader import load_spec
+
+            spec_data = load_spec(spec_path)
+            acceptance = getattr(spec_data, "acceptance", None)
+            all_nodes = getattr(spec_data, "nodes", []) or getattr(spec_data, "steps", [])
+            result["spec_context"] = {
+                "id": getattr(spec_data, "id", ""),
+                "goal": getattr(spec_data, "goal", ""),
+                "nodes": [
+                    {"id": n.id, "objective": getattr(n, "objective", "")}
+                    for n in all_nodes
+                ],
+                "required_evidence": getattr(acceptance, "required_evidence", []) if acceptance else [],
+                "forbidden_states": getattr(acceptance, "forbidden_states", []) if acceptance else [],
+            }
+        except Exception:
+            pass
+
+    # Gather lightweight codebase signals — prompt expects "codebase_signals"
+    workspace = state.get("workspace_root", "") or workspace_fallback
+    codebase_signals: dict[str, Any] = {"workspace_root": workspace}
+    if workspace:
+        try:
+            import subprocess
+
+            git_result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=workspace, capture_output=True, text=True, timeout=5,
+            )
+            if git_result.returncode == 0:
+                dirty_files = [
+                    line.strip() for line in git_result.stdout.strip().splitlines()
+                    if line.strip()
+                ]
+                codebase_signals["git_dirty"] = bool(dirty_files)
+                codebase_signals["dirty_file_count"] = len(dirty_files)
+                codebase_signals["dirty_files_sample"] = dirty_files[:10]
+        except Exception:
+            pass
+    result["codebase_signals"] = codebase_signals
+
+    result.update(extra)
+    return result
+
+
+def build_explainer_context(
+    ctx: RunContext,
+    *,
+    state: dict[str, Any] | None = None,
+    session_log_path: Any = None,
+    **extra,
+) -> dict[str, Any]:
+    """Build explainer context from a RunContext.
+
+    Convenience wrapper around ``build_explainer_context_from_state``
+    that resolves state and paths from the RunContext when not provided.
+    """
+    if state is None:
+        state = ctx.load_state()
+    if session_log_path is None:
+        session_log_path = ctx.session_log_path
+
+    return build_explainer_context_from_state(
+        state,
+        session_log_path,
+        spec_path_fallback=ctx.spec_path,
+        workspace_fallback=ctx.worktree,
+        **extra,
+    )
+
+
+# ── async actions (always non-blocking) ──────────────────────────
+
+
 def submit_explain(ctx: RunContext, *, language: str = "en") -> OperatorJob:
     """Submit an explain_run job. Never blocks the caller."""
     caps = ctx.capabilities()
@@ -167,12 +278,12 @@ def submit_explain(ctx: RunContext, *, language: str = "en") -> OperatorJob:
         resp = client.explain_run(ctx.run_id, language=language)
         return OperatorJob(job_id=resp["job_id"], source="daemon")
 
-    # ASYNC_LOCAL — background thread
+    # ASYNC_LOCAL — background thread with full context
     explainer = _make_explainer(ctx)
 
     def _job() -> dict:
-        state = ctx.load_state()
-        return explainer.explain_run({"run_state": state, "language": language})
+        context = build_explainer_context(ctx, language=language)
+        return explainer.explain_run(context)
 
     job_id = _local_jobs.submit("explain", _job)
     return OperatorJob(job_id=job_id, source="local")
@@ -189,12 +300,12 @@ def submit_drift(ctx: RunContext, *, language: str = "en") -> OperatorJob:
         resp = client.assess_drift(ctx.run_id, language=language)
         return OperatorJob(job_id=resp["job_id"], source="daemon")
 
-    # ASYNC_LOCAL
+    # ASYNC_LOCAL — background thread with full context
     explainer = _make_explainer(ctx)
 
     def _job() -> dict:
-        state = ctx.load_state()
-        return explainer.assess_drift({"run_state": state, "language": language})
+        context = build_explainer_context(ctx, language=language)
+        return explainer.assess_drift(context)
 
     job_id = _local_jobs.submit("drift", _job)
     return OperatorJob(job_id=job_id, source="local")
@@ -211,18 +322,43 @@ def submit_explain_exchange(ctx: RunContext, *, language: str = "en") -> Operato
         resp = client.explain_exchange(ctx.run_id, language=language)
         return OperatorJob(job_id=resp["job_id"], source="daemon")
 
-    # ASYNC_LOCAL
+    # ASYNC_LOCAL — background thread with full context
     from supervisor.operator.api import recent_exchange
 
     explainer = _make_explainer(ctx)
-    session_log_path = ctx.session_log_path
 
     def _job() -> dict:
-        state = ctx.load_state()
-        exchange = recent_exchange(state, session_log_path)
-        return explainer.explain_exchange({"exchange": exchange, "language": language})
+        context = build_explainer_context(ctx, language=language)
+        exchange = recent_exchange(context["run_state"], ctx.session_log_path)
+        context["exchange"] = exchange
+        return explainer.explain_exchange(context)
 
     job_id = _local_jobs.submit("explain_exchange", _job)
+    return OperatorJob(job_id=job_id, source="local")
+
+
+def submit_clarification(ctx: RunContext, question: str, *,
+                         language: str = "en") -> OperatorJob:
+    """Submit a clarification request about a run. Never blocks the caller."""
+    caps = ctx.capabilities()
+    # Clarification follows the same mode as explain
+    if caps.explain == ActionMode.UNAVAILABLE:
+        raise ActionUnavailable(caps.unavailable_reasons.get("explain", "unavailable"))
+
+    if caps.explain == ActionMode.ASYNC_DAEMON:
+        client = ctx.get_client()
+        resp = client.request_clarification(ctx.run_id, question, language=language)
+        return OperatorJob(job_id=resp["job_id"], source="daemon")
+
+    # ASYNC_LOCAL
+    explainer = _make_explainer(ctx)
+
+    def _job() -> dict:
+        context = build_explainer_context(ctx, language=language)
+        context["question"] = question
+        return explainer.request_clarification(context)
+
+    job_id = _local_jobs.submit("clarification", _job)
     return OperatorJob(job_id=job_id, source="local")
 
 

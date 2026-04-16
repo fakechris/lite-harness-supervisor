@@ -29,6 +29,7 @@ from supervisor.operator.actions import (
     do_pause,
     do_resume,
     poll_job,
+    submit_clarification,
     submit_drift,
     submit_explain,
     submit_explain_exchange,
@@ -307,6 +308,30 @@ def format_notes(notes: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def format_clarification(result: dict[str, Any]) -> list[str]:
+    """Format a clarification response into display lines."""
+    lines = ["Answer:"]
+    if not result:
+        lines.append("  (no answer)")
+        return lines
+    answer = result.get("answer", "")
+    for i in range(0, len(answer), 100):
+        lines.append(f"  {answer[i:i+100]}")
+    evidence = result.get("evidence", [])
+    if evidence:
+        lines.append("")
+        lines.append("Evidence:")
+        for e in evidence[:5]:
+            lines.append(f"  - {e[:80]}")
+    follow_up = result.get("follow_up", "")
+    if follow_up:
+        lines.append(f"  Follow-up: {follow_up[:100]}")
+    conf = result.get("confidence")
+    if conf is not None:
+        lines.append(f"  Confidence: {conf}")
+    return lines
+
+
 # ── Curses TUI ────────────────────────────────────────────────────
 
 MIN_WIDTH = 80
@@ -401,7 +426,7 @@ def _curses_main(stdscr):
     detail_lines: list[str] = ["(select a run)"]
     right_lines: list[str] = ["(press 'e' to explain, 'd' for drift)"]
     language = "en"
-    status_msg = " j/k:nav  e:explain  x:exchange  d:drift  p:pause  r:resume  l:lang  n:note  N:notes  q:quit "
+    status_msg = " j/k:nav  e:explain  x:exchange  d:drift  c:ask  p:pause  r:resume  l:lang  n:note  N:notes  q:quit "
     default_status = status_msg
     last_refresh = 0.0
 
@@ -426,6 +451,8 @@ def _curses_main(stdscr):
                 if result.get("status") in ("completed", "failed"):
                     if result.get("status") == "failed":
                         right_lines = [f"Job failed: {result.get('error', 'unknown error')}"]
+                    elif pending_job.get("label") == "clarification":
+                        right_lines = format_clarification(result.get("result", {}))
                     else:
                         right_lines = format_explanation(result.get("result", {}))
                     status_msg = default_status
@@ -542,6 +569,36 @@ def _curses_main(stdscr):
                 status_msg = f" {exc} "
             except Exception as exc:
                 right_lines = [f"Error: {exc}"]
+
+        # c: clarification — ask a question about the run
+        if key == ord("c") and runs and pending_job is None:
+            run = runs[selected_idx]
+            ctx = RunContext.from_run_dict(run)
+            # Use curses line input for question text
+            curses.curs_set(1)
+            _safe_addstr(status_win, 0, 0, " Ask: " + " " * (w - 7), curses.A_REVERSE)
+            status_win.noutrefresh()
+            curses.doupdate()
+            curses.echo()
+            try:
+                q_bytes = status_win.getstr(0, 6, w - 7)
+                question = q_bytes.decode("utf-8", errors="replace").strip()
+            except Exception:
+                question = ""
+            curses.noecho()
+            curses.curs_set(0)
+            if question:
+                try:
+                    job = submit_clarification(ctx, question, language=language)
+                    pending_job = {"job": job, "ctx": ctx, "label": "clarification"}
+                    status_msg = " Asking... (waiting for answer) "
+                    right_lines = ["(asking...)"]
+                except ActionUnavailable as exc:
+                    status_msg = f" {exc} "
+                except Exception as exc:
+                    right_lines = [f"Error: {exc}"]
+            else:
+                status_msg = default_status
 
         # p: pause
         if key == ord("p") and runs:

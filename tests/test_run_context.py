@@ -196,7 +196,9 @@ class TestCapabilityMatrix:
         caps = _compute_capabilities("orphaned", "RUNNING", True)
         assert caps.inspect == ActionMode.SYNC_DAEMON
         assert caps.resume == ActionMode.SYNC_DAEMON
-        assert caps.pause == ActionMode.SYNC_DAEMON
+        # Orphaned runs are NOT in daemon's active _runs — pause won't work
+        assert caps.pause == ActionMode.UNAVAILABLE
+        assert "orphaned" in caps.unavailable_reasons["pause"]
         assert caps.note_add == ActionMode.SYNC_DAEMON
 
     def test_orphaned_no_daemon(self):

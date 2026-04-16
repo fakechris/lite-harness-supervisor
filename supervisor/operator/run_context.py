@@ -289,15 +289,19 @@ def _compute_capabilities(
         reasons["note_list"] = "no daemon"
 
     elif tag == "orphaned":
+        # Orphaned runs are NOT in the daemon's active _runs — pause won't
+        # work even if a daemon is reachable (stop_run returns "not found").
+        # Resume and notes still work via the daemon.
         if has_daemon:
             caps.inspect = ActionMode.SYNC_DAEMON
             caps.exchange = ActionMode.SYNC_DAEMON
             caps.explain = ActionMode.ASYNC_DAEMON
             caps.drift = ActionMode.ASYNC_DAEMON
-            caps.pause = ActionMode.SYNC_DAEMON
+            caps.pause = ActionMode.UNAVAILABLE
             caps.resume = ActionMode.SYNC_DAEMON
             caps.note_add = ActionMode.SYNC_DAEMON
             caps.note_list = ActionMode.SYNC_DAEMON
+            reasons["pause"] = "orphaned run (not in daemon)"
         else:
             caps.inspect = ActionMode.SYNC_LOCAL
             caps.exchange = ActionMode.SYNC_LOCAL

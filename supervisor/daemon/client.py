@@ -150,6 +150,16 @@ class DaemonClient:
             "language": language,
         })
 
+    def request_clarification(self, run_id: str, question: str, *,
+                              language: str = "en") -> dict:
+        """Submit async clarification request. Returns {ok, job_id}."""
+        return self._request({
+            "action": "request_clarification",
+            "run_id": run_id,
+            "question": question,
+            "language": language,
+        })
+
     def get_job(self, job_id: str) -> dict:
         """Poll for async job result."""
         return self._request({"action": "get_job", "job_id": job_id})
