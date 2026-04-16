@@ -154,11 +154,15 @@ class NotificationManager:
         """
         runtime_root_path = Path(runtime_root)
         channels: list[NotificationChannel] = []
+        # Resolve command channels: use shared if provided, else create inline
+        cmd_channels = command_channels if command_channels is not None else cls.create_command_channels(config)
         for entry in getattr(config, "notification_channels", []) or []:
             if not isinstance(entry, dict):
                 continue
             kind = entry.get("kind", "").strip()
             mode = entry.get("mode", "notify")
+            if mode == "command":
+                continue  # handled via cmd_channels
             if kind == "jsonl":
                 raw_path = entry.get("path", "notifications.jsonl")
                 path = Path(raw_path)
@@ -168,57 +172,25 @@ class NotificationManager:
             elif kind == "tmux_display":
                 channels.append(TmuxDisplayNotificationChannel(tmux_socket=entry.get("tmux_socket")))
             elif kind == "telegram":
-                if mode == "command":
-                    if command_channels is None:
-                        try:
-                            from supervisor.adapters.telegram_command import TelegramCommandChannel
-                            channels.append(TelegramCommandChannel(
-                                bot_token=entry.get("bot_token", ""),
-                                chat_id=entry.get("chat_id", ""),
-                                allowed_chat_ids=entry.get("allowed_chat_ids"),
-                                allowed_user_ids=entry.get("allowed_user_ids"),
-                                language=entry.get("language", "zh"),
-                            ))
-                        except (ValueError, Exception) as exc:
-                            logger.warning("skipping telegram command channel: %s", exc)
-                else:
-                    try:
-                        from supervisor.adapters.telegram_channel import TelegramNotificationChannel
-                        channels.append(TelegramNotificationChannel(
-                            bot_token=entry.get("bot_token", ""),
-                            chat_id=entry.get("chat_id", ""),
-                        ))
-                    except (ValueError, Exception) as exc:
-                        logger.warning("skipping telegram channel: %s", exc)
+                try:
+                    from supervisor.adapters.telegram_channel import TelegramNotificationChannel
+                    channels.append(TelegramNotificationChannel(
+                        bot_token=entry.get("bot_token", ""),
+                        chat_id=entry.get("chat_id", ""),
+                    ))
+                except (ValueError, Exception) as exc:
+                    logger.warning("skipping telegram channel: %s", exc)
             elif kind == "lark":
-                if mode == "command":
-                    if command_channels is None:
-                        try:
-                            from supervisor.adapters.lark_command import LarkCommandChannel
-                            channels.append(LarkCommandChannel(
-                                app_id=entry.get("app_id", ""),
-                                app_secret=entry.get("app_secret", ""),
-                                allowed_chat_ids=entry.get("allowed_chat_ids"),
-                                language=entry.get("language", "zh"),
-                                callback_port=entry.get("callback_port", 9876),
-                                verification_token=entry.get("verification_token", ""),
-                                encrypt_key=entry.get("encrypt_key", ""),
-                            ))
-                        except (ValueError, Exception) as exc:
-                            logger.warning("skipping lark command channel: %s", exc)
-                else:
-                    try:
-                        from supervisor.adapters.lark_channel import LarkNotificationChannel
-                        channels.append(LarkNotificationChannel(
-                            webhook_url=entry.get("webhook_url", ""),
-                        ))
-                    except (ValueError, Exception) as exc:
-                        logger.warning("skipping lark channel: %s", exc)
+                try:
+                    from supervisor.adapters.lark_channel import LarkNotificationChannel
+                    channels.append(LarkNotificationChannel(
+                        webhook_url=entry.get("webhook_url", ""),
+                    ))
+                except (ValueError, Exception) as exc:
+                    logger.warning("skipping lark channel: %s", exc)
             else:
                 logger.warning("unknown notification channel kind: %s", kind)
-        # Append shared command channels (already started by caller)
-        if command_channels:
-            channels.extend(command_channels)
+        channels.extend(cmd_channels)
         return cls(channels)
 
     def start_all(self) -> "NotificationManager":

@@ -126,11 +126,7 @@ class DaemonServer:
         # Command channels are per-daemon singletons (one polling thread /
         # one HTTP server), shared across all runs.
         self._command_channels = NotificationManager.create_command_channels(self.config)
-        for ch in self._command_channels:
-            try:
-                ch.start()
-            except Exception:
-                logger.exception("failed to start command channel")
+        NotificationManager(self._command_channels).start_all()
 
     def start(self) -> None:
         """Start the daemon: bind socket, write PID, accept connections."""
@@ -997,12 +993,7 @@ class DaemonServer:
             t.join(timeout=5)
         for entry in entries:
             release_pane_lock(entry.pane_target, entry.run_id)
-        # Stop shared command channels
-        for ch in self._command_channels:
-            try:
-                ch.stop()
-            except Exception:
-                logger.exception("failed to stop command channel")
+        NotificationManager(self._command_channels).stop_all()
         if self._sock:
             self._sock.close()
         Path(self.sock_path).unlink(missing_ok=True)

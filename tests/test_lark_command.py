@@ -226,52 +226,92 @@ class TestTextCommandHandling:
 
 class TestHttpTextMessageRouting:
     """Verify that the HTTP callback handler routes im.message.receive_v1
-    events to handle_text_command()."""
+    events to handle_text_command() via real HTTP requests."""
 
-    def _make_text_event_payload(self, text: str, chat_id: str = "oc_xxx") -> dict:
-        return {
-            "header": {
-                "event_type": "im.message.receive_v1",
-            },
-            "event": {
-                "message": {
-                    "chat_id": chat_id,
-                    "message_id": "msg_evt_1",
-                    "message_type": "text",
-                    "content": json.dumps({"text": text}),
-                },
-            },
-        }
+    def _start_server(self, channel):
+        """Start a test HTTP server on a random port. Returns (server, port)."""
+        from functools import partial
+        from http.server import ThreadingHTTPServer
+        from supervisor.adapters.lark_command import _LarkCallbackHandler
+        handler = partial(_LarkCallbackHandler, channel=channel)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        port = server.server_address[1]
+        channel._callback_port = port
+        import threading
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        return server, port
+
+    def _post(self, port: int, payload: dict) -> int:
+        import http.client
+        body = json.dumps(payload).encode("utf-8")
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("POST", "/", body=body, headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        status = resp.status
+        conn.close()
+        return status
 
     def test_text_event_routes_to_handle_text_command(self):
-        ch = _make_channel()
-        payload = self._make_text_event_payload("/runs")
+        ch = _make_channel(callback_port=0)
         with patch.object(ch, "handle_text_command") as mock_handle:
-            # Simulate the handler's routing logic directly
-            header = payload.get("header", {})
-            event_type = header.get("event_type", "")
-            assert event_type == "im.message.receive_v1"
-
-            event = payload.get("event", {})
-            message = event.get("message", {})
-            content = json.loads(message.get("content", "{}"))
-            text = content.get("text", "")
-            assert text == "/runs"
-
-            ch.handle_text_command(text, message["chat_id"], message["message_id"])
-            mock_handle.assert_called_once_with("/runs", "oc_xxx", "msg_evt_1")
+            server, port = self._start_server(ch)
+            try:
+                payload = {
+                    "header": {"event_type": "im.message.receive_v1"},
+                    "event": {
+                        "message": {
+                            "chat_id": "oc_xxx",
+                            "message_id": "msg_evt_1",
+                            "message_type": "text",
+                            "content": json.dumps({"text": "/runs"}),
+                        },
+                    },
+                }
+                status = self._post(port, payload)
+                assert status == 200
+                mock_handle.assert_called_once_with("/runs", "oc_xxx", "msg_evt_1")
+            finally:
+                server.shutdown()
 
     def test_card_action_does_not_trigger_text_handler(self):
-        """Card action payloads (no header.event_type) should go to
-        handle_card_action, not handle_text_command."""
-        ch = _make_channel()
-        payload = {
-            "action": {"value": {"cmd": "inspect", "run_id": "abc"}},
-            "event": {"open_chat_id": "oc_xxx", "open_message_id": "msg_1"},
-        }
-        # No header.event_type → should be card action path
-        header = payload.get("header", {})
-        assert header.get("event_type", "") == ""
+        ch = _make_channel(callback_port=0)
+        with patch.object(ch, "handle_text_command") as mock_text:
+            with patch.object(ch, "handle_card_action", return_value=None) as mock_card:
+                server, port = self._start_server(ch)
+                try:
+                    payload = {
+                        "action": {"value": {"cmd": "inspect", "run_id": "abc"}},
+                        "event": {"open_chat_id": "oc_xxx", "open_message_id": "msg_1"},
+                    }
+                    status = self._post(port, payload)
+                    assert status == 200
+                    mock_text.assert_not_called()
+                    mock_card.assert_called_once()
+                finally:
+                    server.shutdown()
+
+    def test_unauthorized_text_event_ignored(self):
+        ch = _make_channel(callback_port=0, allowed_chat_ids=["oc_xxx"])
+        with patch.object(ch, "handle_text_command") as mock_handle:
+            server, port = self._start_server(ch)
+            try:
+                payload = {
+                    "header": {"event_type": "im.message.receive_v1"},
+                    "event": {
+                        "message": {
+                            "chat_id": "oc_unauthorized",
+                            "message_id": "msg_1",
+                            "message_type": "text",
+                            "content": json.dumps({"text": "/runs"}),
+                        },
+                    },
+                }
+                status = self._post(port, payload)
+                assert status == 200
+                mock_handle.assert_not_called()
+            finally:
+                server.shutdown()
 
 
 # ── Job completion callback ──────────────────────────────────────
