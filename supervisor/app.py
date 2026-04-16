@@ -330,6 +330,11 @@ def cmd_run_foreground(args):
             print("Stop the existing run first.")
         return 1
 
+    # Command channels are per-process singletons — create once,
+    # start, share with the notification manager, stop on exit.
+    command_channels = NotificationManager.create_command_channels(config)
+    NotificationManager(command_channels).start_all()
+
     try:
         run_dir = str(Path(RUNTIME_DIR) / "runs" / run_id)
         store = StateStore(run_dir)
@@ -368,7 +373,8 @@ def cmd_run_foreground(args):
             notification_manager=NotificationManager.from_config(
                 config,
                 runtime_root=store.runtime_root,
-            ).start_all(),
+                command_channels=command_channels,
+            ),
             auto_intervention_manager=AutoInterventionManager(
                 mode=config.pause_handling_mode,
                 max_auto_interventions=config.max_auto_interventions,
@@ -390,6 +396,7 @@ def cmd_run_foreground(args):
             store.save(state)
             print("\nInterrupted. State saved.")
     finally:
+        NotificationManager(command_channels).stop_all()
         release_pane_lock(pane_target, run_id)
 
     return 0

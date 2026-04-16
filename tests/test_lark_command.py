@@ -71,10 +71,16 @@ class TestConstruction:
         assert ch.language == "zh"
         assert ch.allowed_chat_ids == ["oc_xxx"]
 
-    def test_auth(self):
+    def test_auth_chat_only(self):
         ch = _make_channel(allowed_chat_ids=["oc_xxx"])
         assert ch.auth.is_authorized("oc_xxx")
         assert not ch.auth.is_authorized("oc_yyy")
+
+    def test_auth_user_level(self):
+        ch = _make_channel(allowed_chat_ids=["oc_xxx"], allowed_user_ids=["ou_admin"])
+        assert ch.auth.is_authorized("oc_xxx")
+        assert ch.auth.is_authorized("oc_yyy", "ou_admin")  # user match
+        assert not ch.auth.is_authorized("oc_yyy", "ou_random")  # neither
 
 
 # ── Card building ────────────────────────────────────────────────
@@ -320,6 +326,34 @@ class TestHttpTextMessageRouting:
                 self._post(port, payload)
                 time.sleep(0.2)
                 assert mock_handle.call_count == 1  # still 1, not 2
+            finally:
+                server.shutdown()
+
+    def test_user_authorized_text_event(self):
+        """Text message from authorized user in any chat should be processed."""
+        ch = _make_channel(
+            callback_port=0, allowed_chat_ids=[], allowed_user_ids=["ou_admin"],
+        )
+        with patch.object(ch, "handle_text_command") as mock_handle:
+            server, port = self._start_server(ch)
+            try:
+                payload = {
+                    "header": {"event_type": "im.message.receive_v1", "event_id": "evt_user"},
+                    "event": {
+                        "sender": {"sender_id": {"open_id": "ou_admin"}},
+                        "message": {
+                            "chat_id": "oc_any",
+                            "message_id": "msg_1",
+                            "message_type": "text",
+                            "content": json.dumps({"text": "/runs"}),
+                        },
+                    },
+                }
+                status = self._post(port, payload)
+                assert status == 200
+                import time
+                time.sleep(0.2)
+                mock_handle.assert_called_once()
             finally:
                 server.shutdown()
 

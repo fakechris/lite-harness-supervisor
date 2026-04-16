@@ -128,6 +128,7 @@ class NotificationManager:
                         app_id=entry.get("app_id", ""),
                         app_secret=entry.get("app_secret", ""),
                         allowed_chat_ids=entry.get("allowed_chat_ids"),
+                        allowed_user_ids=entry.get("allowed_user_ids"),
                         language=entry.get("language", "zh"),
                         callback_port=entry.get("callback_port", 9876),
                         verification_token=entry.get("verification_token", ""),
