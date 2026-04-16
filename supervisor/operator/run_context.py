@@ -116,7 +116,7 @@ class RunContext:
         except (json.JSONDecodeError, OSError):
             return {}
 
-    def load_config(self):
+    def load_config(self) -> "RuntimeConfig":
         """Load RuntimeConfig scoped to this run's worktree."""
         from supervisor.config import RuntimeConfig
         path = self.config_path if Path(self.config_path).exists() else None
@@ -124,7 +124,7 @@ class RunContext:
 
     # ── daemon discovery ──────────────────────────────────────────
 
-    def get_client(self):
+    def get_client(self) -> "DaemonClient | None":
         """Get a DaemonClient that can reach this run, or None.
 
         Tries the run's own socket first, then falls back to worktree-match
@@ -152,7 +152,7 @@ class RunContext:
         except (ConnectionRefusedError, FileNotFoundError, OSError):
             return False
 
-    def ensure_daemon(self):
+    def ensure_daemon(self) -> "DaemonClient":
         """Get a running DaemonClient, auto-starting if needed.
 
         Returns DaemonClient or raises RuntimeError.
@@ -175,9 +175,9 @@ class RunContext:
         _fork_daemon_in_worktree(config, self.worktree)
 
         # Poll for up to 6 seconds
-        sock_path = os.path.join(
-            self.worktree or ".", ".supervisor", "daemon.sock",
-        )
+        from supervisor.daemon.client import SOCK_PATH
+
+        sock_path = os.path.join(self.worktree or ".", SOCK_PATH)
         client = DaemonClient(sock_path=sock_path)
         for _ in range(30):
             _time.sleep(0.2)

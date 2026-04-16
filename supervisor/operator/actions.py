@@ -7,7 +7,6 @@ they use a background-thread JobTracker so the caller never blocks.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -145,6 +144,18 @@ def do_note_list(ctx: RunContext) -> list[dict[str, Any]]:
 # ── async actions (always non-blocking) ──────────────────────────
 
 
+def _make_explainer(ctx: RunContext):
+    """Create an ExplainerClient from the run's worktree config."""
+    from supervisor.llm.explainer_client import ExplainerClient
+
+    config = ctx.load_config()
+    return ExplainerClient(
+        model=config.explainer_model,
+        temperature=config.explainer_temperature,
+        max_tokens=config.explainer_max_tokens,
+    )
+
+
 def submit_explain(ctx: RunContext, *, language: str = "en") -> OperatorJob:
     """Submit an explain_run job. Never blocks the caller."""
     caps = ctx.capabilities()
@@ -157,18 +168,10 @@ def submit_explain(ctx: RunContext, *, language: str = "en") -> OperatorJob:
         return OperatorJob(job_id=resp["job_id"], source="daemon")
 
     # ASYNC_LOCAL — background thread
-    config = ctx.load_config()
-    run_id = ctx.run_id
-    state_path = ctx.state_path
+    explainer = _make_explainer(ctx)
 
     def _job() -> dict:
-        from supervisor.llm.explainer_client import ExplainerClient
-        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
-        explainer = ExplainerClient(
-            model=config.explainer_model,
-            temperature=config.explainer_temperature,
-            max_tokens=config.explainer_max_tokens,
-        )
+        state = ctx.load_state()
         return explainer.explain_run({"run_state": state, "language": language})
 
     job_id = _local_jobs.submit("explain", _job)
@@ -187,17 +190,10 @@ def submit_drift(ctx: RunContext, *, language: str = "en") -> OperatorJob:
         return OperatorJob(job_id=resp["job_id"], source="daemon")
 
     # ASYNC_LOCAL
-    config = ctx.load_config()
-    state_path = ctx.state_path
+    explainer = _make_explainer(ctx)
 
     def _job() -> dict:
-        from supervisor.llm.explainer_client import ExplainerClient
-        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
-        explainer = ExplainerClient(
-            model=config.explainer_model,
-            temperature=config.explainer_temperature,
-            max_tokens=config.explainer_max_tokens,
-        )
+        state = ctx.load_state()
         return explainer.assess_drift({"run_state": state, "language": language})
 
     job_id = _local_jobs.submit("drift", _job)
@@ -218,19 +214,12 @@ def submit_explain_exchange(ctx: RunContext, *, language: str = "en") -> Operato
     # ASYNC_LOCAL
     from supervisor.operator.api import recent_exchange
 
-    config = ctx.load_config()
-    state_path = ctx.state_path
+    explainer = _make_explainer(ctx)
     session_log_path = ctx.session_log_path
 
     def _job() -> dict:
-        from supervisor.llm.explainer_client import ExplainerClient
-        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+        state = ctx.load_state()
         exchange = recent_exchange(state, session_log_path)
-        explainer = ExplainerClient(
-            model=config.explainer_model,
-            temperature=config.explainer_temperature,
-            max_tokens=config.explainer_max_tokens,
-        )
         return explainer.explain_exchange({"exchange": exchange, "language": language})
 
     job_id = _local_jobs.submit("explain_exchange", _job)
