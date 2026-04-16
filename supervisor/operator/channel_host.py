@@ -6,6 +6,10 @@ returns to its original purpose: stateless notification dispatch.
 
 Uses advisory file locking (fcntl.flock) so locks auto-release on
 process crash without stale lock cleanup.
+
+Key distinction: the lock controls who starts the *inbound transport*
+(Telegram polling, Lark HTTP server).  Outbound notification delivery
+(sendMessage) works for ALL processes regardless of lock ownership.
 """
 from __future__ import annotations
 
@@ -39,7 +43,8 @@ class CommandChannel(Protocol):
         """Unique identity for cross-process singleton coordination.
 
         Derived from credentials (e.g. SHA256 of bot_token or app_id).
-        Two channels with the same config_identity must not run concurrently.
+        Two channels with the same config_identity must not have their
+        inbound transport running concurrently.
         """
         ...
 
@@ -56,21 +61,25 @@ def _try_acquire_lock(config_identity: str) -> IO | None:
     """Try to acquire an advisory lock.  Returns file handle if acquired, None otherwise.
 
     Uses fcntl.flock (LOCK_EX | LOCK_NB) — the OS releases the lock
-    automatically if the process crashes.
+    automatically if the process crashes.  Opens with O_RDWR|O_CREAT
+    to avoid truncating the file before the lock is held.
     """
     path = _lock_path(config_identity)
-    path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        fh = open(path, "w")
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        fh.write(f"{os.getpid()}\n")
-        fh.flush()
-        return fh
-    except (OSError, IOError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        fh = os.fdopen(fd, "r+")
         try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fh.seek(0)
+            fh.truncate()
+            fh.write(f"{os.getpid()}\n")
+            fh.flush()
+            return fh
+        except (OSError, IOError):
             fh.close()
-        except Exception:
-            pass
+            return None
+    except (OSError, IOError):
         return None
 
 
@@ -89,9 +98,14 @@ def _release_lock(fh: IO) -> None:
 class OperatorChannelHost:
     """Owns command channel lifecycle: create, start, stop, health check.
 
-    Singleton per process.  Uses advisory file locking per credential
-    set to prevent cross-process conflicts (daemon + foreground, or
-    multiple daemons sharing the same bot config).
+    Separates two concerns:
+    - **Transport ownership** (singleton): inbound command receiving via
+      polling threads / HTTP servers.  Requires cross-process lock.
+    - **Notification delivery** (any process): outbound message sending
+      via bot API.  No lock required — all channels can notify().
+
+    This means a non-owner process (lock held by another daemon) can
+    still send pause/block/completed alerts through Telegram/Lark.
     """
 
     def __init__(self, channels: list[CommandChannel]):
@@ -140,19 +154,24 @@ class OperatorChannelHost:
         return cls(channels)
 
     def start(self) -> "OperatorChannelHost":
-        """Start channels, acquiring cross-process locks.  Returns self.
+        """Start inbound transports, acquiring cross-process locks.
 
-        Channels whose lock is held by another process are skipped with
-        a warning — the process still functions, just without IM control.
+        Lock only controls who runs the polling thread / HTTP server.
+        ALL channels remain available for outbound notifications
+        regardless of lock ownership.  Returns self.
         """
         for channel in self._channels:
             identity = channel.config_identity
             if identity in self._locks:
-                continue  # already started
+                # Same identity already has transport started in this
+                # process — skip starting a duplicate poller/server,
+                # but the channel is still in _channels for notify().
+                continue
             lock = _try_acquire_lock(identity)
             if not lock:
                 logger.warning(
-                    "skipping %s: another process holds the lock for %s",
+                    "%s: another process owns the transport for %s — "
+                    "this process will send notifications but not receive commands",
                     channel.__class__.__name__,
                     identity[:12],
                 )
@@ -168,7 +187,7 @@ class OperatorChannelHost:
         return self
 
     def stop(self) -> None:
-        """Stop all started channels and release locks."""
+        """Stop all started transports and release locks."""
         for channel in self._started:
             try:
                 channel.stop()
@@ -180,8 +199,12 @@ class OperatorChannelHost:
         self._locks.clear()
 
     def notify(self, event: NotificationEvent) -> None:
-        """Forward notifications to started command channels."""
-        for channel in self._started:
+        """Forward notifications to ALL channels, not just transport owners.
+
+        Outbound message delivery (sendMessage) does not require owning
+        the inbound transport.  Every process can push alerts.
+        """
+        for channel in self._channels:
             try:
                 channel.notify(event)
             except Exception:
@@ -189,7 +212,16 @@ class OperatorChannelHost:
 
     @property
     def channels(self) -> list[CommandChannel]:
-        """Expose started channels (for NotificationManager integration)."""
+        """All channels — for NotificationManager notification forwarding.
+
+        Returns all channels (not just transport owners) so that every
+        process can deliver alerts through Telegram/Lark.
+        """
+        return list(self._channels)
+
+    @property
+    def transport_owners(self) -> list[CommandChannel]:
+        """Channels with active inbound transport (lock acquired)."""
         return list(self._started)
 
 

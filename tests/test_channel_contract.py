@@ -3,8 +3,9 @@
 Verifies:
 1. OperatorChannelHost extraction — NotificationManager has no command channel logic
 2. Cross-process singleton — advisory file locking prevents double-start
-3. CommandChannel protocol — both adapters conform
-4. Dispatch-only routing — all channels use dispatch_command()
+3. Transport vs notification separation — non-owners can still notify
+4. CommandChannel protocol — both adapters conform
+5. Dispatch-only routing — all channels use dispatch_command()
 """
 from __future__ import annotations
 
@@ -111,6 +112,22 @@ class TestAdvisoryLocking:
             _release_lock(fh1)
             _release_lock(fh2)
 
+    def test_lock_file_not_truncated_before_acquired(self, tmp_path):
+        """Verify O_RDWR|O_CREAT doesn't truncate existing lock file."""
+        with patch("supervisor.operator.channel_host.LOCK_DIR", str(tmp_path)):
+            fh1 = _try_acquire_lock("test_identity")
+            assert fh1 is not None
+            # Read PID from lock file
+            lock_file = _lock_path("test_identity")
+            pid_before = lock_file.read_text().strip()
+            assert pid_before == str(os.getpid())
+            # Second acquire fails but shouldn't have wiped the file
+            fh2 = _try_acquire_lock("test_identity")
+            assert fh2 is None
+            pid_after = lock_file.read_text().strip()
+            assert pid_after == pid_before  # not truncated
+            _release_lock(fh1)
+
 
 # ── OperatorChannelHost ──────────────────────────────────────────
 
@@ -128,7 +145,7 @@ class TestOperatorChannelHost:
             host = OperatorChannelHost([ch])
             host.start()
             ch.start.assert_called_once()
-            assert len(host.channels) == 1
+            assert len(host.transport_owners) == 1
             host.stop()
 
     def test_stop_releases_lock(self, tmp_path):
@@ -143,16 +160,18 @@ class TestOperatorChannelHost:
             assert fh is not None
             _release_lock(fh)
 
-    def test_skips_channel_when_lock_held(self, tmp_path):
+    def test_skips_transport_when_lock_held(self, tmp_path):
+        """Transport not started, but channel still in channels list."""
         ch = _mock_channel()
         with patch("supervisor.operator.channel_host.LOCK_DIR", str(tmp_path)):
-            # Simulate another process holding the lock
             fh = _try_acquire_lock("test_id")
             assert fh is not None
             host = OperatorChannelHost([ch])
             host.start()
             ch.start.assert_not_called()
-            assert len(host.channels) == 0
+            assert len(host.transport_owners) == 0
+            # But channel IS in channels for notifications
+            assert len(host.channels) == 1
             host.stop()
             _release_lock(fh)
 
@@ -160,17 +179,19 @@ class TestOperatorChannelHost:
         ch_a = _mock_channel("id_a")
         ch_b = _mock_channel("id_b")
         with patch("supervisor.operator.channel_host.LOCK_DIR", str(tmp_path)):
-            # Hold lock for id_a
             fh = _try_acquire_lock("id_a")
             host = OperatorChannelHost([ch_a, ch_b])
             host.start()
-            ch_a.start.assert_not_called()  # skipped
-            ch_b.start.assert_called_once()  # started
-            assert len(host.channels) == 1
+            ch_a.start.assert_not_called()  # transport skipped
+            ch_b.start.assert_called_once()  # transport started
+            assert len(host.transport_owners) == 1
+            # But BOTH channels available for notifications
+            assert len(host.channels) == 2
             host.stop()
             _release_lock(fh)
 
-    def test_notify_forwards_to_started_only(self, tmp_path):
+    def test_notify_forwards_to_all_channels(self, tmp_path):
+        """P1 fix: non-owner channels can still send notifications."""
         ch_a = _mock_channel("id_a")
         ch_b = _mock_channel("id_b")
         with patch("supervisor.operator.channel_host.LOCK_DIR", str(tmp_path)):
@@ -179,10 +200,31 @@ class TestOperatorChannelHost:
             host.start()
             event = MagicMock()
             host.notify(event)
-            ch_a.notify.assert_not_called()  # not started
+            # BOTH channels get the notification, even ch_a whose
+            # transport is owned by another process
+            ch_a.notify.assert_called_once_with(event)
             ch_b.notify.assert_called_once_with(event)
             host.stop()
             _release_lock(fh)
+
+    def test_same_token_different_chats_both_notify(self, tmp_path):
+        """P2 fix: same bot token, different chat_ids — both get notifications."""
+        ch_1 = _mock_channel("same_id")
+        ch_2 = _mock_channel("same_id")
+        with patch("supervisor.operator.channel_host.LOCK_DIR", str(tmp_path)):
+            host = OperatorChannelHost([ch_1, ch_2])
+            host.start()
+            # Only one transport started (same identity)
+            assert len(host.transport_owners) == 1
+            ch_1.start.assert_called_once()
+            ch_2.start.assert_not_called()
+            # But BOTH channels receive notifications
+            assert len(host.channels) == 2
+            event = MagicMock()
+            host.notify(event)
+            ch_1.notify.assert_called_once_with(event)
+            ch_2.notify.assert_called_once_with(event)
+            host.stop()
 
     def test_start_returns_self(self, tmp_path):
         with patch("supervisor.operator.channel_host.LOCK_DIR", str(tmp_path)):
@@ -200,6 +242,20 @@ class TestOperatorChannelHost:
         assert len(host._channels) == 1
         from supervisor.adapters.telegram_command import TelegramCommandChannel
         assert isinstance(host._channels[0], TelegramCommandChannel)
+
+    def test_from_config_creates_multiple_chats_same_token(self):
+        """P2: same bot token, different chat_ids — both channels created."""
+        from supervisor.config import RuntimeConfig
+        config = RuntimeConfig(
+            notification_channels=[
+                {"kind": "telegram", "mode": "command", "bot_token": "tok", "chat_id": "111"},
+                {"kind": "telegram", "mode": "command", "bot_token": "tok", "chat_id": "222"},
+            ]
+        )
+        host = OperatorChannelHost.from_config(config)
+        assert len(host._channels) == 2
+        assert host._channels[0].chat_id == "111"
+        assert host._channels[1].chat_id == "222"
 
     def test_from_config_skips_notify_mode(self):
         from supervisor.config import RuntimeConfig
