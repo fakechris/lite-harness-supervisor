@@ -197,6 +197,12 @@ class LarkCommandChannel:
         self._seen_event_ids: set[str] = set()
         self._seen_event_ids_lock = threading.Lock()
 
+    @property
+    def config_identity(self) -> str:
+        """Unique identity for cross-process singleton coordination."""
+        from supervisor.operator.channel_host import config_identity_from_token
+        return config_identity_from_token(self.bot.app_id)
+
     def _is_duplicate_event(self, event_id: str) -> bool:
         """Check if event was already processed.  Returns True if duplicate."""
         if not event_id:

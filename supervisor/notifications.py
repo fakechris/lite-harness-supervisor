@@ -94,51 +94,6 @@ class NotificationManager:
         self.channels = channels or []
 
     @classmethod
-    def create_command_channels(cls, config) -> list:
-        """Create command channels from config (without starting them).
-
-        Call start() on each channel once, then pass the list to
-        from_config() for each run via command_channels= to avoid
-        duplicate polling threads and port conflicts.
-        """
-        channels: list = []
-        for entry in getattr(config, "notification_channels", []) or []:
-            if not isinstance(entry, dict):
-                continue
-            kind = entry.get("kind", "").strip()
-            mode = entry.get("mode", "notify")
-            if mode != "command":
-                continue
-            if kind == "telegram":
-                try:
-                    from supervisor.adapters.telegram_command import TelegramCommandChannel
-                    channels.append(TelegramCommandChannel(
-                        bot_token=entry.get("bot_token", ""),
-                        chat_id=entry.get("chat_id", ""),
-                        allowed_chat_ids=entry.get("allowed_chat_ids"),
-                        allowed_user_ids=entry.get("allowed_user_ids"),
-                        language=entry.get("language", "zh"),
-                    ))
-                except (ValueError, Exception) as exc:
-                    logger.warning("skipping telegram command channel: %s", exc)
-            elif kind == "lark":
-                try:
-                    from supervisor.adapters.lark_command import LarkCommandChannel
-                    channels.append(LarkCommandChannel(
-                        app_id=entry.get("app_id", ""),
-                        app_secret=entry.get("app_secret", ""),
-                        allowed_chat_ids=entry.get("allowed_chat_ids"),
-                        allowed_user_ids=entry.get("allowed_user_ids"),
-                        language=entry.get("language", "zh"),
-                        callback_port=entry.get("callback_port", 9876),
-                        verification_token=entry.get("verification_token", ""),
-                        encrypt_key=entry.get("encrypt_key", ""),
-                    ))
-                except (ValueError, Exception) as exc:
-                    logger.warning("skipping lark command channel: %s", exc)
-        return channels
-
-    @classmethod
     def from_config(
         cls,
         config,
@@ -149,21 +104,19 @@ class NotificationManager:
         """Build a NotificationManager from config.
 
         Args:
-            command_channels: Pre-created command channel instances to
-                share across runs.  When provided, mode=command entries
-                in config are skipped (channels are not re-created).
+            command_channels: Pre-started command channel instances from
+                OperatorChannelHost.  Included in the channel list for
+                notification forwarding only — lifecycle is owned by the host.
         """
         runtime_root_path = Path(runtime_root)
         channels: list[NotificationChannel] = []
-        # Resolve command channels: use shared if provided, else create inline
-        cmd_channels = command_channels if command_channels is not None else cls.create_command_channels(config)
         for entry in getattr(config, "notification_channels", []) or []:
             if not isinstance(entry, dict):
                 continue
             kind = entry.get("kind", "").strip()
             mode = entry.get("mode", "notify")
             if mode == "command":
-                continue  # handled via cmd_channels
+                continue  # lifecycle owned by OperatorChannelHost
             if kind == "jsonl":
                 raw_path = entry.get("path", "notifications.jsonl")
                 path = Path(raw_path)
@@ -191,27 +144,9 @@ class NotificationManager:
                     logger.warning("skipping lark channel: %s", exc)
             else:
                 logger.warning("unknown notification channel kind: %s", kind)
-        channels.extend(cmd_channels)
+        if command_channels:
+            channels.extend(command_channels)
         return cls(channels)
-
-    def start_all(self) -> "NotificationManager":
-        """Start command channels that have a start() method.  Returns self."""
-        for channel in self.channels:
-            if hasattr(channel, "start"):
-                try:
-                    channel.start()
-                except Exception:
-                    logger.exception("failed to start command channel")
-        return self
-
-    def stop_all(self) -> None:
-        """Stop command channels that have a stop() method."""
-        for channel in self.channels:
-            if hasattr(channel, "stop"):
-                try:
-                    channel.stop()
-                except Exception:
-                    logger.exception("failed to stop command channel")
 
     def notify(self, event: NotificationEvent) -> None:
         for channel in self.channels:
