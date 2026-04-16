@@ -383,7 +383,7 @@ class DaemonServer:
                 notification_manager=NotificationManager.from_config(
                     self.config,
                     runtime_root=entry.store.runtime_root,
-                ),
+                ).start_all(),
                 auto_intervention_manager=AutoInterventionManager(
                     mode=self.config.pause_handling_mode,
                     max_auto_interventions=self.config.max_auto_interventions,

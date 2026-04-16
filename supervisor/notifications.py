@@ -121,7 +121,6 @@ class NotificationManager:
                             allowed_user_ids=entry.get("allowed_user_ids"),
                             language=entry.get("language", "zh"),
                         )
-                        ch.start()
                         channels.append(ch)
                     except (ValueError, Exception) as exc:
                         logger.warning("skipping telegram command channel: %s", exc)
@@ -145,8 +144,9 @@ class NotificationManager:
                             allowed_chat_ids=entry.get("allowed_chat_ids"),
                             language=entry.get("language", "zh"),
                             callback_port=entry.get("callback_port", 9876),
+                            verification_token=entry.get("verification_token", ""),
+                            encrypt_key=entry.get("encrypt_key", ""),
                         )
-                        ch.start()
                         channels.append(ch)
                     except (ValueError, Exception) as exc:
                         logger.warning("skipping lark command channel: %s", exc)
@@ -161,6 +161,25 @@ class NotificationManager:
             else:
                 logger.warning("unknown notification channel kind: %s", kind)
         return cls(channels)
+
+    def start_all(self) -> "NotificationManager":
+        """Start command channels that have a start() method.  Returns self."""
+        for channel in self.channels:
+            if hasattr(channel, "start"):
+                try:
+                    channel.start()
+                except Exception:
+                    logger.exception("failed to start command channel")
+        return self
+
+    def stop_all(self) -> None:
+        """Stop command channels that have a stop() method."""
+        for channel in self.channels:
+            if hasattr(channel, "stop"):
+                try:
+                    channel.stop()
+                except Exception:
+                    logger.exception("failed to stop command channel")
 
     def notify(self, event: NotificationEvent) -> None:
         for channel in self.channels:

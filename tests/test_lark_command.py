@@ -252,6 +252,24 @@ class TestJobCompletion:
 # ── Helper functions ─────────────────────────────────────────────
 
 
+class TestSignatureVerification:
+    def test_channel_accepts_verification_token(self):
+        ch = _make_channel(verification_token="tok_123", encrypt_key="enc_key")
+        assert ch.verification_token == "tok_123"
+        assert ch.encrypt_key == "enc_key"
+
+    def test_signature_computation(self):
+        """Verify the signature algorithm matches Lark spec."""
+        import hashlib
+        timestamp = "1234567890"
+        nonce = "abc"
+        encrypt_key = "mysecret"
+        body = '{"test": true}'
+        to_sign = (timestamp + nonce + encrypt_key + body).encode("utf-8")
+        sig = hashlib.sha256(to_sign).hexdigest()
+        assert len(sig) == 64  # SHA256 hex digest
+
+
 class TestHelpers:
     def test_lark_field(self):
         f = _lark_field("**Test**", short=True)

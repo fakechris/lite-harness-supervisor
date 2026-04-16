@@ -9,12 +9,14 @@ Uses urllib only (no external dependencies).
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import threading
 import time
 from functools import partial
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from urllib import request as urllib_request
 from urllib.error import URLError
 
@@ -172,15 +174,19 @@ class LarkCommandChannel:
         allowed_chat_ids: list[str] | None = None,
         language: str = "zh",
         callback_port: int = 9876,
+        verification_token: str = "",
+        encrypt_key: str = "",
     ):
         self.bot = LarkBotClient(app_id, app_secret)
         self.auth = CommandAuth(allowed_chat_ids=allowed_chat_ids)
         self.language = language
         self.allowed_chat_ids = allowed_chat_ids or []
         self._callback_port = callback_port
+        self.verification_token = verification_token
+        self.encrypt_key = encrypt_key
         self._stop_event = threading.Event()
         self._server_thread: threading.Thread | None = None
-        self._server: HTTPServer | None = None
+        self._server: ThreadingHTTPServer | None = None
         self._poller = AsyncJobPoller()
 
     # ── NotificationChannel protocol ──────────────────────────────
@@ -200,7 +206,7 @@ class LarkCommandChannel:
         self._stop_event.clear()
         self._poller.start()
         handler = partial(_LarkCallbackHandler, channel=self)
-        self._server = HTTPServer(("0.0.0.0", self._callback_port), handler)
+        self._server = ThreadingHTTPServer(("0.0.0.0", self._callback_port), handler)
         self._server.timeout = 1
         self._server_thread = threading.Thread(target=self._serve_loop, daemon=True)
         self._server_thread.start()
@@ -401,11 +407,35 @@ class _LarkCallbackHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length) if content_length else b""
 
+        # Signature verification (when encrypt_key is configured)
+        encrypt_key = self.channel.encrypt_key
+        if encrypt_key:
+            timestamp = self.headers.get("X-Lark-Request-Timestamp", "")
+            nonce = self.headers.get("X-Lark-Request-Nonce", "")
+            expected_sig = self.headers.get("X-Lark-Signature", "")
+            if not expected_sig:
+                self._respond(403, {"error": "missing signature"})
+                return
+            to_sign = (timestamp + nonce + encrypt_key + body.decode("utf-8")).encode("utf-8")
+            computed_sig = hashlib.sha256(to_sign).hexdigest()
+            if not hmac.compare_digest(computed_sig, expected_sig):
+                logger.warning("Lark callback signature mismatch")
+                self._respond(403, {"error": "invalid signature"})
+                return
+
         try:
             payload = json.loads(body.decode("utf-8"))
         except json.JSONDecodeError:
             self._respond(400, {"error": "invalid JSON"})
             return
+
+        # Verification token check (when configured, for non-challenge requests)
+        if self.channel.verification_token:
+            token = payload.get("token", "")
+            if token and not hmac.compare_digest(token, self.channel.verification_token):
+                logger.warning("Lark callback verification token mismatch")
+                self._respond(403, {"error": "invalid token"})
+                return
 
         # Lark URL verification challenge
         if "challenge" in payload:

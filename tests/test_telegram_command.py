@@ -143,6 +143,48 @@ class TestHandleMessage:
             ch._handle_message(msg)
             mock_dispatch.assert_not_called()
 
+    def test_old_message_skipped(self):
+        """Messages older than 60s should be skipped."""
+        ch = _make_channel()
+        import time
+        old_update = {
+            "update_id": 1,
+            "message": {
+                "chat": {"id": -100},
+                "from": {"id": 1},
+                "text": "/runs",
+                "date": int(time.time()) - 120,  # 2 minutes old
+            },
+        }
+        with patch.object(ch, "_get_updates", side_effect=[[old_update], []]):
+            with patch.object(ch, "_handle_message") as mock_handle:
+                with patch.object(ch._stop_event, "is_set", side_effect=[False, True]):
+                    ch._poll_loop()
+                    mock_handle.assert_not_called()
+
+    def test_callback_not_filtered_by_stale_check(self):
+        """Callback queries should NOT be filtered even if original message is old."""
+        ch = _make_channel()
+        import time
+        old_callback_update = {
+            "update_id": 2,
+            "callback_query": {
+                "id": "cb_1",
+                "from": {"id": 42},
+                "message": {
+                    "chat": {"id": -100},
+                    "message_id": 999,
+                    "date": int(time.time()) - 300,  # 5 minutes old
+                },
+                "data": json.dumps({"c": "inspect", "r": "abc123"}),
+            },
+        }
+        with patch.object(ch, "_get_updates", side_effect=[[old_callback_update], []]):
+            with patch.object(ch, "_handle_callback") as mock_handle:
+                with patch.object(ch._stop_event, "is_set", side_effect=[False, True]):
+                    ch._poll_loop()
+                    mock_handle.assert_called_once()
+
     def test_non_command_ignored(self):
         ch = _make_channel()
         msg = {"chat": {"id": -100}, "from": {"id": 1}, "text": "hello there"}
@@ -170,10 +212,16 @@ class TestHandleCallback:
         with patch.object(ch, "_answer_callback"):
             with patch.object(ch, "_edit_message") as mock_edit:
                 with patch("supervisor.adapters.telegram_command.dispatch_command") as mock_dispatch:
-                    mock_dispatch.return_value = CommandResult(text="result text")
+                    mock_dispatch.return_value = CommandResult(
+                        text="result text",
+                        buttons=[{"label": "Inspect", "cmd": "inspect", "run_id": "abc123"}],
+                    )
                     ch._handle_callback(callback)
                     mock_dispatch.assert_called_once_with("inspect", ["abc123"], language="zh")
                     mock_edit.assert_called_once()
+                    # Verify inline keyboard is preserved on edit
+                    _, kwargs = mock_edit.call_args
+                    assert kwargs.get("reply_markup") is not None
 
     def test_unauthorized_callback_rejected(self):
         ch = _make_channel(allowed_chat_ids=["-100"])

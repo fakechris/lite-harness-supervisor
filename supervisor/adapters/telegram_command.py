@@ -109,11 +109,13 @@ class TelegramCommandChannel:
                     update_id = update.get("update_id", 0)
                     if update_id >= self._update_offset:
                         self._update_offset = update_id + 1
-                    # Skip old updates on startup
-                    msg = update.get("message") or update.get("callback_query", {}).get("message")
-                    if msg:
-                        msg_date = msg.get("date", 0)
-                        if time.time() - msg_date > 60:
+                    # Skip old text messages on startup (not callbacks —
+                    # callback_query.message.date is the *alert* send time,
+                    # not the button click time, so filtering would break
+                    # buttons pressed >60s after the alert was sent).
+                    if "message" in update and "callback_query" not in update:
+                        msg_date = update["message"].get("date", 0)
+                        if msg_date and time.time() - msg_date > 60:
                             continue
                     if "message" in update:
                         self._handle_message(update["message"])
@@ -164,8 +166,9 @@ class TelegramCommandChannel:
         result = dispatch_command(cmd, [run_id] if run_id else [], language=self.language)
         msg_id = callback_query.get("message", {}).get("message_id")
         if msg_id and not result.job:
-            # Sync result: edit the original message
-            self._edit_message(chat_id, msg_id, self._format_text_result(result))
+            # Sync result: edit the original message, preserving action buttons
+            keyboard = self._build_result_keyboard(result.buttons) if result.buttons else None
+            self._edit_message(chat_id, msg_id, self._format_text_result(result), reply_markup=keyboard)
         else:
             # Async or no msg_id: send new message
             self._send_result(chat_id, result)
