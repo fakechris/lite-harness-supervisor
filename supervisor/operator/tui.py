@@ -25,6 +25,19 @@ from supervisor.pause_summary import summarize_state
 _RUNTIME_DIR = Path(".supervisor/runtime")
 
 
+def _resolve_run_dir(run: dict) -> Path:
+    """Resolve the runtime/runs/<run_id> directory for a run.
+
+    Uses run["worktree"] when set (cross-worktree), falling back to
+    the local _RUNTIME_DIR for current-cwd runs.
+    """
+    rid = run.get("run_id", "")
+    wt = run.get("worktree", "")
+    if wt:
+        return Path(wt) / ".supervisor" / "runtime" / "runs" / rid
+    return _RUNTIME_DIR / "runs" / rid
+
+
 # ── Data collection ────────────────────────────────────────────────
 
 def collect_runs(daemons: list[dict] | None = None) -> list[dict]:
@@ -88,10 +101,34 @@ def collect_runs(daemons: list[dict] | None = None) -> list[dict]:
 
 
 def _collect_local_runs(items: list[dict], seen: set[str]) -> None:
-    """Scan on-disk run directories for orphaned/completed runs."""
-    runs_dir = _RUNTIME_DIR / "runs"
-    if not runs_dir.is_dir():
-        return
+    """Scan on-disk run directories for orphaned/completed runs.
+
+    Scans the current cwd's runtime dir plus any worktree dirs from
+    the global registry (daemons + pane owners).
+    """
+    runtime_dirs: list[tuple[Path, str]] = [(_RUNTIME_DIR / "runs", "")]
+    # Also scan worktrees known from registry
+    for daemon in list_daemons():
+        wt = daemon.get("cwd", "")
+        if wt:
+            d = Path(wt) / ".supervisor" / "runtime" / "runs"
+            if d.is_dir() and d != runtime_dirs[0][0]:
+                runtime_dirs.append((d, wt))
+    for owner in list_pane_owners():
+        wt = owner.get("cwd", "")
+        if wt:
+            d = Path(wt) / ".supervisor" / "runtime" / "runs"
+            if d.is_dir() and not any(d == rd for rd, _ in runtime_dirs):
+                runtime_dirs.append((d, wt))
+
+    for runs_dir, worktree in runtime_dirs:
+        if not runs_dir.is_dir():
+            continue
+        _scan_runs_dir(runs_dir, worktree, items, seen)
+
+
+def _scan_runs_dir(runs_dir: Path, worktree: str, items: list[dict], seen: set[str]) -> None:
+    """Scan a single runs directory for on-disk state files."""
     for run_dir in sorted(runs_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
         state_path = run_dir / "state.json"
         if not state_path.exists():
@@ -121,7 +158,7 @@ def _collect_local_runs(items: list[dict], seen: set[str]) -> None:
             "top_state": top,
             "current_node": state.get("current_node_id", ""),
             "pane_target": state.get("pane_target", "?"),
-            "worktree": state.get("workspace_root", ""),
+            "worktree": worktree or state.get("workspace_root", ""),
             "socket": "",
             "status_reason": summary.get("status_reason", ""),
         })
@@ -218,8 +255,7 @@ def format_exchange(exchange: dict[str, Any]) -> list[str]:
 def _load_local_detail(run: dict) -> list[str]:
     """Load snapshot + timeline from disk for non-daemon runs."""
     from supervisor.operator.api import snapshot_from_state, timeline_from_session_log
-    rid = run.get("run_id", "")
-    runs_dir = _RUNTIME_DIR / "runs" / rid
+    runs_dir = _resolve_run_dir(run)
     state_path = runs_dir / "state.json"
     session_log = runs_dir / "session_log.jsonl"
     if not state_path.exists():
@@ -238,8 +274,7 @@ def _load_local_detail(run: dict) -> list[str]:
 def _format_local_exchange(run: dict) -> list[str]:
     """Read exchange from disk for local (non-daemon) runs."""
     from supervisor.operator.api import recent_exchange
-    rid = run.get("run_id", "")
-    runs_dir = _RUNTIME_DIR / "runs" / rid
+    runs_dir = _resolve_run_dir(run)
     state_path = runs_dir / "state.json"
     session_log = runs_dir / "session_log.jsonl"
     if not state_path.exists():
@@ -250,6 +285,57 @@ def _format_local_exchange(run: dict) -> list[str]:
         return format_exchange(exchange)
     except Exception as exc:
         return [f"Error reading local exchange: {exc}"]
+
+
+def _local_explain_run(run: dict, *, language: str = "en") -> list[str]:
+    """Stub explain for socketless runs — read state from disk, no daemon."""
+    from supervisor.llm.explainer_client import ExplainerClient
+    runs_dir = _resolve_run_dir(run)
+    state_path = runs_dir / "state.json"
+    if not state_path.exists():
+        return [f"(no local state for {run.get('run_id', '?')})"]
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return [f"Error reading state: {exc}"]
+    client = ExplainerClient(model=None)
+    result = client.explain_run({"run_state": state, "language": language})
+    return format_explanation(result)
+
+
+def _local_assess_drift(run: dict, *, language: str = "en") -> list[str]:
+    """Stub drift assessment for socketless runs."""
+    from supervisor.llm.explainer_client import ExplainerClient
+    runs_dir = _resolve_run_dir(run)
+    state_path = runs_dir / "state.json"
+    if not state_path.exists():
+        return [f"(no local state for {run.get('run_id', '?')})"]
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return [f"Error reading state: {exc}"]
+    client = ExplainerClient(model=None)
+    result = client.assess_drift({"run_state": state, "language": language})
+    return format_explanation(result)
+
+
+def _local_explain_exchange(run: dict, *, language: str = "en") -> list[str]:
+    """Stub exchange explanation for socketless runs."""
+    from supervisor.llm.explainer_client import ExplainerClient
+    from supervisor.operator.api import recent_exchange
+    runs_dir = _resolve_run_dir(run)
+    state_path = runs_dir / "state.json"
+    session_log = runs_dir / "session_log.jsonl"
+    if not state_path.exists():
+        return ["(no local state available)"]
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        exchange = recent_exchange(state, session_log)
+    except Exception as exc:
+        return [f"Error reading exchange: {exc}"]
+    client = ExplainerClient(model=None)
+    result = client.explain_exchange({"exchange": exchange, "language": language})
+    return format_explanation(result)
 
 
 def format_explanation(result: dict[str, Any]) -> list[str]:
@@ -377,7 +463,8 @@ def _curses_main(stdscr):
     runs: list[dict] = []
     detail_lines: list[str] = ["(select a run)"]
     right_lines: list[str] = ["(press 'e' to explain, 'd' for drift)"]
-    status_msg = " j/k:nav  e:explain  x:exchange  d:drift  p:pause  q:quit "
+    language = "en"
+    status_msg = " j/k:nav  e:explain  x:exchange  d:drift  p:pause  l:lang  n:note  q:quit "
     default_status = status_msg
     last_refresh = 0.0
 
@@ -485,13 +572,13 @@ def _curses_main(stdscr):
                 # Local/orphaned/completed run — read from disk
                 detail_lines = _load_local_detail(run)
 
-        # e: explain run (non-blocking)
+        # e: explain run (non-blocking via daemon, or local stub fallback)
         if key == ord("e") and runs and pending_job is None:
             run = runs[selected_idx]
             client = get_client_for_run(run)
             if client:
                 try:
-                    resp = client.explain_run(run["run_id"])
+                    resp = client.explain_run(run["run_id"], language=language)
                     if resp.get("ok") and resp.get("job_id"):
                         pending_job = {"client": client, "job_id": resp["job_id"], "label": "explain"}
                         status_msg = " Explaining... (waiting for result) "
@@ -500,14 +587,16 @@ def _curses_main(stdscr):
                         right_lines = [f"Error: {resp.get('error', '?')}"]
                 except Exception as exc:
                     right_lines = [f"Error: {exc}"]
+            else:
+                right_lines = _local_explain_run(run, language=language)
 
-        # x: explain exchange (non-blocking)
+        # x: explain exchange (non-blocking via daemon, or local stub fallback)
         if key == ord("x") and runs and pending_job is None:
             run = runs[selected_idx]
             client = get_client_for_run(run)
             if client:
                 try:
-                    resp = client.explain_exchange(run["run_id"])
+                    resp = client.explain_exchange(run["run_id"], language=language)
                     if resp.get("ok") and resp.get("job_id"):
                         pending_job = {"client": client, "job_id": resp["job_id"], "label": "exchange"}
                         status_msg = " Explaining exchange... (waiting for result) "
@@ -517,16 +606,15 @@ def _curses_main(stdscr):
                 except Exception as exc:
                     right_lines = [f"Error: {exc}"]
             else:
-                # Foreground/local run — show sync exchange from disk
-                right_lines = _format_local_exchange(run)
+                right_lines = _local_explain_exchange(run, language=language)
 
-        # d: drift assessment (non-blocking)
+        # d: drift assessment (non-blocking via daemon, or local stub fallback)
         if key == ord("d") and runs and pending_job is None:
             run = runs[selected_idx]
             client = get_client_for_run(run)
             if client:
                 try:
-                    resp = client.assess_drift(run["run_id"])
+                    resp = client.assess_drift(run["run_id"], language=language)
                     if resp.get("ok") and resp.get("job_id"):
                         pending_job = {"client": client, "job_id": resp["job_id"], "label": "drift"}
                         status_msg = " Assessing drift... (waiting for result) "
@@ -535,8 +623,10 @@ def _curses_main(stdscr):
                         right_lines = [f"Error: {resp.get('error', '?')}"]
                 except Exception as exc:
                     right_lines = [f"Error: {exc}"]
+            else:
+                right_lines = _local_assess_drift(run, language=language)
 
-        # p: pause
+        # p: pause (requires daemon — show clear message for socketless runs)
         if key == ord("p") and runs:
             run = runs[selected_idx]
             client = get_client_for_run(run)
@@ -547,6 +637,43 @@ def _curses_main(stdscr):
                     last_refresh = 0  # force refresh
                 except Exception as exc:
                     status_msg = f" Pause failed: {exc} "
+            else:
+                status_msg = f" No daemon — pause not available (use CLI for {run.get('tag', 'this')} runs) "
+
+        # l: toggle language (en ↔ zh)
+        if key == ord("l"):
+            language = "zh" if language == "en" else "en"
+            lang_label = "中文" if language == "zh" else "English"
+            status_msg = f" Language: {lang_label} "
+
+        # n: operator note (requires daemon)
+        if key == ord("n") and runs:
+            run = runs[selected_idx]
+            client = get_client_for_run(run)
+            if client:
+                # Use curses line input for note text
+                curses.curs_set(1)
+                _safe_addstr(status_win, 0, 0, " Note: " + " " * (w - 8), curses.A_REVERSE)
+                status_win.noutrefresh()
+                curses.doupdate()
+                curses.echo()
+                try:
+                    note_bytes = status_win.getstr(0, 7, w - 8)
+                    note_text = note_bytes.decode("utf-8", errors="replace").strip()
+                except Exception:
+                    note_text = ""
+                curses.noecho()
+                curses.curs_set(0)
+                if note_text:
+                    try:
+                        client.note_add(note_text, title=f"TUI note for {run['run_id'][-12:]}")
+                        status_msg = " Note saved "
+                    except Exception as exc:
+                        status_msg = f" Note failed: {exc} "
+                else:
+                    status_msg = default_status
+            else:
+                status_msg = " No daemon — notes not available for socketless runs "
 
         # r: resume
         if key == ord("r") and runs:

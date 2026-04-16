@@ -1,5 +1,8 @@
 """Tests for TUI formatting logic (non-interactive parts)."""
 
+from pathlib import Path
+from unittest.mock import patch
+
 from supervisor.operator.tui import (
     format_run_line,
     format_snapshot,
@@ -7,6 +10,10 @@ from supervisor.operator.tui import (
     format_explanation,
     format_exchange,
     collect_runs,
+    _resolve_run_dir,
+    _local_explain_run,
+    _local_assess_drift,
+    _local_explain_exchange,
 )
 
 
@@ -189,7 +196,9 @@ class TestFormatExchange:
 
 
 class TestCollectRunsLocal:
-    def test_collect_with_disk_runs(self, tmp_path):
+    @patch("supervisor.operator.tui.list_pane_owners", return_value=[])
+    @patch("supervisor.operator.tui.list_daemons", return_value=[])
+    def test_collect_with_disk_runs(self, _mock_daemons, _mock_owners, tmp_path):
         """Verify collect_runs picks up on-disk state files."""
         import json
         import supervisor.operator.tui as tui_mod
@@ -218,7 +227,9 @@ class TestCollectRunsLocal:
         finally:
             tui_mod._RUNTIME_DIR = orig
 
-    def test_collect_completed_run(self, tmp_path):
+    @patch("supervisor.operator.tui.list_pane_owners", return_value=[])
+    @patch("supervisor.operator.tui.list_daemons", return_value=[])
+    def test_collect_completed_run(self, _mock_daemons, _mock_owners, tmp_path):
         import json
         import supervisor.operator.tui as tui_mod
 
@@ -239,5 +250,132 @@ class TestCollectRunsLocal:
             items = collect_runs(daemons=[])
             assert len(items) == 1
             assert items[0]["tag"] == "completed"
+        finally:
+            tui_mod._RUNTIME_DIR = orig
+
+
+class TestResolveRunDir:
+    def test_with_worktree(self):
+        run = {"run_id": "run_abc", "worktree": "/tmp/other-wt"}
+        d = _resolve_run_dir(run)
+        assert d == Path("/tmp/other-wt/.supervisor/runtime/runs/run_abc")
+
+    def test_without_worktree(self):
+        run = {"run_id": "run_abc", "worktree": ""}
+        d = _resolve_run_dir(run)
+        assert "runs/run_abc" in str(d)
+
+    def test_no_worktree_key(self):
+        run = {"run_id": "run_abc"}
+        d = _resolve_run_dir(run)
+        assert "runs/run_abc" in str(d)
+
+
+class TestLocalExplainFallback:
+    def test_explain_run_from_disk(self, tmp_path):
+        import json
+        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_fb1"
+        run_dir.mkdir(parents=True)
+        state = {
+            "run_id": "run_fb1",
+            "top_state": "RUNNING",
+            "current_node_id": "step_1",
+            "done_node_ids": [],
+            "last_agent_checkpoint": {"summary": "working"},
+        }
+        (run_dir / "state.json").write_text(json.dumps(state))
+
+        run = {"run_id": "run_fb1", "worktree": str(tmp_path)}
+        lines = _local_explain_run(run)
+        text = "\n".join(lines)
+        assert "RUNNING" in text
+        assert "step_1" in text
+
+    def test_explain_run_zh(self, tmp_path):
+        import json
+        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_fb2"
+        run_dir.mkdir(parents=True)
+        state = {
+            "run_id": "run_fb2",
+            "top_state": "RUNNING",
+            "current_node_id": "step_1",
+            "done_node_ids": [],
+        }
+        (run_dir / "state.json").write_text(json.dumps(state))
+
+        run = {"run_id": "run_fb2", "worktree": str(tmp_path)}
+        lines = _local_explain_run(run, language="zh")
+        text = "\n".join(lines)
+        assert "状态" in text or "节点" in text
+
+    def test_drift_from_disk(self, tmp_path):
+        import json
+        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_fb3"
+        run_dir.mkdir(parents=True)
+        state = {
+            "run_id": "run_fb3",
+            "top_state": "RUNNING",
+            "current_node_id": "step_1",
+            "retry_budget": {"used_global": 5},
+        }
+        (run_dir / "state.json").write_text(json.dumps(state))
+
+        run = {"run_id": "run_fb3", "worktree": str(tmp_path)}
+        lines = _local_assess_drift(run)
+        text = "\n".join(lines)
+        # High retry count should trigger a warning
+        assert "retry" in text.lower() or "watch" in text or "drifting" in text
+
+    def test_exchange_from_disk(self, tmp_path):
+        import json
+        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_fb4"
+        run_dir.mkdir(parents=True)
+        state = {
+            "run_id": "run_fb4",
+            "top_state": "RUNNING",
+            "current_node_id": "step_1",
+            "last_agent_checkpoint": {"summary": "wrote tests"},
+            "last_decision": {"next_instruction": "continue"},
+        }
+        (run_dir / "state.json").write_text(json.dumps(state))
+
+        run = {"run_id": "run_fb4", "worktree": str(tmp_path)}
+        lines = _local_explain_exchange(run)
+        text = "\n".join(lines)
+        assert "Explanation:" in text
+
+    def test_missing_state(self):
+        run = {"run_id": "run_ghost", "worktree": "/nonexistent"}
+        lines = _local_explain_run(run)
+        assert any("no local state" in l for l in lines)
+
+    def test_load_local_detail_cross_worktree(self, tmp_path):
+        """Verify _load_local_detail reads from worktree, not cwd."""
+        import json
+        import supervisor.operator.tui as tui_mod
+        from supervisor.operator.tui import _load_local_detail
+
+        # Point _RUNTIME_DIR to an empty dir (simulates wrong cwd)
+        orig = tui_mod._RUNTIME_DIR
+        tui_mod._RUNTIME_DIR = tmp_path / "empty_rt"
+
+        # Create state in a different "worktree"
+        other_wt = tmp_path / "other_worktree"
+        run_dir = other_wt / ".supervisor" / "runtime" / "runs" / "run_xwt"
+        run_dir.mkdir(parents=True)
+        state = {
+            "run_id": "run_xwt",
+            "top_state": "PAUSED_FOR_HUMAN",
+            "current_node_id": "step_2",
+            "spec_id": "my-spec",
+        }
+        (run_dir / "state.json").write_text(json.dumps(state))
+
+        try:
+            run = {"run_id": "run_xwt", "worktree": str(other_wt)}
+            lines = _load_local_detail(run)
+            text = "\n".join(lines)
+            assert "PAUSED_FOR_HUMAN" in text
+            assert "run_xwt" in text
         finally:
             tui_mod._RUNTIME_DIR = orig
