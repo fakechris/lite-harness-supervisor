@@ -33,6 +33,13 @@ from supervisor.global_registry import (
 )
 from supervisor.interventions import AutoInterventionManager
 from supervisor.notifications import NotificationManager
+from supervisor.llm.explainer_client import ExplainerClient
+from supervisor.operator.api import (
+    recent_exchange,
+    snapshot_from_state,
+    timeline_from_session_log,
+)
+from supervisor.operator.jobs import JobTracker
 from supervisor.pause_summary import summarize_state
 from supervisor.spec_approval import load_runnable_spec
 
@@ -108,6 +115,12 @@ class DaemonServer:
         self._started_at = time.time()
         self._last_run_finished_at: float = 0
         self._last_client_contact_at: float = time.time()
+        self._explainer = ExplainerClient(
+            model=self.config.explainer_model,
+            temperature=self.config.explainer_temperature,
+            max_tokens=self.config.explainer_max_tokens,
+        )
+        self._job_tracker = JobTracker()
 
     def start(self) -> None:
         """Start the daemon: bind socket, write PID, accept connections."""
@@ -265,6 +278,20 @@ class DaemonServer:
             response = self._do_note_add(request)
         elif action == "note_list":
             response = self._do_note_list(request)
+        elif action == "get_snapshot":
+            response = self._do_get_snapshot(request.get("run_id", ""))
+        elif action == "get_timeline":
+            response = self._do_get_timeline(request)
+        elif action == "get_exchange":
+            response = self._do_get_exchange(request.get("run_id", ""))
+        elif action == "explain_run":
+            response = self._do_explain_run(request)
+        elif action == "explain_exchange":
+            response = self._do_explain_exchange(request)
+        elif action == "assess_drift":
+            response = self._do_assess_drift(request)
+        elif action == "get_job":
+            response = self._do_get_job(request.get("job_id", ""))
         elif action == "ping":
             response = {"ok": True, "pong": True}
         else:
@@ -637,6 +664,110 @@ class DaemonServer:
             "state": state,
             "recent_events": recent,
         }
+
+    # ------------------------------------------------------------------
+    # Operator channel: canonical read APIs
+    # ------------------------------------------------------------------
+
+    def _do_get_snapshot(self, run_id: str) -> dict:
+        """Return a RunSnapshot for a single run."""
+        with self._lock:
+            entry = self._runs.get(run_id)
+        if not entry:
+            return {"ok": False, "error": f"run {run_id} not found"}
+        state = entry._read_state() or {}
+        snap = snapshot_from_state(state, entry.store.session_log_path)
+        return {"ok": True, **snap.to_dict()}
+
+    def _do_get_timeline(self, request: dict) -> dict:
+        """Return RunTimelineEvents for a run."""
+        run_id = request.get("run_id", "")
+        with self._lock:
+            entry = self._runs.get(run_id)
+        if not entry:
+            return {"ok": False, "error": f"run {run_id} not found"}
+        limit = request.get("limit", 20)
+        since_seq = request.get("since_seq", 0)
+        events = timeline_from_session_log(
+            entry.store.session_log_path,
+            limit=limit,
+            since_seq=since_seq,
+        )
+        return {"ok": True, "run_id": run_id, "events": [e.to_dict() for e in events]}
+
+    def _do_get_exchange(self, run_id: str) -> dict:
+        """Return recent exchange summary for a run."""
+        with self._lock:
+            entry = self._runs.get(run_id)
+        if not entry:
+            return {"ok": False, "error": f"run {run_id} not found"}
+        state = entry._read_state() or {}
+        exchange = recent_exchange(state, entry.store.session_log_path)
+        return {"ok": True, **exchange}
+
+    # ------------------------------------------------------------------
+    # Operator channel: async explainer jobs
+    # ------------------------------------------------------------------
+
+    def _build_explainer_context(self, entry: RunEntry, **extra) -> dict:
+        """Build context dict for explainer calls."""
+        state = entry._read_state() or {}
+        events = timeline_from_session_log(entry.store.session_log_path, limit=10)
+        return {
+            "run_state": state,
+            "recent_events": [e.to_dict() for e in events],
+            **extra,
+        }
+
+    def _do_explain_run(self, request: dict) -> dict:
+        run_id = request.get("run_id", "")
+        language = request.get("language", "en")
+        with self._lock:
+            entry = self._runs.get(run_id)
+        if not entry:
+            return {"ok": False, "error": f"run {run_id} not found"}
+        ctx = self._build_explainer_context(entry, language=language)
+        job_id = self._job_tracker.submit(
+            "explain_run",
+            lambda: self._explainer.explain_run(ctx),
+        )
+        return {"ok": True, "job_id": job_id}
+
+    def _do_explain_exchange(self, request: dict) -> dict:
+        run_id = request.get("run_id", "")
+        language = request.get("language", "en")
+        with self._lock:
+            entry = self._runs.get(run_id)
+        if not entry:
+            return {"ok": False, "error": f"run {run_id} not found"}
+        state = entry._read_state() or {}
+        exchange = recent_exchange(state, entry.store.session_log_path)
+        ctx = self._build_explainer_context(entry, exchange=exchange, language=language)
+        job_id = self._job_tracker.submit(
+            "explain_exchange",
+            lambda: self._explainer.explain_exchange(ctx),
+        )
+        return {"ok": True, "job_id": job_id}
+
+    def _do_assess_drift(self, request: dict) -> dict:
+        run_id = request.get("run_id", "")
+        language = request.get("language", "en")
+        with self._lock:
+            entry = self._runs.get(run_id)
+        if not entry:
+            return {"ok": False, "error": f"run {run_id} not found"}
+        ctx = self._build_explainer_context(entry, language=language)
+        job_id = self._job_tracker.submit(
+            "assess_drift",
+            lambda: self._explainer.assess_drift(ctx),
+        )
+        return {"ok": True, "job_id": job_id}
+
+    def _do_get_job(self, job_id: str) -> dict:
+        job = self._job_tracker.get(job_id)
+        if not job:
+            return {"ok": False, "error": f"job {job_id} not found"}
+        return {"ok": True, **job.to_dict()}
 
     # ------------------------------------------------------------------
     # P1: shared notes

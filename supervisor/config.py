@@ -18,6 +18,7 @@ _GLOBAL_INHERITABLE = frozenset({
     "judge_temperature", "judge_max_tokens", "worker_trust_level",
     "notification_channels", "pause_handling_mode", "max_auto_interventions",
     "poll_interval_sec", "read_lines",
+    "explainer_model", "explainer_temperature", "explainer_max_tokens",
 })
 
 
@@ -100,6 +101,11 @@ class RuntimeConfig:
     judge_model: str | None = None  # None = stub mode
     judge_temperature: float = 0.1
     judge_max_tokens: int = 512
+
+    # -- LLM Explainer (operator-facing, separate from judge) --
+    explainer_model: str | None = None  # None = stub mode (cheap/fast default)
+    explainer_temperature: float = 0.3
+    explainer_max_tokens: int = 1024
 
     # -- Runtime paths --
     runtime_dir: str = ".supervisor/runtime"

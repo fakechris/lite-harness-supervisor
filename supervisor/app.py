@@ -2221,6 +2221,7 @@ def build_runtime_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("bootstrap", help="Auto-detect, init, start daemon, and validate surface")
     sub.add_parser("dashboard", help="Interactive run dashboard — numbered list with drill-in")
+    sub.add_parser("tui", help="Operator TUI — three-pane view with explain/drift/pause")
 
     p_config = sub.add_parser("config", help="Read or write config values")
     config_sub = p_config.add_subparsers(dest="config_action")
@@ -2349,6 +2350,10 @@ def main():
         sys.exit(cmd_bootstrap(args))
     elif args.command == "dashboard":
         sys.exit(cmd_dashboard(args))
+    elif args.command == "tui":
+        from supervisor.operator.tui import run_tui
+        run_tui()
+        sys.exit(0)
     elif args.command == "config":
         if args.config_action == "set":
             sys.exit(cmd_config_set(args))

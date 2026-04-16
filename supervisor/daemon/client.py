@@ -100,6 +100,55 @@ class DaemonClient:
             req["run_id"] = run_id
         return self._request(req)
 
+    # ------------------------------------------------------------------
+    # Operator channel APIs
+    # ------------------------------------------------------------------
+
+    def get_snapshot(self, run_id: str) -> dict:
+        """Get canonical RunSnapshot for a run."""
+        return self._request({"action": "get_snapshot", "run_id": run_id})
+
+    def get_timeline(self, run_id: str, *, limit: int = 20, since_seq: int = 0) -> dict:
+        """Get RunTimelineEvents for a run."""
+        return self._request({
+            "action": "get_timeline",
+            "run_id": run_id,
+            "limit": limit,
+            "since_seq": since_seq,
+        })
+
+    def get_exchange(self, run_id: str) -> dict:
+        """Get recent exchange summary."""
+        return self._request({"action": "get_exchange", "run_id": run_id})
+
+    def explain_run(self, run_id: str, *, language: str = "en") -> dict:
+        """Submit async explain_run job. Returns {ok, job_id}."""
+        return self._request({
+            "action": "explain_run",
+            "run_id": run_id,
+            "language": language,
+        })
+
+    def explain_exchange(self, run_id: str, *, language: str = "en") -> dict:
+        """Submit async explain_exchange job. Returns {ok, job_id}."""
+        return self._request({
+            "action": "explain_exchange",
+            "run_id": run_id,
+            "language": language,
+        })
+
+    def assess_drift(self, run_id: str, *, language: str = "en") -> dict:
+        """Submit async assess_drift job. Returns {ok, job_id}."""
+        return self._request({
+            "action": "assess_drift",
+            "run_id": run_id,
+            "language": language,
+        })
+
+    def get_job(self, job_id: str) -> dict:
+        """Poll for async job result."""
+        return self._request({"action": "get_job", "job_id": job_id})
+
     def _request(self, data: dict) -> dict:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(5)
