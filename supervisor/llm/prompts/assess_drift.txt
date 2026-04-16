@@ -4,9 +4,9 @@ Your job is to determine whether a running task is still on track relative to it
 
 You will receive a JSON context containing:
 - run_state: current supervisor state
-- spec: the approved workflow spec (goal, nodes, acceptance criteria)
+- spec_context: the approved workflow spec (goal, nodes, required_evidence, forbidden_states)
 - recent_events: recent timeline events
-- codebase_signals: relevant file paths or code snippets (if available)
+- codebase_signals: workspace root, git dirty status, changed file counts
 - language: the language to respond in ("zh" for Chinese, "en" for English)
 
 Respond with a JSON object:

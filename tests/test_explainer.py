@@ -119,6 +119,43 @@ class TestAssessDriftStub:
         assert any("node_mismatches=" in e for e in result["evidence"])
 
 
+# ── Chinese stub mode tests ──────────────────────────────────────
+
+class TestStubChineseMode:
+    def test_explain_run_zh(self):
+        client = ExplainerClient(model=None)
+        ctx = _make_context(language="zh")
+        result = client.explain_run(ctx)
+        # Should contain Chinese text
+        assert "状态" in result["current_activity"] or "节点" in result["current_activity"]
+        assert "confidence" in result
+
+    def test_explain_exchange_zh(self):
+        client = ExplainerClient(model=None)
+        ctx = _make_context(language="zh")
+        ctx["exchange"] = {
+            "last_checkpoint_summary": "writing tests",
+            "last_instruction_summary": "continue",
+        }
+        result = client.explain_exchange(ctx)
+        assert "检查点" in result["explanation"] or "Worker" in result["explanation"]
+
+    def test_assess_drift_zh(self):
+        client = ExplainerClient(model=None)
+        ctx = _make_context(language="zh")
+        result = client.assess_drift(ctx)
+        assert result["status"] == "on_track"
+        assert any("未检测" in r for r in result["reasons"])
+
+    def test_drift_watch_zh(self):
+        client = ExplainerClient(model=None)
+        ctx = _make_context(language="zh")
+        ctx["run_state"]["retry_budget"]["used_global"] = 5
+        result = client.assess_drift(ctx)
+        assert result["status"] == "watch"
+        assert "继续观察" in result["recommended_action"]
+
+
 # ── JobTracker tests ───────────────────────────────────────────────
 
 class TestJobTracker:
