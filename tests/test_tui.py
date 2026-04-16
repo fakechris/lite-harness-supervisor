@@ -10,12 +10,8 @@ from supervisor.operator.tui import (
     format_timeline,
     format_explanation,
     format_exchange,
+    format_notes,
     collect_runs,
-    _resolve_run_dir,
-    _local_explain_run,
-    _local_assess_drift,
-    _local_explain_exchange,
-    _make_local_explainer,
 )
 
 
@@ -197,6 +193,23 @@ class TestFormatExchange:
         assert "(none)" in text
 
 
+class TestFormatNotes:
+    def test_with_notes(self):
+        notes = [
+            {"timestamp": "2026-04-15T10:00:00Z", "author_run_id": "human", "content": "check step 2"},
+            {"timestamp": "2026-04-15T10:01:00Z", "author_run_id": "op_abc", "content": "looks good"},
+        ]
+        lines = format_notes(notes)
+        text = "\n".join(lines)
+        assert "Notes:" in text
+        assert "check step 2" in text
+        assert "looks good" in text
+
+    def test_empty_notes(self):
+        lines = format_notes([])
+        assert "(no notes)" in "\n".join(lines)
+
+
 class TestCollectRunsLocal:
     @patch("supervisor.operator.tui.list_known_worktrees", return_value=[])
     @patch("supervisor.operator.tui.list_pane_owners", return_value=[])
@@ -288,162 +301,11 @@ class TestCollectRunsLocal:
             tui_mod._RUNTIME_DIR = orig
 
 
-class TestResolveRunDir:
-    def test_with_worktree(self):
-        run = {"run_id": "run_abc", "worktree": "/tmp/other-wt"}
-        d = _resolve_run_dir(run)
-        assert d == Path("/tmp/other-wt/.supervisor/runtime/runs/run_abc")
-
-    def test_without_worktree(self):
-        run = {"run_id": "run_abc", "worktree": ""}
-        d = _resolve_run_dir(run)
-        assert "runs/run_abc" in str(d)
-
-    def test_no_worktree_key(self):
-        run = {"run_id": "run_abc"}
-        d = _resolve_run_dir(run)
-        assert "runs/run_abc" in str(d)
-
-
-class TestLocalExplainFallback:
-    def test_explain_run_from_disk(self, tmp_path):
-        import json
-        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_fb1"
-        run_dir.mkdir(parents=True)
-        state = {
-            "run_id": "run_fb1",
-            "top_state": "RUNNING",
-            "current_node_id": "step_1",
-            "done_node_ids": [],
-            "last_agent_checkpoint": {"summary": "working"},
-        }
-        (run_dir / "state.json").write_text(json.dumps(state))
-
-        run = {"run_id": "run_fb1", "worktree": str(tmp_path)}
-        lines = _local_explain_run(run)
-        text = "\n".join(lines)
-        assert "RUNNING" in text
-        assert "step_1" in text
-
-    def test_explain_run_zh(self, tmp_path):
-        import json
-        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_fb2"
-        run_dir.mkdir(parents=True)
-        state = {
-            "run_id": "run_fb2",
-            "top_state": "RUNNING",
-            "current_node_id": "step_1",
-            "done_node_ids": [],
-        }
-        (run_dir / "state.json").write_text(json.dumps(state))
-
-        run = {"run_id": "run_fb2", "worktree": str(tmp_path)}
-        lines = _local_explain_run(run, language="zh")
-        text = "\n".join(lines)
-        assert "状态" in text or "节点" in text
-
-    def test_drift_from_disk(self, tmp_path):
-        import json
-        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_fb3"
-        run_dir.mkdir(parents=True)
-        state = {
-            "run_id": "run_fb3",
-            "top_state": "RUNNING",
-            "current_node_id": "step_1",
-            "retry_budget": {"used_global": 5},
-        }
-        (run_dir / "state.json").write_text(json.dumps(state))
-
-        run = {"run_id": "run_fb3", "worktree": str(tmp_path)}
-        lines = _local_assess_drift(run)
-        text = "\n".join(lines)
-        # High retry count should trigger a warning
-        assert "retry" in text.lower() or "watch" in text or "drifting" in text
-
-    def test_exchange_from_disk(self, tmp_path):
-        import json
-        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_fb4"
-        run_dir.mkdir(parents=True)
-        state = {
-            "run_id": "run_fb4",
-            "top_state": "RUNNING",
-            "current_node_id": "step_1",
-            "last_agent_checkpoint": {"summary": "wrote tests"},
-            "last_decision": {"next_instruction": "continue"},
-        }
-        (run_dir / "state.json").write_text(json.dumps(state))
-
-        run = {"run_id": "run_fb4", "worktree": str(tmp_path)}
-        lines = _local_explain_exchange(run)
-        text = "\n".join(lines)
-        assert "Explanation:" in text
-
-    def test_missing_state(self):
-        run = {"run_id": "run_ghost", "worktree": "/nonexistent"}
-        lines = _local_explain_run(run)
-        assert any("no local state" in l for l in lines)
-
-    def test_load_local_detail_cross_worktree(self, tmp_path):
-        """Verify _load_local_detail reads from worktree, not cwd."""
-        import json
-        import supervisor.operator.tui as tui_mod
-        from supervisor.operator.tui import _load_local_detail
-
-        # Point _RUNTIME_DIR to an empty dir (simulates wrong cwd)
-        orig = tui_mod._RUNTIME_DIR
-        tui_mod._RUNTIME_DIR = tmp_path / "empty_rt"
-
-        # Create state in a different "worktree"
-        other_wt = tmp_path / "other_worktree"
-        run_dir = other_wt / ".supervisor" / "runtime" / "runs" / "run_xwt"
-        run_dir.mkdir(parents=True)
-        state = {
-            "run_id": "run_xwt",
-            "top_state": "PAUSED_FOR_HUMAN",
-            "current_node_id": "step_2",
-            "spec_id": "my-spec",
-        }
-        (run_dir / "state.json").write_text(json.dumps(state))
-
-        try:
-            run = {"run_id": "run_xwt", "worktree": str(other_wt)}
-            lines = _load_local_detail(run)
-            text = "\n".join(lines)
-            assert "PAUSED_FOR_HUMAN" in text
-            assert "run_xwt" in text
-        finally:
-            tui_mod._RUNTIME_DIR = orig
-
-
-class TestMakeLocalExplainer:
-    @patch("supervisor.config.RuntimeConfig.load")
-    def test_uses_config_model(self, mock_load):
-        """Verify _make_local_explainer reads explainer_model from config."""
-        from unittest.mock import MagicMock
-        mock_cfg = MagicMock()
-        mock_cfg.explainer_model = "anthropic/claude-haiku-4-5-20251001"
-        mock_cfg.explainer_temperature = 0.2
-        mock_cfg.explainer_max_tokens = 512
-        mock_load.return_value = mock_cfg
-        client = _make_local_explainer()
-        assert client.model == "anthropic/claude-haiku-4-5-20251001"
-        assert client.temperature == 0.2
-        assert client.max_tokens == 512
-
-    @patch("supervisor.config.RuntimeConfig.load")
-    def test_falls_back_to_stub_on_error(self, mock_load):
-        """If config load fails, fall back to stub mode."""
-        mock_load.side_effect = Exception("no config")
-        client = _make_local_explainer()
-        assert client.model is None
-
-
 class TestScanRunsDirSort:
     def test_sorts_by_state_mtime_not_dir_mtime(self, tmp_path):
         """Verify runs are sorted by state.json mtime, not directory mtime."""
         import json
         import os
-        import supervisor.operator.tui as tui_mod
         from supervisor.operator.tui import _scan_runs_dir
 
         # Create two runs: old_run created first, new_run created second

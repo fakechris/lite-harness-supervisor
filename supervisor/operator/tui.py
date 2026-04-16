@@ -19,23 +19,25 @@ from typing import Any
 
 from supervisor.daemon.client import DaemonClient
 from supervisor.global_registry import list_daemons, list_known_worktrees, list_pane_owners
+from supervisor.operator.actions import (
+    ActionUnavailable,
+    OperatorJob,
+    do_exchange,
+    do_inspect,
+    do_note_add,
+    do_note_list,
+    do_pause,
+    do_resume,
+    poll_job,
+    submit_drift,
+    submit_explain,
+    submit_explain_exchange,
+)
+from supervisor.operator.run_context import ActionMode, RunContext
 from supervisor.pause_summary import summarize_state
 
 # Default runtime dir — same as app.py
 _RUNTIME_DIR = Path(".supervisor/runtime")
-
-
-def _resolve_run_dir(run: dict) -> Path:
-    """Resolve the runtime/runs/<run_id> directory for a run.
-
-    Uses run["worktree"] when set (cross-worktree), falling back to
-    the local _RUNTIME_DIR for current-cwd runs.
-    """
-    rid = run.get("run_id", "")
-    wt = run.get("worktree", "")
-    if wt:
-        return Path(wt) / ".supervisor" / "runtime" / "runs" / rid
-    return _RUNTIME_DIR / "runs" / rid
 
 
 # ── Data collection ────────────────────────────────────────────────
@@ -179,35 +181,6 @@ def _scan_runs_dir(runs_dir: Path, worktree: str, items: list[dict], seen: set[s
         })
 
 
-def get_client_for_run(run: dict) -> DaemonClient | None:
-    """Get a DaemonClient that can reach this run.
-
-    First tries the run's own socket. If empty, attempts to find a
-    daemon whose cwd matches the run's worktree (covers orphaned runs
-    that lost their daemon reference but have a daemon running in the
-    same worktree).
-    """
-    sock = run.get("socket", "")
-    if sock:
-        return DaemonClient(sock_path=sock)
-    # Try to find a daemon by worktree match
-    wt = run.get("worktree", "")
-    if wt:
-        wt_resolved = str(Path(wt).resolve())
-        for daemon in list_daemons():
-            daemon_cwd = daemon.get("cwd", "")
-            if daemon_cwd and str(Path(daemon_cwd).resolve()) == wt_resolved:
-                daemon_sock = daemon.get("socket", "")
-                if daemon_sock:
-                    try:
-                        client = DaemonClient(sock_path=daemon_sock)
-                        if client.is_running():
-                            return client
-                    except (ConnectionRefusedError, FileNotFoundError, OSError):
-                        pass
-    return None
-
-
 # ── Formatting helpers ─────────────────────────────────────────────
 
 STATE_COLORS = {
@@ -288,104 +261,6 @@ def format_exchange(exchange: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _load_local_detail(run: dict) -> list[str]:
-    """Load snapshot + timeline from disk for non-daemon runs."""
-    from supervisor.operator.api import snapshot_from_state, timeline_from_session_log
-    runs_dir = _resolve_run_dir(run)
-    state_path = runs_dir / "state.json"
-    session_log = runs_dir / "session_log.jsonl"
-    if not state_path.exists():
-        return [f"No local state for {run.get('run_id', '?')}"]
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        snap = snapshot_from_state(state, session_log)
-        lines = format_snapshot(snap.to_dict())
-        events = timeline_from_session_log(session_log, limit=15)
-        lines.extend(format_timeline([e.to_dict() for e in events]))
-        return lines
-    except Exception as exc:
-        return [f"Error reading local state: {exc}"]
-
-
-def _format_local_exchange(run: dict) -> list[str]:
-    """Read exchange from disk for local (non-daemon) runs."""
-    from supervisor.operator.api import recent_exchange
-    runs_dir = _resolve_run_dir(run)
-    state_path = runs_dir / "state.json"
-    session_log = runs_dir / "session_log.jsonl"
-    if not state_path.exists():
-        return ["(no local state available)"]
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        exchange = recent_exchange(state, session_log)
-        return format_exchange(exchange)
-    except Exception as exc:
-        return [f"Error reading local exchange: {exc}"]
-
-
-def _make_local_explainer():
-    """Create an ExplainerClient using config's explainer_model when available."""
-    from supervisor.llm.explainer_client import ExplainerClient
-    try:
-        from supervisor.config import RuntimeConfig
-        cfg = RuntimeConfig.load()
-        return ExplainerClient(
-            model=cfg.explainer_model,
-            temperature=cfg.explainer_temperature,
-            max_tokens=cfg.explainer_max_tokens,
-        )
-    except Exception:
-        return ExplainerClient(model=None)
-
-
-def _local_explain_run(run: dict, *, language: str = "en") -> list[str]:
-    """Explain a socketless run — uses config's explainer_model or stub."""
-    runs_dir = _resolve_run_dir(run)
-    state_path = runs_dir / "state.json"
-    if not state_path.exists():
-        return [f"(no local state for {run.get('run_id', '?')})"]
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        return [f"Error reading state: {exc}"]
-    client = _make_local_explainer()
-    result = client.explain_run({"run_state": state, "language": language})
-    return format_explanation(result)
-
-
-def _local_assess_drift(run: dict, *, language: str = "en") -> list[str]:
-    """Assess drift for a socketless run — uses config's explainer_model or stub."""
-    runs_dir = _resolve_run_dir(run)
-    state_path = runs_dir / "state.json"
-    if not state_path.exists():
-        return [f"(no local state for {run.get('run_id', '?')})"]
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        return [f"Error reading state: {exc}"]
-    client = _make_local_explainer()
-    result = client.assess_drift({"run_state": state, "language": language})
-    return format_explanation(result)
-
-
-def _local_explain_exchange(run: dict, *, language: str = "en") -> list[str]:
-    """Explain exchange for a socketless run — uses config's explainer_model or stub."""
-    from supervisor.operator.api import recent_exchange
-    runs_dir = _resolve_run_dir(run)
-    state_path = runs_dir / "state.json"
-    session_log = runs_dir / "session_log.jsonl"
-    if not state_path.exists():
-        return ["(no local state available)"]
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        exchange = recent_exchange(state, session_log)
-    except Exception as exc:
-        return [f"Error reading exchange: {exc}"]
-    client = _make_local_explainer()
-    result = client.explain_exchange({"exchange": exchange, "language": language})
-    return format_explanation(result)
-
-
 def format_explanation(result: dict[str, Any]) -> list[str]:
     """Format an explainer result into display lines."""
     lines = ["Explanation:"]
@@ -415,6 +290,20 @@ def format_explanation(result: dict[str, Any]) -> list[str]:
     if conf is not None:
         lines.append(f"  Confidence: {conf}")
 
+    return lines
+
+
+def format_notes(notes: list[dict[str, Any]]) -> list[str]:
+    """Format run-scoped notes into display lines."""
+    lines = ["Notes:"]
+    if not notes:
+        lines.append("  (no notes)")
+        return lines
+    for note in notes[:20]:
+        ts = note.get("timestamp", "")[:19]
+        author = note.get("author_run_id", "?")[:12]
+        content = note.get("content", "")[:80]
+        lines.append(f"  {ts} [{author}] {content}")
     return lines
 
 
@@ -512,12 +401,12 @@ def _curses_main(stdscr):
     detail_lines: list[str] = ["(select a run)"]
     right_lines: list[str] = ["(press 'e' to explain, 'd' for drift)"]
     language = "en"
-    status_msg = " j/k:nav  e:explain  x:exchange  d:drift  p:pause  r:resume  l:lang  n:note  q:quit "
+    status_msg = " j/k:nav  e:explain  x:exchange  d:drift  p:pause  r:resume  l:lang  n:note  N:notes  q:quit "
     default_status = status_msg
     last_refresh = 0.0
 
     # Pending async job state (non-blocking)
-    pending_job: dict[str, Any] | None = None  # {"client": ..., "job_id": ..., "label": ...}
+    pending_job: dict[str, Any] | None = None  # {"job": OperatorJob, "ctx": RunContext, "label": ...}
 
     while True:
         h, w = stdscr.getmaxyx()
@@ -533,7 +422,7 @@ def _curses_main(stdscr):
         # Poll pending job (non-blocking)
         if pending_job is not None:
             try:
-                result = pending_job["client"].get_job(pending_job["job_id"])
+                result = poll_job(pending_job["ctx"], pending_job["job"])
                 if result.get("status") in ("completed", "failed"):
                     if result.get("status") == "failed":
                         right_lines = [f"Job failed: {result.get('error', 'unknown error')}"]
@@ -602,91 +491,86 @@ def _curses_main(stdscr):
         # Enter or space: load snapshot + timeline
         if key in (10, 32, ord("i")) and runs:
             run = runs[selected_idx]
-            client = get_client_for_run(run)
-            if client:
-                try:
-                    snap_resp = client.get_snapshot(run["run_id"])
-                    if snap_resp.get("ok"):
-                        detail_lines = format_snapshot(snap_resp)
-                    else:
-                        detail_lines = [f"Error: {snap_resp.get('error', '?')}"]
+            ctx = RunContext.from_run_dict(run)
+            try:
+                result = do_inspect(ctx)
+                snap = result.get("snapshot", {})
+                detail_lines = format_snapshot(snap) if snap else ["(no snapshot)"]
+                tl = result.get("timeline", [])
+                detail_lines.extend(format_timeline(tl))
+            except Exception as exc:
+                detail_lines = [f"Error: {exc}"]
 
-                    tl_resp = client.get_timeline(run["run_id"], limit=15)
-                    if tl_resp.get("ok"):
-                        detail_lines.extend(format_timeline(tl_resp.get("events", [])))
-                except Exception as exc:
-                    detail_lines = [f"Error: {exc}"]
-            else:
-                # Local/orphaned/completed run — read from disk
-                detail_lines = _load_local_detail(run)
-
-        # e: explain run (non-blocking via daemon, or local stub fallback)
+        # e: explain run (always async — never blocks)
         if key == ord("e") and runs and pending_job is None:
             run = runs[selected_idx]
-            client = get_client_for_run(run)
-            if client:
-                try:
-                    resp = client.explain_run(run["run_id"], language=language)
-                    if resp.get("ok") and resp.get("job_id"):
-                        pending_job = {"client": client, "job_id": resp["job_id"], "label": "explain"}
-                        status_msg = " Explaining... (waiting for result) "
-                        right_lines = ["(explaining...)"]
-                    else:
-                        right_lines = [f"Error: {resp.get('error', '?')}"]
-                except Exception as exc:
-                    right_lines = [f"Error: {exc}"]
-            else:
-                right_lines = _local_explain_run(run, language=language)
+            ctx = RunContext.from_run_dict(run)
+            try:
+                job = submit_explain(ctx, language=language)
+                pending_job = {"job": job, "ctx": ctx, "label": "explain"}
+                status_msg = " Explaining... (waiting for result) "
+                right_lines = ["(explaining...)"]
+            except ActionUnavailable as exc:
+                status_msg = f" {exc} "
+            except Exception as exc:
+                right_lines = [f"Error: {exc}"]
 
-        # x: explain exchange (non-blocking via daemon, or local stub fallback)
+        # x: explain exchange (always async — never blocks)
         if key == ord("x") and runs and pending_job is None:
             run = runs[selected_idx]
-            client = get_client_for_run(run)
-            if client:
-                try:
-                    resp = client.explain_exchange(run["run_id"], language=language)
-                    if resp.get("ok") and resp.get("job_id"):
-                        pending_job = {"client": client, "job_id": resp["job_id"], "label": "exchange"}
-                        status_msg = " Explaining exchange... (waiting for result) "
-                        right_lines = ["(explaining exchange...)"]
-                    else:
-                        right_lines = [f"Error: {resp.get('error', '?')}"]
-                except Exception as exc:
-                    right_lines = [f"Error: {exc}"]
-            else:
-                right_lines = _local_explain_exchange(run, language=language)
+            ctx = RunContext.from_run_dict(run)
+            try:
+                job = submit_explain_exchange(ctx, language=language)
+                pending_job = {"job": job, "ctx": ctx, "label": "exchange"}
+                status_msg = " Explaining exchange... (waiting for result) "
+                right_lines = ["(explaining exchange...)"]
+            except ActionUnavailable as exc:
+                status_msg = f" {exc} "
+            except Exception as exc:
+                right_lines = [f"Error: {exc}"]
 
-        # d: drift assessment (non-blocking via daemon, or local stub fallback)
+        # d: drift assessment (always async — never blocks)
         if key == ord("d") and runs and pending_job is None:
             run = runs[selected_idx]
-            client = get_client_for_run(run)
-            if client:
-                try:
-                    resp = client.assess_drift(run["run_id"], language=language)
-                    if resp.get("ok") and resp.get("job_id"):
-                        pending_job = {"client": client, "job_id": resp["job_id"], "label": "drift"}
-                        status_msg = " Assessing drift... (waiting for result) "
-                        right_lines = ["(assessing drift...)"]
-                    else:
-                        right_lines = [f"Error: {resp.get('error', '?')}"]
-                except Exception as exc:
-                    right_lines = [f"Error: {exc}"]
-            else:
-                right_lines = _local_assess_drift(run, language=language)
+            ctx = RunContext.from_run_dict(run)
+            try:
+                job = submit_drift(ctx, language=language)
+                pending_job = {"job": job, "ctx": ctx, "label": "drift"}
+                status_msg = " Assessing drift... (waiting for result) "
+                right_lines = ["(assessing drift...)"]
+            except ActionUnavailable as exc:
+                status_msg = f" {exc} "
+            except Exception as exc:
+                right_lines = [f"Error: {exc}"]
 
-        # p: pause (requires daemon — show clear message for socketless runs)
+        # p: pause
         if key == ord("p") and runs:
             run = runs[selected_idx]
-            client = get_client_for_run(run)
-            if client:
-                try:
-                    client.stop_run(run["run_id"])
-                    status_msg = f" Paused {run['run_id'][-12:]} "
-                    last_refresh = 0  # force refresh
-                except Exception as exc:
-                    status_msg = f" Pause failed: {exc} "
-            else:
-                status_msg = f" No daemon — pause not available (use CLI for {run.get('tag', 'this')} runs) "
+            ctx = RunContext.from_run_dict(run)
+            try:
+                do_pause(ctx)
+                status_msg = f" Paused {run['run_id'][-12:]} "
+                last_refresh = 0  # force refresh
+            except ActionUnavailable as exc:
+                status_msg = f" {exc} "
+            except Exception as exc:
+                status_msg = f" Pause failed: {exc} "
+
+        # r: resume (auto-starts daemon if needed)
+        if key == ord("r") and runs:
+            run = runs[selected_idx]
+            ctx = RunContext.from_run_dict(run)
+            try:
+                resp = do_resume(ctx)
+                if resp.get("ok"):
+                    status_msg = f" Resumed {run['run_id'][-12:]} "
+                else:
+                    status_msg = f" Resume failed: {resp.get('error', '?')} "
+                last_refresh = 0  # force refresh
+            except ActionUnavailable as exc:
+                status_msg = f" {exc} "
+            except Exception as exc:
+                status_msg = f" Resume failed: {exc} "
 
         # l: toggle language (en ↔ zh)
         if key == ord("l"):
@@ -697,8 +581,11 @@ def _curses_main(stdscr):
         # n: operator note (requires daemon)
         if key == ord("n") and runs:
             run = runs[selected_idx]
-            client = get_client_for_run(run)
-            if client:
+            ctx = RunContext.from_run_dict(run)
+            caps = ctx.capabilities()
+            if caps.note_add == ActionMode.UNAVAILABLE:
+                status_msg = f" {caps.unavailable_reasons.get('note_add', 'unavailable')} "
+            else:
                 # Use curses line input for note text
                 curses.curs_set(1)
                 _safe_addstr(status_win, 0, 0, " Note: " + " " * (w - 8), curses.A_REVERSE)
@@ -714,54 +601,30 @@ def _curses_main(stdscr):
                 curses.curs_set(0)
                 if note_text:
                     try:
-                        client.note_add(
+                        do_note_add(
+                            ctx,
                             note_text,
-                            note_type="operator",
-                            target_run_id=run["run_id"],
                             title=f"TUI note for {run['run_id'][-12:]}",
                         )
                         status_msg = f" Note saved for {run['run_id'][-12:]} "
+                    except ActionUnavailable as exc:
+                        status_msg = f" {exc} "
                     except Exception as exc:
                         status_msg = f" Note failed: {exc} "
                 else:
                     status_msg = default_status
-            else:
-                status_msg = " No daemon — notes not available for socketless runs "
 
-        # r: resume (requires daemon + paused/orphaned run with spec_path on disk)
-        if key == ord("r") and runs:
+        # N: view notes for selected run
+        if key == ord("N") and runs:
             run = runs[selected_idx]
-            client = get_client_for_run(run)
-            if client:
-                # Read spec_path and pane_target from on-disk state
-                runs_dir = _resolve_run_dir(run)
-                state_path = runs_dir / "state.json"
-                spec_path = ""
-                pane_target = run.get("pane_target", "")
-                if state_path.exists():
-                    try:
-                        st = json.loads(state_path.read_text(encoding="utf-8"))
-                        spec_path = st.get("spec_path", "")
-                        if not pane_target or pane_target == "?":
-                            pane_target = st.get("pane_target", "")
-                    except (json.JSONDecodeError, OSError):
-                        pass
-                if not spec_path:
-                    status_msg = f" Cannot resume: no spec_path in state for {run['run_id'][-12:]} "
-                elif not pane_target:
-                    status_msg = f" Cannot resume: no pane_target for {run['run_id'][-12:]} "
-                else:
-                    try:
-                        resp = client.resume(spec_path, pane_target)
-                        if resp.get("ok"):
-                            status_msg = f" Resumed {run['run_id'][-12:]} "
-                            last_refresh = 0  # force refresh
-                        else:
-                            status_msg = f" Resume failed: {resp.get('error', '?')} "
-                    except Exception as exc:
-                        status_msg = f" Resume failed: {exc} "
-            else:
-                status_msg = f" No daemon — resume not available (use CLI for {run.get('tag', 'this')} runs) "
+            ctx = RunContext.from_run_dict(run)
+            try:
+                notes = do_note_list(ctx)
+                right_lines = format_notes(notes)
+            except ActionUnavailable as exc:
+                right_lines = [f"Notes unavailable: {exc}"]
+            except Exception as exc:
+                right_lines = [f"Error: {exc}"]
 
 
 def run_tui():
