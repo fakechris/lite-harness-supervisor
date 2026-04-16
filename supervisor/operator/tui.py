@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from supervisor.daemon.client import DaemonClient
-from supervisor.global_registry import list_daemons, list_pane_owners
+from supervisor.global_registry import list_daemons, list_known_worktrees, list_pane_owners
 from supervisor.pause_summary import summarize_state
 
 # Default runtime dir — same as app.py
@@ -120,6 +120,11 @@ def _collect_local_runs(items: list[dict], seen: set[str]) -> None:
             d = Path(wt) / ".supervisor" / "runtime" / "runs"
             if d.is_dir() and not any(d.resolve() == rd.resolve() for rd, _ in runtime_dirs):
                 runtime_dirs.append((d, wt))
+    # Also scan worktrees from persistent registry (covers dead daemon/pane cases)
+    for wt in list_known_worktrees():
+        d = Path(wt) / ".supervisor" / "runtime" / "runs"
+        if d.is_dir() and not any(d.resolve() == rd.resolve() for rd, _ in runtime_dirs):
+            runtime_dirs.append((d, wt))
 
     for runs_dir, worktree in runtime_dirs:
         if not runs_dir.is_dir():
@@ -129,10 +134,20 @@ def _collect_local_runs(items: list[dict], seen: set[str]) -> None:
 
 def _scan_runs_dir(runs_dir: Path, worktree: str, items: list[dict], seen: set[str]) -> None:
     """Scan a single runs directory for on-disk state files."""
-    for run_dir in sorted(runs_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+    # Collect run dirs with their state.json mtime for accurate recency sort.
+    # Directory mtime doesn't update when state.json content changes.
+    run_dirs: list[tuple[Path, float]] = []
+    for run_dir in runs_dir.iterdir():
         state_path = run_dir / "state.json"
-        if not state_path.exists():
-            continue
+        if state_path.exists():
+            try:
+                run_dirs.append((run_dir, state_path.stat().st_mtime))
+            except OSError:
+                pass
+    run_dirs.sort(key=lambda t: t[1], reverse=True)
+
+    for run_dir, _ in run_dirs:
+        state_path = run_dir / "state.json"
         try:
             state = json.loads(state_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
@@ -165,10 +180,31 @@ def _scan_runs_dir(runs_dir: Path, worktree: str, items: list[dict], seen: set[s
 
 
 def get_client_for_run(run: dict) -> DaemonClient | None:
-    """Get a DaemonClient that can reach this run."""
+    """Get a DaemonClient that can reach this run.
+
+    First tries the run's own socket. If empty, attempts to find a
+    daemon whose cwd matches the run's worktree (covers orphaned runs
+    that lost their daemon reference but have a daemon running in the
+    same worktree).
+    """
     sock = run.get("socket", "")
     if sock:
         return DaemonClient(sock_path=sock)
+    # Try to find a daemon by worktree match
+    wt = run.get("worktree", "")
+    if wt:
+        wt_resolved = str(Path(wt).resolve())
+        for daemon in list_daemons():
+            daemon_cwd = daemon.get("cwd", "")
+            if daemon_cwd and str(Path(daemon_cwd).resolve()) == wt_resolved:
+                daemon_sock = daemon.get("socket", "")
+                if daemon_sock:
+                    try:
+                        client = DaemonClient(sock_path=daemon_sock)
+                        if client.is_running():
+                            return client
+                    except (ConnectionRefusedError, FileNotFoundError, OSError):
+                        pass
     return None
 
 
@@ -287,9 +323,23 @@ def _format_local_exchange(run: dict) -> list[str]:
         return [f"Error reading local exchange: {exc}"]
 
 
-def _local_explain_run(run: dict, *, language: str = "en") -> list[str]:
-    """Stub explain for socketless runs — read state from disk, no daemon."""
+def _make_local_explainer():
+    """Create an ExplainerClient using config's explainer_model when available."""
     from supervisor.llm.explainer_client import ExplainerClient
+    try:
+        from supervisor.config import RuntimeConfig
+        cfg = RuntimeConfig.load()
+        return ExplainerClient(
+            model=cfg.explainer_model,
+            temperature=cfg.explainer_temperature,
+            max_tokens=cfg.explainer_max_tokens,
+        )
+    except Exception:
+        return ExplainerClient(model=None)
+
+
+def _local_explain_run(run: dict, *, language: str = "en") -> list[str]:
+    """Explain a socketless run — uses config's explainer_model or stub."""
     runs_dir = _resolve_run_dir(run)
     state_path = runs_dir / "state.json"
     if not state_path.exists():
@@ -298,14 +348,13 @@ def _local_explain_run(run: dict, *, language: str = "en") -> list[str]:
         state = json.loads(state_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         return [f"Error reading state: {exc}"]
-    client = ExplainerClient(model=None)
+    client = _make_local_explainer()
     result = client.explain_run({"run_state": state, "language": language})
     return format_explanation(result)
 
 
 def _local_assess_drift(run: dict, *, language: str = "en") -> list[str]:
-    """Stub drift assessment for socketless runs."""
-    from supervisor.llm.explainer_client import ExplainerClient
+    """Assess drift for a socketless run — uses config's explainer_model or stub."""
     runs_dir = _resolve_run_dir(run)
     state_path = runs_dir / "state.json"
     if not state_path.exists():
@@ -314,14 +363,13 @@ def _local_assess_drift(run: dict, *, language: str = "en") -> list[str]:
         state = json.loads(state_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         return [f"Error reading state: {exc}"]
-    client = ExplainerClient(model=None)
+    client = _make_local_explainer()
     result = client.assess_drift({"run_state": state, "language": language})
     return format_explanation(result)
 
 
 def _local_explain_exchange(run: dict, *, language: str = "en") -> list[str]:
-    """Stub exchange explanation for socketless runs."""
-    from supervisor.llm.explainer_client import ExplainerClient
+    """Explain exchange for a socketless run — uses config's explainer_model or stub."""
     from supervisor.operator.api import recent_exchange
     runs_dir = _resolve_run_dir(run)
     state_path = runs_dir / "state.json"
@@ -333,7 +381,7 @@ def _local_explain_exchange(run: dict, *, language: str = "en") -> list[str]:
         exchange = recent_exchange(state, session_log)
     except Exception as exc:
         return [f"Error reading exchange: {exc}"]
-    client = ExplainerClient(model=None)
+    client = _make_local_explainer()
     result = client.explain_exchange({"exchange": exchange, "language": language})
     return format_explanation(result)
 
@@ -464,7 +512,7 @@ def _curses_main(stdscr):
     detail_lines: list[str] = ["(select a run)"]
     right_lines: list[str] = ["(press 'e' to explain, 'd' for drift)"]
     language = "en"
-    status_msg = " j/k:nav  e:explain  x:exchange  d:drift  p:pause  l:lang  n:note  q:quit "
+    status_msg = " j/k:nav  e:explain  x:exchange  d:drift  p:pause  r:resume  l:lang  n:note  q:quit "
     default_status = status_msg
     last_refresh = 0.0
 
@@ -666,8 +714,13 @@ def _curses_main(stdscr):
                 curses.curs_set(0)
                 if note_text:
                     try:
-                        client.note_add(note_text, title=f"TUI note for {run['run_id'][-12:]}")
-                        status_msg = " Note saved "
+                        client.note_add(
+                            note_text,
+                            note_type="operator",
+                            target_run_id=run["run_id"],
+                            title=f"TUI note for {run['run_id'][-12:]}",
+                        )
+                        status_msg = f" Note saved for {run['run_id'][-12:]} "
                     except Exception as exc:
                         status_msg = f" Note failed: {exc} "
                 else:
@@ -675,10 +728,40 @@ def _curses_main(stdscr):
             else:
                 status_msg = " No daemon — notes not available for socketless runs "
 
-        # r: resume
+        # r: resume (requires daemon + paused/orphaned run with spec_path on disk)
         if key == ord("r") and runs:
             run = runs[selected_idx]
-            status_msg = f" Resume not yet wired for TUI (use CLI) "
+            client = get_client_for_run(run)
+            if client:
+                # Read spec_path and pane_target from on-disk state
+                runs_dir = _resolve_run_dir(run)
+                state_path = runs_dir / "state.json"
+                spec_path = ""
+                pane_target = run.get("pane_target", "")
+                if state_path.exists():
+                    try:
+                        st = json.loads(state_path.read_text(encoding="utf-8"))
+                        spec_path = st.get("spec_path", "")
+                        if not pane_target or pane_target == "?":
+                            pane_target = st.get("pane_target", "")
+                    except (json.JSONDecodeError, OSError):
+                        pass
+                if not spec_path:
+                    status_msg = f" Cannot resume: no spec_path in state for {run['run_id'][-12:]} "
+                elif not pane_target:
+                    status_msg = f" Cannot resume: no pane_target for {run['run_id'][-12:]} "
+                else:
+                    try:
+                        resp = client.resume(spec_path, pane_target)
+                        if resp.get("ok"):
+                            status_msg = f" Resumed {run['run_id'][-12:]} "
+                            last_refresh = 0  # force refresh
+                        else:
+                            status_msg = f" Resume failed: {resp.get('error', '?')} "
+                    except Exception as exc:
+                        status_msg = f" Resume failed: {exc} "
+            else:
+                status_msg = f" No daemon — resume not available (use CLI for {run.get('tag', 'this')} runs) "
 
 
 def run_tui():

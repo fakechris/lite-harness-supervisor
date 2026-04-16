@@ -1,5 +1,6 @@
 """Tests for TUI formatting logic (non-interactive parts)."""
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +15,7 @@ from supervisor.operator.tui import (
     _local_explain_run,
     _local_assess_drift,
     _local_explain_exchange,
+    _make_local_explainer,
 )
 
 
@@ -196,9 +198,10 @@ class TestFormatExchange:
 
 
 class TestCollectRunsLocal:
+    @patch("supervisor.operator.tui.list_known_worktrees", return_value=[])
     @patch("supervisor.operator.tui.list_pane_owners", return_value=[])
     @patch("supervisor.operator.tui.list_daemons", return_value=[])
-    def test_collect_with_disk_runs(self, _mock_daemons, _mock_owners, tmp_path):
+    def test_collect_with_disk_runs(self, _mock_d, _mock_o, _mock_w, tmp_path):
         """Verify collect_runs picks up on-disk state files."""
         import json
         import supervisor.operator.tui as tui_mod
@@ -227,9 +230,10 @@ class TestCollectRunsLocal:
         finally:
             tui_mod._RUNTIME_DIR = orig
 
+    @patch("supervisor.operator.tui.list_known_worktrees", return_value=[])
     @patch("supervisor.operator.tui.list_pane_owners", return_value=[])
     @patch("supervisor.operator.tui.list_daemons", return_value=[])
-    def test_collect_completed_run(self, _mock_daemons, _mock_owners, tmp_path):
+    def test_collect_completed_run(self, _mock_d, _mock_o, _mock_w, tmp_path):
         import json
         import supervisor.operator.tui as tui_mod
 
@@ -250,6 +254,36 @@ class TestCollectRunsLocal:
             items = collect_runs(daemons=[])
             assert len(items) == 1
             assert items[0]["tag"] == "completed"
+        finally:
+            tui_mod._RUNTIME_DIR = orig
+
+    @patch("supervisor.operator.tui.list_known_worktrees")
+    @patch("supervisor.operator.tui.list_pane_owners", return_value=[])
+    @patch("supervisor.operator.tui.list_daemons", return_value=[])
+    def test_collect_from_known_worktree(self, _mock_d, _mock_o, mock_wts, tmp_path):
+        """Verify collect_runs discovers runs from known_worktrees registry."""
+        import json
+        import supervisor.operator.tui as tui_mod
+
+        orig = tui_mod._RUNTIME_DIR
+        tui_mod._RUNTIME_DIR = tmp_path / "empty_rt"
+
+        # Create state in an external worktree
+        other_wt = tmp_path / "other_worktree"
+        run_dir = other_wt / ".supervisor" / "runtime" / "runs" / "run_wt_only"
+        run_dir.mkdir(parents=True)
+        state = {
+            "run_id": "run_wt_only",
+            "top_state": "COMPLETED",
+            "current_node_id": "",
+        }
+        (run_dir / "state.json").write_text(json.dumps(state))
+
+        mock_wts.return_value = [str(other_wt)]
+
+        try:
+            items = collect_runs(daemons=[])
+            assert any(i["run_id"] == "run_wt_only" for i in items)
         finally:
             tui_mod._RUNTIME_DIR = orig
 
@@ -379,3 +413,97 @@ class TestLocalExplainFallback:
             assert "run_xwt" in text
         finally:
             tui_mod._RUNTIME_DIR = orig
+
+
+class TestMakeLocalExplainer:
+    @patch("supervisor.config.RuntimeConfig.load")
+    def test_uses_config_model(self, mock_load):
+        """Verify _make_local_explainer reads explainer_model from config."""
+        from unittest.mock import MagicMock
+        mock_cfg = MagicMock()
+        mock_cfg.explainer_model = "anthropic/claude-haiku-4-5-20251001"
+        mock_cfg.explainer_temperature = 0.2
+        mock_cfg.explainer_max_tokens = 512
+        mock_load.return_value = mock_cfg
+        client = _make_local_explainer()
+        assert client.model == "anthropic/claude-haiku-4-5-20251001"
+        assert client.temperature == 0.2
+        assert client.max_tokens == 512
+
+    @patch("supervisor.config.RuntimeConfig.load")
+    def test_falls_back_to_stub_on_error(self, mock_load):
+        """If config load fails, fall back to stub mode."""
+        mock_load.side_effect = Exception("no config")
+        client = _make_local_explainer()
+        assert client.model is None
+
+
+class TestScanRunsDirSort:
+    def test_sorts_by_state_mtime_not_dir_mtime(self, tmp_path):
+        """Verify runs are sorted by state.json mtime, not directory mtime."""
+        import json
+        import os
+        import supervisor.operator.tui as tui_mod
+        from supervisor.operator.tui import _scan_runs_dir
+
+        # Create two runs: old_run created first, new_run created second
+        old_dir = tmp_path / "run_old"
+        old_dir.mkdir()
+        old_state = old_dir / "state.json"
+        old_state.write_text(json.dumps({
+            "run_id": "run_old",
+            "top_state": "COMPLETED",
+            "current_node_id": "",
+        }))
+
+        new_dir = tmp_path / "run_new"
+        new_dir.mkdir()
+        new_state = new_dir / "state.json"
+        new_state.write_text(json.dumps({
+            "run_id": "run_new",
+            "top_state": "RUNNING",
+            "current_node_id": "step_1",
+        }))
+
+        # Make old_run's state.json *newer* than new_run's
+        # (simulates: old dir, but recent activity)
+        old_state.write_text(json.dumps({
+            "run_id": "run_old",
+            "top_state": "COMPLETED",
+            "current_node_id": "",
+            "updated": True,
+        }))
+        # Explicitly set mtime to guarantee ordering (avoid fragile sleep)
+        new_mtime = new_state.stat().st_mtime
+        os.utime(old_state, (new_mtime + 10, new_mtime + 10))
+
+        items: list[dict] = []
+        seen: set[str] = set()
+        _scan_runs_dir(tmp_path, "", items, seen)
+
+        # run_old should be first because its state.json is newer
+        assert len(items) == 2
+        assert items[0]["run_id"] == "run_old"
+
+
+class TestGlobalRegistry:
+    def test_register_and_list_worktrees(self, tmp_path):
+        """Verify worktree registration persists and is retrievable."""
+        import supervisor.global_registry as reg
+
+        orig_env = os.environ.get("THIN_SUPERVISOR_GLOBAL_DIR")
+        os.environ["THIN_SUPERVISOR_GLOBAL_DIR"] = str(tmp_path)
+
+        try:
+            reg.register_worktree("/tmp/wt1")
+            reg.register_worktree("/tmp/wt2")
+            reg.register_worktree("/tmp/wt1")  # duplicate — should not add twice
+            wts = reg.list_known_worktrees()
+            assert len(wts) == 2
+            assert any("wt1" in w for w in wts)
+            assert any("wt2" in w for w in wts)
+        finally:
+            if orig_env is not None:
+                os.environ["THIN_SUPERVISOR_GLOBAL_DIR"] = orig_env
+            else:
+                os.environ.pop("THIN_SUPERVISOR_GLOBAL_DIR", None)

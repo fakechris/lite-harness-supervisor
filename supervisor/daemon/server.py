@@ -27,6 +27,7 @@ from supervisor.config import RuntimeConfig
 from supervisor.global_registry import (
     acquire_pane_lock,
     register_daemon,
+    register_worktree,
     release_pane_lock,
     unregister_daemon,
     update_daemon,
@@ -137,6 +138,7 @@ class DaemonServer:
         Path(self.pid_path).parent.mkdir(parents=True, exist_ok=True)
         Path(self.pid_path).write_text(str(os.getpid()))
         register_daemon(self._daemon_metadata())
+        register_worktree(os.getcwd())
         recovered = self._recover_orphaned_runs()
         if recovered:
             logger.warning("recovered %d orphaned persisted run(s) into PAUSED_FOR_HUMAN", recovered)
@@ -866,6 +868,7 @@ class DaemonServer:
                 __import__("datetime").timezone.utc
             ).isoformat(),
             "author_run_id": request.get("author_run_id", "human"),
+            "target_run_id": request.get("target_run_id", ""),
             "note_type": request.get("note_type", "context"),
             "title": request.get("title", content[:80]),
             "content": content,
@@ -888,6 +891,7 @@ class DaemonServer:
 
         filter_type = request.get("note_type")
         filter_run = request.get("run_id")
+        filter_target = request.get("target_run_id")
         limit = request.get("limit", 20)
 
         notes: list[dict] = []
@@ -900,6 +904,8 @@ class DaemonServer:
                 if filter_type and note.get("note_type") != filter_type:
                     continue
                 if filter_run and note.get("author_run_id") != filter_run:
+                    continue
+                if filter_target and note.get("target_run_id") != filter_target:
                     continue
                 notes.append(note)
         except OSError:
