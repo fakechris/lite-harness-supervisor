@@ -172,13 +172,17 @@ class LarkCommandChannel:
         app_id: str,
         app_secret: str,
         allowed_chat_ids: list[str] | None = None,
+        allowed_user_ids: list[str] | None = None,
         language: str = "zh",
         callback_port: int = 9876,
         verification_token: str = "",
         encrypt_key: str = "",
     ):
         self.bot = LarkBotClient(app_id, app_secret)
-        self.auth = CommandAuth(allowed_chat_ids=allowed_chat_ids)
+        self.auth = CommandAuth(
+            allowed_chat_ids=allowed_chat_ids,
+            allowed_user_ids=allowed_user_ids,
+        )
         self.language = language
         self.allowed_chat_ids = allowed_chat_ids or []
         self._callback_port = callback_port
@@ -482,8 +486,12 @@ class _LarkCallbackHandler(BaseHTTPRequestHandler):
             chat_id = message.get("chat_id", "")
             message_id = message.get("message_id", "")
             msg_type = message.get("message_type", "")
+            # Extract sender user_id for user-level auth
+            sender = event.get("sender", {})
+            sender_id = sender.get("sender_id", {})
+            user_id = sender_id.get("open_id", "") or sender_id.get("user_id", "")
 
-            if not self.channel.auth.is_authorized(chat_id):
+            if not self.channel.auth.is_authorized(chat_id, user_id):
                 self._respond(200, {})
                 return
 
@@ -508,13 +516,14 @@ class _LarkCallbackHandler(BaseHTTPRequestHandler):
         # Card action callback (top-level "action" key)
         action = payload.get("action", {})
         action_value = action.get("value", {})
-        # Extract chat_id and message_id from the event context
+        # Extract chat_id, message_id, and user_id from the event context
         event = payload.get("event", payload)
         chat_id = event.get("open_chat_id", "")
         message_id = event.get("open_message_id", "")
+        user_id = payload.get("open_id", "") or event.get("open_id", "")
 
-        # Auth check
-        if not self.channel.auth.is_authorized(chat_id):
+        # Auth check (chat + user level)
+        if not self.channel.auth.is_authorized(chat_id, user_id):
             self._respond(200, {})
             return
 
