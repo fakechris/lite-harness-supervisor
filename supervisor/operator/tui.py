@@ -112,13 +112,13 @@ def _collect_local_runs(items: list[dict], seen: set[str]) -> None:
         wt = daemon.get("cwd", "")
         if wt:
             d = Path(wt) / ".supervisor" / "runtime" / "runs"
-            if d.is_dir() and d != runtime_dirs[0][0]:
+            if d.is_dir() and d.resolve() != runtime_dirs[0][0].resolve():
                 runtime_dirs.append((d, wt))
     for owner in list_pane_owners():
         wt = owner.get("cwd", "")
         if wt:
             d = Path(wt) / ".supervisor" / "runtime" / "runs"
-            if d.is_dir() and not any(d == rd for rd, _ in runtime_dirs):
+            if d.is_dir() and not any(d.resolve() == rd.resolve() for rd, _ in runtime_dirs):
                 runtime_dirs.append((d, wt))
 
     for runs_dir, worktree in runtime_dirs:
@@ -259,7 +259,7 @@ def _load_local_detail(run: dict) -> list[str]:
     state_path = runs_dir / "state.json"
     session_log = runs_dir / "session_log.jsonl"
     if not state_path.exists():
-        return [f"No local state for {rid}"]
+        return [f"No local state for {run.get('run_id', '?')}"]
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
         snap = snapshot_from_state(state, session_log)
