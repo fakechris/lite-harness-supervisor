@@ -107,6 +107,10 @@ def _summarize_event(event_type: str, payload: dict[str, Any]) -> str:
 
 # ── timeline event writer ─────────────────────────────────────────
 
+import threading
+
+_append_lock = threading.Lock()
+
 
 def append_timeline_event(
     session_log_path: Path,
@@ -117,21 +121,22 @@ def append_timeline_event(
     """Append a single event to session_log.jsonl.
 
     Lightweight writer for operator-originated events (clarification, etc.)
-    that don't go through StateStore.
+    that don't go through StateStore.  Thread-safe via module-level lock.
     """
     from datetime import datetime, timezone
 
-    seq = _read_max_seq(session_log_path) + 1
-    record = {
-        "run_id": run_id,
-        "seq": seq,
-        "event_type": event_type,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "payload": payload,
-    }
-    session_log_path.parent.mkdir(parents=True, exist_ok=True)
-    with session_log_path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    with _append_lock:
+        seq = _read_max_seq(session_log_path) + 1
+        record = {
+            "run_id": run_id,
+            "seq": seq,
+            "event_type": event_type,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "payload": payload,
+        }
+        session_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with session_log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def _read_max_seq(session_log_path: Path) -> int:
@@ -139,7 +144,7 @@ def _read_max_seq(session_log_path: Path) -> int:
     if not session_log_path.exists():
         return 0
     try:
-        lines = _tail_lines(session_log_path, max_lines=10)
+        lines = _tail_lines(session_log_path, max_lines=256)
     except OSError:
         return 0
     for line in reversed(lines):
