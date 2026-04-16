@@ -110,25 +110,76 @@ class NotificationManager:
             elif kind == "tmux_display":
                 channels.append(TmuxDisplayNotificationChannel(tmux_socket=entry.get("tmux_socket")))
             elif kind == "telegram":
-                try:
-                    from supervisor.adapters.telegram_channel import TelegramNotificationChannel
-                    channels.append(TelegramNotificationChannel(
-                        bot_token=entry.get("bot_token", ""),
-                        chat_id=entry.get("chat_id", ""),
-                    ))
-                except (ValueError, Exception) as exc:
-                    logger.warning("skipping telegram channel: %s", exc)
+                mode = entry.get("mode", "notify")
+                if mode == "command":
+                    try:
+                        from supervisor.adapters.telegram_command import TelegramCommandChannel
+                        ch = TelegramCommandChannel(
+                            bot_token=entry.get("bot_token", ""),
+                            chat_id=entry.get("chat_id", ""),
+                            allowed_chat_ids=entry.get("allowed_chat_ids"),
+                            allowed_user_ids=entry.get("allowed_user_ids"),
+                            language=entry.get("language", "zh"),
+                        )
+                        channels.append(ch)
+                    except (ValueError, Exception) as exc:
+                        logger.warning("skipping telegram command channel: %s", exc)
+                else:
+                    try:
+                        from supervisor.adapters.telegram_channel import TelegramNotificationChannel
+                        channels.append(TelegramNotificationChannel(
+                            bot_token=entry.get("bot_token", ""),
+                            chat_id=entry.get("chat_id", ""),
+                        ))
+                    except (ValueError, Exception) as exc:
+                        logger.warning("skipping telegram channel: %s", exc)
             elif kind == "lark":
-                try:
-                    from supervisor.adapters.lark_channel import LarkNotificationChannel
-                    channels.append(LarkNotificationChannel(
-                        webhook_url=entry.get("webhook_url", ""),
-                    ))
-                except (ValueError, Exception) as exc:
-                    logger.warning("skipping lark channel: %s", exc)
+                mode = entry.get("mode", "notify")
+                if mode == "command":
+                    try:
+                        from supervisor.adapters.lark_command import LarkCommandChannel
+                        ch = LarkCommandChannel(
+                            app_id=entry.get("app_id", ""),
+                            app_secret=entry.get("app_secret", ""),
+                            allowed_chat_ids=entry.get("allowed_chat_ids"),
+                            language=entry.get("language", "zh"),
+                            callback_port=entry.get("callback_port", 9876),
+                            verification_token=entry.get("verification_token", ""),
+                            encrypt_key=entry.get("encrypt_key", ""),
+                        )
+                        channels.append(ch)
+                    except (ValueError, Exception) as exc:
+                        logger.warning("skipping lark command channel: %s", exc)
+                else:
+                    try:
+                        from supervisor.adapters.lark_channel import LarkNotificationChannel
+                        channels.append(LarkNotificationChannel(
+                            webhook_url=entry.get("webhook_url", ""),
+                        ))
+                    except (ValueError, Exception) as exc:
+                        logger.warning("skipping lark channel: %s", exc)
             else:
                 logger.warning("unknown notification channel kind: %s", kind)
         return cls(channels)
+
+    def start_all(self) -> "NotificationManager":
+        """Start command channels that have a start() method.  Returns self."""
+        for channel in self.channels:
+            if hasattr(channel, "start"):
+                try:
+                    channel.start()
+                except Exception:
+                    logger.exception("failed to start command channel")
+        return self
+
+    def stop_all(self) -> None:
+        """Stop command channels that have a stop() method."""
+        for channel in self.channels:
+            if hasattr(channel, "stop"):
+                try:
+                    channel.stop()
+                except Exception:
+                    logger.exception("failed to stop command channel")
 
     def notify(self, event: NotificationEvent) -> None:
         for channel in self.channels:

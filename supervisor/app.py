@@ -368,7 +368,7 @@ def cmd_run_foreground(args):
             notification_manager=NotificationManager.from_config(
                 config,
                 runtime_root=store.runtime_root,
-            ),
+            ).start_all(),
             auto_intervention_manager=AutoInterventionManager(
                 mode=config.pause_handling_mode,
                 max_auto_interventions=config.max_auto_interventions,
