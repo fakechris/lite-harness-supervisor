@@ -184,7 +184,7 @@ class TestJobTracker:
         tracker = JobTracker(max_completed=2)
         ids = []
         for i in range(5):
-            ids.append(tracker.submit("test", lambda: {"i": i}))
+            ids.append(tracker.submit("test", lambda i=i: {"i": i}))
         time.sleep(0.2)
 
         # Old completed jobs should be evicted

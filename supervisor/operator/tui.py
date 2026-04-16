@@ -293,7 +293,10 @@ def _curses_main(stdscr):
             try:
                 result = pending_job["client"].get_job(pending_job["job_id"])
                 if result.get("status") in ("completed", "failed"):
-                    right_lines = format_explanation(result.get("result", {}))
+                    if result.get("status") == "failed":
+                        right_lines = [f"Job failed: {result.get('error', 'unknown error')}"]
+                    else:
+                        right_lines = format_explanation(result.get("result", {}))
                     status_msg = default_status
                     pending_job = None
                 # else: still pending, keep spinner

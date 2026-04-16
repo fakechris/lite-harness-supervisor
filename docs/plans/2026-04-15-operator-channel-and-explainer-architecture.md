@@ -1,6 +1,5 @@
 # Operator Channel And Explainer Architecture Plan
 
-> **For Claude/Codex:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Add an operator-facing channel architecture that lets humans observe, understand, and intervene in supervised runs through TUI or IM-style surfaces without weakening the deterministic supervisor core.
 

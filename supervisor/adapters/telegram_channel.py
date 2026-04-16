@@ -88,8 +88,8 @@ def _event_emoji(event_type: str) -> str:
 
 
 def _escape_md(text: str) -> str:
-    """Escape MarkdownV2 special characters."""
-    special = r"_*[]()~`>#+-=|{}.!"
+    """Escape MarkdownV2 special characters (including backslash)."""
+    special = set(r"_*[]()~`>#+-=|{}.!\\")
     result = []
     for ch in text:
         if ch in special:
