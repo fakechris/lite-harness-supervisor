@@ -354,9 +354,30 @@ def submit_clarification(ctx: RunContext, question: str, *,
     explainer = _make_explainer(ctx)
 
     def _job() -> dict:
+        from supervisor.operator.api import append_timeline_event
+
+        # Record the question in the timeline
+        append_timeline_event(
+            ctx.session_log_path, ctx.run_id,
+            "clarification_request",
+            {"question": question, "language": language},
+        )
+
         context = build_explainer_context(ctx, language=language)
         context["question"] = question
-        return explainer.request_clarification(context)
+        result = explainer.request_clarification(context)
+
+        # Record the answer in the timeline
+        append_timeline_event(
+            ctx.session_log_path, ctx.run_id,
+            "clarification_response",
+            {
+                "question": question,
+                "answer": result.get("answer", ""),
+                "confidence": result.get("confidence"),
+            },
+        )
+        return result
 
     job_id = _local_jobs.submit("clarification", _job)
     return OperatorJob(job_id=job_id, source="local")

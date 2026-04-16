@@ -169,17 +169,37 @@ class TestGetClient:
 class TestCapabilityMatrix:
     """Scenario-based tests for the capability matrix."""
 
-    def test_daemon_active(self):
+    def test_daemon_active_running(self):
         caps = _compute_capabilities("daemon", "RUNNING", True)
         assert caps.inspect == ActionMode.SYNC_DAEMON
         assert caps.exchange == ActionMode.SYNC_DAEMON
         assert caps.explain == ActionMode.ASYNC_DAEMON
         assert caps.drift == ActionMode.ASYNC_DAEMON
         assert caps.pause == ActionMode.SYNC_DAEMON
-        assert caps.resume == ActionMode.SYNC_DAEMON
+        assert caps.resume == ActionMode.UNAVAILABLE
         assert caps.note_add == ActionMode.SYNC_DAEMON
         assert caps.note_list == ActionMode.SYNC_DAEMON
-        assert caps.unavailable_reasons == {}
+        assert "active" in caps.unavailable_reasons["resume"]
+
+    def test_daemon_active_gating(self):
+        caps = _compute_capabilities("daemon", "GATING", True)
+        assert caps.pause == ActionMode.SYNC_DAEMON
+        assert caps.resume == ActionMode.UNAVAILABLE
+        assert "active" in caps.unavailable_reasons["resume"]
+
+    def test_daemon_paused(self):
+        caps = _compute_capabilities("daemon", "PAUSED_FOR_HUMAN", True)
+        assert caps.inspect == ActionMode.SYNC_DAEMON
+        assert caps.resume == ActionMode.SYNC_DAEMON
+        assert caps.pause == ActionMode.UNAVAILABLE
+        assert "already paused" in caps.unavailable_reasons["pause"]
+
+    def test_daemon_terminal_guard(self):
+        caps = _compute_capabilities("daemon", "COMPLETED", True)
+        assert caps.inspect == ActionMode.SYNC_DAEMON
+        assert caps.pause == ActionMode.UNAVAILABLE
+        assert caps.resume == ActionMode.UNAVAILABLE
+        assert "not active" in caps.unavailable_reasons["resume"]
 
     def test_foreground(self):
         caps = _compute_capabilities("foreground", "RUNNING", False)

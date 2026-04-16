@@ -791,16 +791,39 @@ class DaemonServer:
         run_id = request.get("run_id", "")
         question = request.get("question", "")
         language = request.get("language", "en")
-        state, _ = self._resolve_run_store(run_id)
+        state, session_log = self._resolve_run_store(run_id)
         if state is None:
             return {"ok": False, "error": f"run {run_id} not found"}
         if not question:
             return {"ok": False, "error": "question is required"}
 
+        # Resolve store for active runs (thread-safe event writing)
+        with self._lock:
+            entry = self._runs.get(run_id)
+        store = entry.store if entry else None
+
+        def _write_event(event_type: str, payload: dict) -> None:
+            if store:
+                store.append_session_event(run_id, event_type, payload)
+            elif session_log:
+                from supervisor.operator.api import append_timeline_event
+                append_timeline_event(session_log, run_id, event_type, payload)
+
         def _job():
+            _write_event("clarification_request", {
+                "question": question, "language": language,
+            })
+
             ctx = self._build_explainer_context(run_id, language=language)
             ctx["question"] = question
-            return self._explainer.request_clarification(ctx)
+            result = self._explainer.request_clarification(ctx)
+
+            _write_event("clarification_response", {
+                "question": question,
+                "answer": result.get("answer", ""),
+                "confidence": result.get("confidence"),
+            })
+            return result
 
         job_id = self._job_tracker.submit("clarification", _job)
         return {"ok": True, "job_id": job_id}
