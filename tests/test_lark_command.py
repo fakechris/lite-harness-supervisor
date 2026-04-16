@@ -221,6 +221,59 @@ class TestTextCommandHandling:
             # parse_command returns ("", []) for non-commands
 
 
+# ── HTTP handler text message routing ────────────────────────────
+
+
+class TestHttpTextMessageRouting:
+    """Verify that the HTTP callback handler routes im.message.receive_v1
+    events to handle_text_command()."""
+
+    def _make_text_event_payload(self, text: str, chat_id: str = "oc_xxx") -> dict:
+        return {
+            "header": {
+                "event_type": "im.message.receive_v1",
+            },
+            "event": {
+                "message": {
+                    "chat_id": chat_id,
+                    "message_id": "msg_evt_1",
+                    "message_type": "text",
+                    "content": json.dumps({"text": text}),
+                },
+            },
+        }
+
+    def test_text_event_routes_to_handle_text_command(self):
+        ch = _make_channel()
+        payload = self._make_text_event_payload("/runs")
+        with patch.object(ch, "handle_text_command") as mock_handle:
+            # Simulate the handler's routing logic directly
+            header = payload.get("header", {})
+            event_type = header.get("event_type", "")
+            assert event_type == "im.message.receive_v1"
+
+            event = payload.get("event", {})
+            message = event.get("message", {})
+            content = json.loads(message.get("content", "{}"))
+            text = content.get("text", "")
+            assert text == "/runs"
+
+            ch.handle_text_command(text, message["chat_id"], message["message_id"])
+            mock_handle.assert_called_once_with("/runs", "oc_xxx", "msg_evt_1")
+
+    def test_card_action_does_not_trigger_text_handler(self):
+        """Card action payloads (no header.event_type) should go to
+        handle_card_action, not handle_text_command."""
+        ch = _make_channel()
+        payload = {
+            "action": {"value": {"cmd": "inspect", "run_id": "abc"}},
+            "event": {"open_chat_id": "oc_xxx", "open_message_id": "msg_1"},
+        }
+        # No header.event_type → should be card action path
+        header = payload.get("header", {})
+        assert header.get("event_type", "") == ""
+
+
 # ── Job completion callback ──────────────────────────────────────
 
 

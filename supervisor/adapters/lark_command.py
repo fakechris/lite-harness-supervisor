@@ -394,7 +394,7 @@ def _lark_button(label: str, cmd: str, run_id: str, btn_type: str = "default") -
 
 
 class _LarkCallbackHandler(BaseHTTPRequestHandler):
-    """Handle Lark card action callback POSTs."""
+    """Handle Lark card action callbacks and text message events."""
 
     def __init__(self, *args, channel: LarkCommandChannel, **kwargs):
         self.channel = channel
@@ -442,7 +442,37 @@ class _LarkCallbackHandler(BaseHTTPRequestHandler):
             self._respond(200, {"challenge": payload["challenge"]})
             return
 
-        # Card action callback
+        # Distinguish card action callbacks from event subscription messages.
+        # Card actions have a top-level "action" key.
+        # Event subscriptions (text messages) have "header.event_type".
+        header = payload.get("header", {})
+        event_type = header.get("event_type", "")
+
+        if event_type == "im.message.receive_v1":
+            # Text message from event subscription
+            event = payload.get("event", {})
+            message = event.get("message", {})
+            chat_id = message.get("chat_id", "")
+            message_id = message.get("message_id", "")
+            msg_type = message.get("message_type", "")
+
+            if not self.channel.auth.is_authorized(chat_id):
+                self._respond(200, {})
+                return
+
+            if msg_type == "text":
+                try:
+                    content = json.loads(message.get("content", "{}"))
+                    text = content.get("text", "")
+                except (json.JSONDecodeError, TypeError):
+                    text = ""
+                if text:
+                    self.channel.handle_text_command(text, chat_id, message_id)
+
+            self._respond(200, {})
+            return
+
+        # Card action callback (top-level "action" key)
         action = payload.get("action", {})
         action_value = action.get("value", {})
         # Extract chat_id and message_id from the event context
