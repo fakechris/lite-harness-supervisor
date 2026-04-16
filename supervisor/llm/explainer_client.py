@@ -107,6 +107,18 @@ class ExplainerClient:
             return fallback
         return self._call(prompt, context, fallback=fallback)
 
+    def request_clarification(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Answer an operator's question about a run."""
+        if self.model is None:
+            return self._stub_clarification(context)
+        fallback = self._stub_clarification(context)
+        try:
+            prompt = _load_prompt("request_clarification.txt")
+        except FileNotFoundError:
+            logger.warning("request_clarification prompt not found, falling back to stub")
+            return fallback
+        return self._call(prompt, context, fallback=fallback)
+
     # ------------------------------------------------------------------
     # LLM call
     # ------------------------------------------------------------------
@@ -273,4 +285,37 @@ class ExplainerClient:
             ],
             "recommended_action": action,
             "confidence": 0.3,
+        }
+
+    @staticmethod
+    def _stub_clarification(context: dict[str, Any]) -> dict[str, Any]:
+        state = context.get("run_state", {})
+        question = context.get("question", "")
+        lang = context.get("language", "en")
+        zh = lang == "zh"
+        top_state = state.get("top_state", "UNKNOWN")
+        current_node = state.get("current_node_id", "")
+        done = state.get("done_node_ids", [])
+
+        if zh:
+            return {
+                "answer": (
+                    f"运行当前处于 {top_state} 状态，节点: {current_node or '(无)'}。"
+                    f"已完成节点: {', '.join(done) if done else '(无)'}。"
+                    f"（stub 模式，无法深入分析您的问题: {question[:80]}）"
+                ),
+                "evidence": [f"top_state={top_state}", f"current_node={current_node}"],
+                "confidence": 0.1,
+                "follow_up": "配置 explainer_model 以获得详细分析",
+            }
+
+        return {
+            "answer": (
+                f"Run is in {top_state} state at node '{current_node or '(none)'}'. "
+                f"Completed: {', '.join(done) if done else '(none)'}. "
+                f"(stub mode — cannot deeply analyze your question: {question[:80]})"
+            ),
+            "evidence": [f"top_state={top_state}", f"current_node={current_node}"],
+            "confidence": 0.1,
+            "follow_up": "Configure explainer_model for detailed analysis",
         }

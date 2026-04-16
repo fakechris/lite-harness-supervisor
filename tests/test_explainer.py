@@ -242,3 +242,28 @@ class TestJobTracker:
         assert d["kind"] == "explain_run"
         assert d["status"] == "completed"
         assert d["result"]["explanation"] == "ok"
+
+
+# ── Clarification stub tests ────────────────────────────────────
+
+
+class TestClarificationStub:
+    def test_stub_en(self):
+        client = ExplainerClient(model=None)
+        ctx = _make_context()
+        ctx["question"] = "why is step_1 taking so long?"
+        result = client.request_clarification(ctx)
+        assert "answer" in result
+        assert "evidence" in result
+        assert result["confidence"] == 0.1
+        assert "step_1" in result["answer"] or "RUNNING" in result["answer"]
+        assert "why is step_1" in result["answer"]
+
+    def test_stub_zh(self):
+        client = ExplainerClient(model=None)
+        ctx = _make_context(language="zh")
+        ctx["question"] = "为什么暂停了？"
+        result = client.request_clarification(ctx)
+        assert "answer" in result
+        assert "状态" in result["answer"] or "运行" in result["answer"]
+        assert "为什么暂停了" in result["answer"]

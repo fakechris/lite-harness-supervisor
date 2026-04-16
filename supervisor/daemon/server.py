@@ -292,6 +292,8 @@ class DaemonServer:
             response = self._do_explain_exchange(request)
         elif action == "assess_drift":
             response = self._do_assess_drift(request)
+        elif action == "request_clarification":
+            response = self._do_request_clarification(request)
         elif action == "get_job":
             response = self._do_get_job(request.get("job_id", ""))
         elif action == "ping":
@@ -750,12 +752,13 @@ class DaemonServer:
             try:
                 spec_data = load_spec(spec_path)
                 acceptance = getattr(spec_data, "acceptance", None)
+                all_nodes = getattr(spec_data, "nodes", []) or getattr(spec_data, "steps", [])
                 ctx["spec_context"] = {
                     "id": getattr(spec_data, "id", ""),
                     "goal": getattr(spec_data, "goal", ""),
                     "nodes": [
                         {"id": n.id, "objective": getattr(n, "objective", "")}
-                        for n in getattr(spec_data, "nodes", [])
+                        for n in all_nodes
                     ],
                     "required_evidence": getattr(acceptance, "required_evidence", []) if acceptance else [],
                     "forbidden_states": getattr(acceptance, "forbidden_states", []) if acceptance else [],
@@ -832,6 +835,24 @@ class DaemonServer:
             return self._explainer.assess_drift(ctx)
 
         job_id = self._job_tracker.submit("assess_drift", _job)
+        return {"ok": True, "job_id": job_id}
+
+    def _do_request_clarification(self, request: dict) -> dict:
+        run_id = request.get("run_id", "")
+        question = request.get("question", "")
+        language = request.get("language", "en")
+        state, _ = self._resolve_run_store(run_id)
+        if state is None:
+            return {"ok": False, "error": f"run {run_id} not found"}
+        if not question:
+            return {"ok": False, "error": "question is required"}
+
+        def _job():
+            ctx = self._build_explainer_context(run_id, language=language)
+            ctx["question"] = question
+            return self._explainer.request_clarification(ctx)
+
+        job_id = self._job_tracker.submit("clarification", _job)
         return {"ok": True, "job_id": job_id}
 
     def _do_get_job(self, job_id: str) -> dict:

@@ -11,6 +11,7 @@ from supervisor.operator.tui import (
     format_explanation,
     format_exchange,
     format_notes,
+    format_clarification,
     collect_runs,
 )
 
@@ -208,6 +209,26 @@ class TestFormatNotes:
     def test_empty_notes(self):
         lines = format_notes([])
         assert "(no notes)" in "\n".join(lines)
+
+
+class TestFormatClarification:
+    def test_with_answer(self):
+        result = {
+            "answer": "The run paused because verification failed on step_2",
+            "evidence": ["top_state=PAUSED_FOR_HUMAN", "last_event=verification_failed"],
+            "confidence": 0.7,
+            "follow_up": "Check the verification criteria",
+        }
+        lines = format_clarification(result)
+        text = "\n".join(lines)
+        assert "Answer:" in text
+        assert "verification failed" in text
+        assert "Evidence:" in text
+        assert "Follow-up:" in text
+
+    def test_empty_result(self):
+        lines = format_clarification({})
+        assert "(no answer)" in "\n".join(lines)
 
 
 class TestCollectRunsLocal:
