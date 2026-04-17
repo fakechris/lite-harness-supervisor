@@ -1,8 +1,10 @@
 # thin-supervisor
 
+[![PyPI version](https://img.shields.io/pypi/v/thin-supervisor)](https://pypi.org/project/thin-supervisor/)
+
 **Long-running AI coding tasks fail silently.** The agent asks "should I continue?", you're not watching, and the task stalls. Or worse — the agent says "done" but didn't actually pass the tests.
 
-thin-supervisor fixes this. It's an acceptance-centered run supervisor that sits alongside your existing coding agent (Claude Code, Codex, or any CLI agent), watches what the agent does, and makes structured decisions: continue, verify, retry, branch, escalate, or finish. "Done" means the verifier passed and the acceptance contract is satisfied — not that the agent said so. You stay in your familiar agent UI. The supervisor handles the rest.
+thin-supervisor fixes this. It's an acceptance-centered run supervisor that sits alongside your existing coding agent (Claude Code, Codex, or any CLI agent), watches what the agent does, and makes structured decisions: continue, re-inject, verify, retry, branch, recover, escalate, or finish. "Done" means the verifier passed and the acceptance contract is satisfied — not that the agent said so. You stay in your familiar agent UI. The supervisor handles the rest.
 
 > **Architecture deep-dive**: See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the six-layer architecture, first-class objects, and design principles.
 >
@@ -15,6 +17,23 @@ thin-supervisor fixes this. It's an acceptance-centered run supervisor that sits
 > - [docs/design/p4-jsonl-observation.md](docs/design/p4-jsonl-observation.md) — transcript-backed observation mode
 > - [docs/reviews/2026-04-11-deep-code-review.md](docs/reviews/2026-04-11-deep-code-review.md) — latest deep code review log and remaining-risk audit
 > - [docs/reviews/2026-04-12-amp-supervisor-capability-review.md](docs/reviews/2026-04-12-amp-supervisor-capability-review.md) — Amp-vs-thin-supervisor capability review and oracle-layer roadmap
+
+## Current Status (0.3.2)
+
+- **Global-first observability is live.** `status`, `dashboard`, `tui`, and `observe` now read from one canonical session index, so runs stay visible across worktrees even after daemon idle shutdown.
+- **The runtime state machine is split by intent.** `ATTACHED`, `RECOVERY_NEEDED`, and `pause_class` now distinguish attach-boundary tightening, operational recovery, and true human-owned pauses.
+- **Operator IM channels are live.** Telegram and Lark/Feishu provider instances are merged into one logical command surface per bot/app, with one inbound owner and multi-target outbound delivery.
+- **tmux injection is harder to wedge.** A readiness gate now checks whether the pane is still changing, actively typing, or actually idle before issuing `send-keys`.
+- **The policy-tuning loop is end-to-end.** `thin-supervisor-dev eval` now covers compare, canary, candidate review/status, gating, promotion, and the one-command `eval improve` wrapper.
+
+## Install from PyPI
+
+```bash
+pip install -U thin-supervisor
+thin-supervisor skill install
+```
+
+`pip install -U thin-supervisor` gets the runtime CLI from PyPI. `thin-supervisor skill install` then installs the Codex / Claude skills into your local agent environment.
 
 ```text
 ┌────────────────────────────┐  ┌──────────────────────────┐
@@ -139,10 +158,12 @@ clarify/approve step is part of the contract.
 2. Agent emits a `<checkpoint>` block after completing work
 3. Supervisor parses the checkpoint and makes a gate decision:
    - **Continue** — agent is making progress, don't interrupt
+   - **Re-inject** — run is attached but the first checkpoint still only cites attach/spec/admin work, so tighten the current-node instruction
    - **Verify** — agent says step is done, run the verifier
    - **Retry** — verification failed, inject retry instruction with failure details
    - **Branch** — decision node in workflow, select a path
-   - **Escalate** — missing credentials, dangerous action, or low confidence — pause for human
+   - **Recover** — delivery/session-health fault; supervisor attempts bounded auto-recovery before surfacing it
+   - **Escalate** — missing credentials, dangerous action, explicit review, or low confidence — pause for human
    - **Finish** — all steps done, all verifiers pass, finish policy and review requirements satisfied
 4. If continuing or retrying, supervisor injects the next instruction into the pane
 5. Run-level decisions are logged to `session_log.jsonl`; project-level bootstrap and repair incidents are logged to `.supervisor/runtime/ops_log.jsonl`
@@ -195,7 +216,7 @@ pause_handling_mode: notify_then_ai
 max_auto_interventions: 2
 ```
 
-Future delivery targets such as Feishu or Telegram plug into the same channel interface in `supervisor/notifications.py`.
+Built-in notification channels today are `tmux_display`, `jsonl`, `telegram`, and `lark`. Telegram and Lark can also run in command mode through `OperatorChannelHost`, which merges provider-instance config into one logical command surface with a single inbound owner.
 
 ## Checkpoint Protocol
 
@@ -223,6 +244,8 @@ question_for_supervisor:
 
 The Codex/Claude Code Skills teach agents this protocol automatically.
 
+For a newly attached node, the **first** checkpoint must cite execution evidence for the current node's objective. Clarify/spec/attach/baseline artifacts are prior-phase work and do not count as execution progress on the newly injected node.
+
 ## Verification Types
 
 | Type | Fields | Description |
@@ -239,6 +262,7 @@ All verifiers run in the agent's working directory (pane cwd), not the superviso
 ```bash
 thin-supervisor init [--force|--repair]                   # Create or repair .supervisor/ directory
 thin-supervisor deinit [--force]                           # Remove .supervisor/
+thin-supervisor bootstrap                                  # Init + daemon + surface validation fast path
 
 thin-supervisor daemon start [--config <path>]             # Start background daemon
 thin-supervisor daemon stop                                # Stop daemon
@@ -258,6 +282,8 @@ thin-supervisor spec approve --spec <spec> [--by human]
 thin-supervisor status                                     # Every run across every known worktree (global-first)
 thin-supervisor status --local                             # Restrict to the current worktree only
 thin-supervisor list                                       # Detailed active-run view
+thin-supervisor dashboard                                  # Interactive dashboard with drill-in
+thin-supervisor tui                                        # Operator TUI with explain/drift/pause actions
 thin-supervisor ps                                         # Registered daemon processes across worktrees
 thin-supervisor pane-owner <pane>                          # Show which run owns a pane
 thin-supervisor observe <run_id>                           # Read-only snapshot; works even when no daemon is live
@@ -267,6 +293,7 @@ thin-supervisor note list [--type ...] [--run ...]
 thin-supervisor session detect                             # Detect current agent session ID
 thin-supervisor session jsonl                              # Resolve current transcript path
 thin-supervisor session list                               # List recent sessions and cwd
+thin-supervisor config set <key> <value>                   # Persist config updates
 
 thin-supervisor skill install                              # Install Codex / Claude skills
 thin-supervisor bridge <action> [args]                     # tmux bridge operations
