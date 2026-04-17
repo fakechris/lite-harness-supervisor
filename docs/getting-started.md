@@ -81,10 +81,18 @@ If a spec is still in `approval.status: draft`, execution commands reject it unt
 In another terminal:
 
 ```bash
-# See all active runs
+# See every run known to the harness — across all worktrees —
+# even when no daemon is currently running in this directory.
+# status is global-first: it reads the canonical session index.
 thin-supervisor status
 
-# See every registered daemon across worktrees
+# Restrict to the current worktree only (skip known_worktrees,
+# live daemons elsewhere, and linked git worktrees).
+thin-supervisor status --local
+
+# Process-oriented: list registered daemon processes.
+# `ps` answers "which daemons are alive?" — `status` answers
+# "which runs exist?". They are not redundant.
 thin-supervisor ps
 
 # Detailed active-run view
@@ -93,7 +101,9 @@ thin-supervisor list
 # See who owns a specific pane
 thin-supervisor pane-owner %0
 
-# Observe a specific run without attaching to the pane
+# Read-only observation of a run. Works from any cwd and for
+# orphaned runs with no live daemon — state + events come from
+# the run's own disk when the daemon is gone.
 thin-supervisor observe <run_id>
 
 # Shared collaboration notes

@@ -255,11 +255,12 @@ thin-supervisor run replay <run_id> [--json]
 thin-supervisor run postmortem <run_id> [--output file]
 thin-supervisor spec approve --spec <spec> [--by human]
 
-thin-supervisor status                                     # Active runs in current worktree
+thin-supervisor status                                     # Every run across every known worktree (global-first)
+thin-supervisor status --local                             # Restrict to the current worktree only
 thin-supervisor list                                       # Detailed active-run view
-thin-supervisor ps                                         # Registered daemons across worktrees
+thin-supervisor ps                                         # Registered daemon processes across worktrees
 thin-supervisor pane-owner <pane>                          # Show which run owns a pane
-thin-supervisor observe <run_id>                           # Read-only observation snapshot
+thin-supervisor observe <run_id>                           # Read-only snapshot; works even when no daemon is live
 thin-supervisor note add <text> [--type ...] [--run ...]  # Shared notes for coordination
 thin-supervisor note list [--type ...] [--run ...]
 
@@ -301,6 +302,23 @@ thin-supervisor-dev oracle consult --question "..." [--file path ...]
 Add `--save-report` to `run`, `replay`, `compare`, `canary`, `propose`, `review-candidate`, `gate-candidate`, `promote-candidate`, or `improve` to persist a JSON report under `.supervisor/evals/reports/`. When used with `eval propose`, `thin-supervisor-dev` also writes a candidate-lineage manifest under `.supervisor/evals/candidates/`, `eval review-candidate` turns that manifest back into a bounded human review summary, `eval candidate-status` assembles the manifest, latest related reports, and promotion-registry state into one lifecycle dossier, `eval gate-candidate` combines compare plus optional canary signals into a promotion recommendation, and `eval promote-candidate` records an approved promotion in `.supervisor/evals/promotions.jsonl`. `eval improve` is the one-command wrapper for this path: it runs propose -> review/status -> gate and only promotes when `--approved-by` is supplied and the gate allows promotion (or `--force` is used).
 
 If a daemon-managed run pauses, `status` and `list` now show the human-readable reason and the suggested next command. For non-active persisted runs, the same hint appears under `Local state found:`.
+
+### Global observability plane
+
+`status`, `dashboard`, and `tui` all read from a single canonical session index (`supervisor/operator/session_index.py`) that unions discovery across:
+
+- the current cwd
+- `list_known_worktrees()` (persisted registry, survives daemon/pane shutdown)
+- live daemon cwds
+- live pane-owner cwds
+- `git worktree list` for the current repo (read-only)
+
+As a result:
+
+- Every operator read surface sees the same run universe. If `status` shows a run, `dashboard` and `tui` see it too, and vice versa.
+- A run that outlives its daemon (persisted to disk, daemon idle-shutdown) stays visible from any cwd — it tags as `orphaned` instead of disappearing.
+- `observe <run_id>` resolves globally. When no daemon is live for the run, it reads the snapshot and recent events directly from the run's on-disk state + `session_log.jsonl`, so a paused run in a child worktree is still inspectable from the root workspace.
+- `status --local` narrows the view to the current worktree; `ps` is process-oriented (which daemon processes are alive) and is distinct from run-oriented `status`.
 
 `thin-supervisor-dev eval` is the first offline evaluation surface for the new skill-evolution work. Bundled suites now cover more than approval copy: `approval-core` checks explicit approval vs re-ask behavior, `approval-adversarial` covers tricky mixed signals and repeat-approval cases, `clarify-contract-core` checks whether the system locks the right delivery contract instead of silently narrowing “real UAT” work into a mock/dev baseline, `routing-core` checks deterministic `step_done/workflow_done -> VERIFY_STEP` routing, `escalation-core` checks `blocked -> ESCALATE_TO_HUMAN`, `finish-gate-core` checks reviewer and completion contracts, and `pause-ux-core` checks externally visible pause/completion summaries. `thin-supervisor-dev eval replay --run-id ...` wraps the existing history replay path into the same evaluation surface so policy candidates can be checked against real historical traces. `thin-supervisor-dev eval compare ...` adds a blind `A/B`-style comparator over deterministic suite results so baseline and candidate policies can be compared without hard-coding one output format into the report consumer. `thin-supervisor-dev eval canary ...` aggregates replay pass-rate, mismatch kinds, and friction over a set of real runs so shadow-canary promotion decisions become a command instead of a checklist; when you pass `--candidate-id`, the same command also records a rollout attempt under `.supervisor/evals/rollouts.jsonl`. `thin-supervisor-dev eval expand ...` generates provenance-tagged synthetic variants from the golden suite so coverage can grow without mutating the original contract set. `thin-supervisor-dev eval propose ...` is the constrained candidate-generator surface: it summarizes failure cases, consults the advisory/self-review layer, recommends a policy candidate for a stated objective without automatically changing shipped defaults, and can persist a candidate-lineage manifest for later comparison and promotion review. `thin-supervisor-dev eval review-candidate ...` loads one of those manifests and emits the bounded human-review summary for the next promotion step. `thin-supervisor-dev eval candidate-status ...` turns the manifest, related eval reports, promotion-registry state, and recorded rollout attempts into one lifecycle dossier. `thin-supervisor-dev eval rollout-history ...` exposes the rollout ledger directly. `thin-supervisor-dev eval gate-candidate ...` then combines that bounded review with deterministic compare output and optional real-run canary signals before a human decides whether to promote. `thin-supervisor-dev eval improve ...` is the current-main-native convenience wrapper around that same flow, so the old “proposal improvement loop” UX exists without reviving a parallel implementation. `thin-supervisor-dev eval promote-candidate ...` records an approved promotion in the promotion registry so candidate history and current promoted policies are queryable later.
 
