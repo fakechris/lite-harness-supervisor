@@ -1,0 +1,294 @@
+"""Canonical global session collector.
+
+Produces one normalized SessionRecord per run across every discoverable
+worktree.  Every operator read surface (status, dashboard, tui, observe)
+must consume this collector so they all see the same session universe.
+
+See docs/plans/2026-04-16-global-observability-plane-for-per-worktree-runtime.md.
+
+Discovery sources (union, deduped by resolved path):
+  1. current cwd
+  2. `list_known_worktrees()` — persists across daemon/pane shutdown
+  3. live daemon registry cwds
+  4. live pane-owner registry cwds
+  5. `git worktree list` for the current repo, when available (read-only)
+
+Liveness classification:
+  - is_live       — a daemon owns this worktree, OR a pane owner holds
+                    this run's pane lock
+  - is_completed  — top_state in {COMPLETED, FAILED, ABORTED}
+  - is_orphaned   — persisted in an active-ish state without an owner
+
+Read-only: the collector never mutates state, never heals runs, never
+writes files.  It only surfaces what already exists on disk.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from supervisor.global_registry import (
+    list_daemons,
+    list_known_worktrees,
+    list_pane_owners,
+)
+from supervisor.pause_summary import summarize_state
+
+_RUNTIME_SUBPATH = Path(".supervisor") / "runtime" / "runs"
+
+_LIVE_STATES = {"RUNNING", "GATING", "VERIFYING"}
+_COMPLETED_STATES = {"COMPLETED", "FAILED", "ABORTED"}
+
+
+@dataclass(frozen=True)
+class SessionRecord:
+    """Normalized session record consumed by every operator read surface."""
+
+    run_id: str
+    worktree_root: str
+    spec_path: str
+    controller_mode: str  # "daemon" | "foreground" | "local"
+    top_state: str
+    current_node: str
+    pane_target: str
+    daemon_socket: str
+    is_live: bool
+    is_orphaned: bool
+    is_completed: bool
+    pause_reason: str
+    next_action: str
+    last_checkpoint_summary: str
+    last_update_at: str
+    tag: str = ""  # derived display tag; see _derive_tag
+
+    def as_dict(self) -> dict:
+        from dataclasses import asdict
+        return asdict(self)
+
+
+# ── Worktree discovery ──────────────────────────────────────────
+
+
+def _discover_git_worktrees(cwd: str) -> list[str]:
+    """Best-effort: list git worktrees linked to the current repo.
+
+    Read-only.  Returns empty list on any failure (no git, not a repo,
+    permission denied).  Enumerates paths only — does not run fetch,
+    status, or any other side-effecting subcommand.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    if proc.returncode != 0:
+        return []
+    paths: list[str] = []
+    for line in proc.stdout.splitlines():
+        if line.startswith("worktree "):
+            paths.append(line[len("worktree "):].strip())
+    return paths
+
+
+def _resolved_worktree_roots(
+    *, local_only: bool, cwd: str
+) -> list[Path]:
+    """Build the deduped, resolved union of worktree roots to scan."""
+    roots: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add(raw: str) -> None:
+        if not raw:
+            return
+        try:
+            resolved = Path(raw).resolve()
+        except (OSError, RuntimeError):
+            return
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        roots.append(resolved)
+
+    _add(cwd)
+    if local_only:
+        return roots
+
+    for wt in list_known_worktrees():
+        _add(wt)
+    for daemon in list_daemons():
+        _add(daemon.get("cwd", ""))
+    for owner in list_pane_owners():
+        _add(owner.get("cwd", ""))
+    for wt in _discover_git_worktrees(cwd):
+        _add(wt)
+    return roots
+
+
+# ── Per-worktree scanning ───────────────────────────────────────
+
+
+def _iter_run_states(worktree: Path):
+    """Yield (run_id, state_dict, last_update_at) for every run under worktree."""
+    runs_dir = worktree / _RUNTIME_SUBPATH
+    if not runs_dir.is_dir():
+        return
+    entries: list[tuple[Path, float]] = []
+    try:
+        children = list(runs_dir.iterdir())
+    except OSError:
+        return
+    for run_dir in children:
+        state_path = run_dir / "state.json"
+        if not state_path.exists():
+            continue
+        try:
+            mtime = state_path.stat().st_mtime
+        except OSError:
+            continue
+        entries.append((state_path, mtime))
+    entries.sort(key=lambda t: t[1], reverse=True)
+    for state_path, mtime in entries:
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        run_id = state.get("run_id", "")
+        if not run_id:
+            continue
+        from datetime import datetime, timezone
+        last_update_at = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+        yield run_id, state, last_update_at
+
+
+# ── Classification ──────────────────────────────────────────────
+
+
+def _derive_tag(*, is_live: bool, is_completed: bool, is_orphaned: bool,
+                top_state: str, controller_mode: str) -> str:
+    if is_live:
+        return "daemon" if controller_mode == "daemon" else "foreground"
+    if is_completed:
+        return "completed"
+    if top_state == "PAUSED_FOR_HUMAN":
+        return "paused"
+    if is_orphaned:
+        return "orphaned"
+    return "local"
+
+
+def _liveness(
+    run_id: str,
+    worktree: Path,
+    top_state: str,
+    *,
+    daemon_by_cwd: dict[Path, dict],
+    fg_runs: dict[str, dict],
+) -> tuple[bool, bool, bool, str]:
+    """Return (is_live, is_orphaned, is_completed, daemon_socket)."""
+    is_completed = top_state in _COMPLETED_STATES
+
+    fg = fg_runs.get(run_id)
+    if fg is not None and fg.get("controller_mode") == "foreground":
+        return True, False, is_completed, ""
+
+    daemon = daemon_by_cwd.get(worktree)
+    if daemon is not None and top_state in _LIVE_STATES:
+        return True, False, is_completed, daemon.get("socket", "")
+
+    is_orphaned = (not is_completed) and top_state in _LIVE_STATES
+    return False, is_orphaned, is_completed, ""
+
+
+# ── Public API ──────────────────────────────────────────────────
+
+
+def collect_sessions(*, local_only: bool = False) -> list[SessionRecord]:
+    """Return one SessionRecord per run across every discoverable worktree.
+
+    `local_only=True` restricts to the current cwd (skipping
+    known_worktrees, daemon cwds, pane-owner cwds, and git worktrees).
+    """
+    cwd = os.getcwd()
+    roots = _resolved_worktree_roots(local_only=local_only, cwd=cwd)
+
+    daemon_by_cwd: dict[Path, dict] = {}
+    for daemon in list_daemons():
+        raw = daemon.get("cwd", "")
+        if not raw:
+            continue
+        try:
+            daemon_by_cwd[Path(raw).resolve()] = daemon
+        except (OSError, RuntimeError):
+            continue
+
+    fg_runs: dict[str, dict] = {}
+    for owner in list_pane_owners():
+        rid = owner.get("run_id", "")
+        if rid:
+            fg_runs[rid] = owner
+
+    records: list[SessionRecord] = []
+    seen: set[str] = set()
+
+    for worktree in roots:
+        for run_id, state, last_update_at in _iter_run_states(worktree):
+            if run_id in seen:
+                continue
+            seen.add(run_id)
+            top_state = state.get("top_state", "UNKNOWN")
+            controller_mode = state.get("controller_mode", "") or "local"
+            is_live, is_orphaned, is_completed, socket = _liveness(
+                run_id,
+                worktree,
+                top_state,
+                daemon_by_cwd=daemon_by_cwd,
+                fg_runs=fg_runs,
+            )
+            summary = summarize_state(state)
+            tag = _derive_tag(
+                is_live=is_live,
+                is_completed=is_completed,
+                is_orphaned=is_orphaned,
+                top_state=top_state,
+                controller_mode=controller_mode,
+            )
+            records.append(
+                SessionRecord(
+                    run_id=run_id,
+                    worktree_root=str(worktree),
+                    spec_path=state.get("spec_path", ""),
+                    controller_mode=controller_mode,
+                    top_state=top_state,
+                    current_node=state.get("current_node_id", ""),
+                    pane_target=state.get("pane_target", ""),
+                    daemon_socket=socket,
+                    is_live=is_live,
+                    is_orphaned=is_orphaned,
+                    is_completed=is_completed,
+                    pause_reason=summary.get("pause_reason", ""),
+                    next_action=summary.get("next_action", ""),
+                    last_checkpoint_summary=summary.get("status_reason", ""),
+                    last_update_at=last_update_at,
+                    tag=tag,
+                )
+            )
+    return records
+
+
+def find_session(run_id: str) -> SessionRecord | None:
+    """Return the canonical record for `run_id` or None if not found."""
+    if not run_id:
+        return None
+    for rec in collect_sessions():
+        if rec.run_id == run_id:
+            return rec
+    return None
