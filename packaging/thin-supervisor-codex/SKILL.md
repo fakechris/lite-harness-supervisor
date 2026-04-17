@@ -6,7 +6,7 @@ description: >
   Use when the user describes a complex plan, multi-step implementation,
   long-running workflow, or says "run this plan", "execute continuously",
   "don't stop until done".
-version: 0.3.1
+version: 0.3.2
 user-invocable: true
 ---
 
