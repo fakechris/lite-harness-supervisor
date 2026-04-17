@@ -259,10 +259,23 @@ def evaluate_sunset_trigger(
     # observations do not count toward the trigger" — including for the
     # surface-coverage check. A v2 emission 30 days ago does NOT satisfy
     # the trigger if the surface has only emitted v1 inside the window.
+    # Symmetrically, future-dated observations (skewed clocks, stale
+    # replay jobs tagged with a future timestamp) must not be allowed
+    # to satisfy surface coverage either — cap at reference_day.
+    #
+    # Naive datetimes are treated as UTC to stay consistent with
+    # compute_fallback_rate_trend; otherwise astimezone() on a naive
+    # datetime would either raise or silently interpret it as local
+    # time, shifting observations across day boundaries.
+    def _as_utc_date(ts):
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc).date()
+
     windowed = [
         obs
         for obs in observation_list
-        if obs.observed_at.astimezone(timezone.utc).date() >= window_start
+        if window_start <= _as_utc_date(obs.observed_at) <= reference_day
     ]
 
     trend = compute_fallback_rate_trend(
