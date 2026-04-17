@@ -251,6 +251,7 @@ class SupervisorDecision:
     next_instruction: str | None = None
     selected_branch: str | None = None
     next_node_id: str | None = None
+    reason_code: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

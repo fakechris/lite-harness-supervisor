@@ -25,6 +25,15 @@ from supervisor.interventions import AutoInterventionManager
 from supervisor.notifications import NotificationEvent, NotificationManager
 from supervisor.pause_summary import PAUSE_CLASSES, latest_human_escalation, summarize_state
 from supervisor.progress import write_progress
+from supervisor.protocol.reason_code import (
+    REC_DELIVERY_TIMEOUT,
+    REC_IDLE_TIMEOUT,
+    REC_INJECT_FAILED,
+    REC_NODE_MISMATCH_PERSISTED,
+    REC_REINJECTION_EXHAUSTED,
+    REC_RETRY_BUDGET_EXHAUSTED,
+    REC_VERIFICATION_RETRY_EXHAUSTED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +262,7 @@ class SupervisorLoop:
                     "node_id": state.current_node_id,
                     "re_inject_count": state.re_inject_count,
                     "pause_class": "recovery",
+                    "reason_code": REC_REINJECTION_EXHAUSTED,
                 })
             return
         if kind == DecisionType.RETRY.value:
@@ -270,6 +280,7 @@ class SupervisorLoop:
                     "node_id": state.current_node_id,
                     "current_attempt": state.current_attempt,
                     "pause_class": "recovery",
+                    "reason_code": REC_RETRY_BUDGET_EXHAUSTED,
                 })
             else:
                 transition_top_state(state, TopState.RUNNING, reason="retry decision")
@@ -374,6 +385,7 @@ class SupervisorLoop:
                 "node_id": state.current_node_id,
                 "verification": verification,
                 "pause_class": "recovery",
+                "reason_code": REC_VERIFICATION_RETRY_EXHAUSTED,
             })
         else:
             transition_top_state(state, TopState.RUNNING, reason="verification failed but retry budget remains")
@@ -707,6 +719,7 @@ class SupervisorLoop:
                     "injection_seq": state.last_injection_seq,
                     "delivery_state": state.delivery_state,
                     "pause_class": "recovery",
+                    "reason_code": REC_DELIVERY_TIMEOUT,
                 }
                 self.store.append_session_event(state.run_id, "delivery_ack_timeout", payload)
                 logger.warning("delivery ack timeout: no checkpoint after injection for %ds", DELIVERY_ACK_TIMEOUT)
@@ -744,6 +757,7 @@ class SupervisorLoop:
                             "idle_timeout_sec": effective_idle_timeout_sec,
                             "node_id": state.current_node_id,
                             "pause_class": "recovery",
+                            "reason_code": REC_IDLE_TIMEOUT,
                         }
                         self.store.append_event({"type": "timeout", "payload": payload})
                         self.store.append_session_event(state.run_id, "agent_idle_timeout", payload)
@@ -803,6 +817,7 @@ class SupervisorLoop:
                                 "checkpoint_node": checkpoint.current_node,
                                 "state_node": state.current_node_id,
                                 "pause_class": "recovery",
+                                "reason_code": REC_DELIVERY_TIMEOUT,
                             }
                             self.store.append_session_event(
                                 state.run_id, "observation_delivery_stalled", payload
@@ -834,6 +849,7 @@ class SupervisorLoop:
                                 "checkpoint_node": checkpoint.current_node,
                                 "state_node": state.current_node_id,
                                 "pause_class": "recovery",
+                                "reason_code": REC_NODE_MISMATCH_PERSISTED,
                             }
                             recovery_payload = self._enter_recovery(state, mismatch_payload)
                             if self._attempt_auto_intervention(spec, state, terminal, recovery_payload):
@@ -1089,6 +1105,7 @@ class SupervisorLoop:
                 "node_id": state.current_node_id,
                 "instruction_id": instruction.instruction_id,
                 "pause_class": "recovery",
+                "reason_code": REC_INJECT_FAILED,
             })
             self.store.save(state)
             return False
@@ -1135,6 +1152,7 @@ class SupervisorLoop:
                 "node_id": state.current_node_id,
                 "instruction_id": instruction.instruction_id,
                 "pause_class": "recovery",
+                "reason_code": REC_INJECT_FAILED,
             }
             # If caller threaded the spec through, try an auto-intervention
             # re-inject; otherwise fall through to a recovery-flavored human
