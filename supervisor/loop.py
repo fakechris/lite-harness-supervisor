@@ -13,6 +13,7 @@ from supervisor.domain.state_machine import FINAL_STATES, transition_top_state
 from supervisor.gates.continue_gate import ContinueGate
 from supervisor.gates.branch_gate import BranchGate
 from supervisor.gates.finish_gate import FinishGate
+from supervisor.gates.escalation import classify_for_escalation, escalation_decision
 from supervisor.gates.rules import is_admin_only_evidence
 from supervisor.llm.judge_client import JudgeClient
 from supervisor.verifiers.suite import VerifierSuite
@@ -141,11 +142,35 @@ class SupervisorLoop:
         # that make affirmative progress claims; empty/partial statuses fall
         # through to ContinueGate so their missing-status problem isn't
         # hidden behind a RE_INJECT reason string.
+        #
+        # Business escalation wins over RE_INJECT: if the first checkpoint
+        # cites admin-only evidence AND also carries a MISSING_EXTERNAL_INPUT /
+        # DANGEROUS_ACTION / BLOCKED signal in needs / question_for_supervisor
+        # OR in the agent's question payload, the correct move is
+        # ESCALATE_TO_HUMAN, not a re-inject.  ContinueGate enforces the same
+        # ordering internally — the shared `escalation` helper is the single
+        # source of truth so the two layers cannot drift again.
+        #
+        # Note: cp_status is guaranteed to be in ("working", "step_done",
+        # "workflow_done") here — the status == "blocked" case is handled above
+        # at the top of gate() with its own reason/confidence.  The classifier's
+        # BLOCKED class can still fire via pattern matches in
+        # summary/needs/evidence even when the explicit status field is not
+        # "blocked"; that shape belongs here.
         if (
             state.top_state == TopState.ATTACHED
             and cp_status in ("working", "step_done", "workflow_done")
             and is_admin_only_evidence(cp.get("evidence"))
         ):
+            question = (state.last_event or {}).get("payload", {}).get("question", "") or ""
+            esc_hit = classify_for_escalation(cp, question)
+            if esc_hit is not None:
+                return escalation_decision(
+                    esc_hit,
+                    gate_type="checkpoint_status",
+                    triggered_by_seq=triggered_by_seq,
+                    triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+                )
             return SupervisorDecision.make(
                 decision=DecisionType.RE_INJECT.value,
                 reason=(

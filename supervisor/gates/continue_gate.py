@@ -1,6 +1,7 @@
 from __future__ import annotations
 from supervisor.domain.enums import DecisionType, TopState
 from supervisor.domain.models import SupervisorDecision
+from supervisor.gates.escalation import classify_for_escalation, escalation_decision
 from supervisor.gates.rules import classify_text, classify_checkpoint, is_admin_only_evidence
 
 
@@ -18,15 +19,10 @@ class ContinueGate:
         # blocked status, that signal wins over the attach-boundary
         # re-inject — a first checkpoint with admin-only evidence AND
         # "need API key" is a legitimate business pause, not a re-inject
-        # candidate.
-        text_hit = classify_text(question)
-        cp_hit = classify_checkpoint(checkpoint)
-
-        escalation_classes = {"MISSING_EXTERNAL_INPUT", "DANGEROUS_ACTION", "BLOCKED"}
-        if text_hit in escalation_classes or cp_hit in escalation_classes:
-            hit = text_hit if text_hit in escalation_classes else cp_hit
-        else:
-            hit = text_hit or cp_hit
+        # candidate.  The shared `escalation.classify_for_escalation` helper
+        # unifies this ordering with `SupervisorLoop.gate()` so the two
+        # layers cannot drift.
+        esc_hit = classify_for_escalation(checkpoint, question)
 
         # ATTACHED-boundary guard: a CONTINUE here would advance a run whose
         # first checkpoint cited only attach/clarify/plan artifacts — exactly
@@ -34,10 +30,7 @@ class ContinueGate:
         # `current_attempt` or the global retry budget.  Placed AFTER the
         # escalation classification so escalations on the first checkpoint
         # still route to ESCALATE_TO_HUMAN below.
-        if (
-            top_state == TopState.ATTACHED.value
-            and hit not in escalation_classes
-        ):
+        if top_state == TopState.ATTACHED.value and esc_hit is None:
             cp_status = (checkpoint or {}).get("status", "")
             if cp_status == "working" and is_admin_only_evidence((checkpoint or {}).get("evidence")):
                 return SupervisorDecision.make(
@@ -49,7 +42,12 @@ class ContinueGate:
                     triggered_by_seq=triggered_by_seq,
                 )
 
-        if hit == "SOFT_CONFIRMATION":
+        # Soft confirmation: trust no-escalation affirmation ("要不要我继续",
+        # etc.) and push the agent to continue instead of pausing.
+        if esc_hit is None and (
+            classify_text(question) == "SOFT_CONFIRMATION"
+            or classify_checkpoint(checkpoint) == "SOFT_CONFIRMATION"
+        ):
             return SupervisorDecision.make(
                 decision=DecisionType.CONTINUE.value,
                 reason="soft confirmation only",
@@ -64,34 +62,9 @@ class ContinueGate:
                 ),
             )
 
-        if hit == "MISSING_EXTERNAL_INPUT":
-            return SupervisorDecision.make(
-                decision=DecisionType.ESCALATE_TO_HUMAN.value,
-                reason="missing external input",
-                gate_type="continue",
-                confidence=0.98,
-                needs_human=True,
-                triggered_by_seq=triggered_by_seq,
-            )
-
-        if hit == "DANGEROUS_ACTION":
-            return SupervisorDecision.make(
-                decision=DecisionType.ESCALATE_TO_HUMAN.value,
-                reason="dangerous irreversible action",
-                gate_type="continue",
-                confidence=0.99,
-                needs_human=True,
-                triggered_by_seq=triggered_by_seq,
-            )
-
-        if hit == "BLOCKED":
-            return SupervisorDecision.make(
-                decision=DecisionType.ESCALATE_TO_HUMAN.value,
-                reason="agent reported blocked",
-                gate_type="continue",
-                confidence=0.95,
-                needs_human=True,
-                triggered_by_seq=triggered_by_seq,
+        if esc_hit is not None:
+            return escalation_decision(
+                esc_hit, gate_type="continue", triggered_by_seq=triggered_by_seq,
             )
 
         # LLM judge fallback — returns dict, wrap it
