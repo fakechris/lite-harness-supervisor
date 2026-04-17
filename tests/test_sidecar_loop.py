@@ -1171,8 +1171,12 @@ def test_attached_admin_only_with_missing_input_text_escalates_at_loop_level(tmp
     from supervisor.domain.enums import DecisionType
     spec = load_spec("specs/examples/linear_plan.example.yaml")
 
+    # Monotonic counter for unique runtime dirs; `id(object())` can recycle
+    # addresses across sequential calls and would collide.
+    counter = iter(range(1000))
+
     def _mk_state():
-        store = StateStore(str(tmp_path / f"runtime_{id(object())}"))
+        store = StateStore(str(tmp_path / f"runtime_{next(counter)}"))
         s = store.load_or_init(spec)
         s.top_state = TopState.ATTACHED
         return SupervisorLoop(store), s
@@ -1224,6 +1228,26 @@ def test_attached_admin_only_with_missing_input_text_escalates_at_loop_level(tmp
     }
     d = loop.gate(spec, state)
     assert d.decision == DecisionType.RE_INJECT.value
+
+    # Escalation signal carried ONLY in the agent_ask question payload (not in
+    # the checkpoint fields) must still escalate.  ContinueGate classifies both
+    # checkpoint and question; the loop-level guard must match.
+    loop, state = _mk_state()
+    state.last_agent_checkpoint = {
+        "status": "working",
+        "current_node": state.current_node_id,
+        "summary": "attached and reviewed plan",
+        "evidence": [
+            {"attach": "tmux://alpha"},
+            {"plan": "drafted step order"},
+        ],
+    }
+    state.last_event = {
+        "type": "agent_ask",
+        "payload": {"question": "need access credentials to upstream API"},
+    }
+    d = loop.gate(spec, state)
+    assert d.decision == DecisionType.ESCALATE_TO_HUMAN.value
 
 
 def test_attached_step_done_real_evidence_verifies(tmp_path):
