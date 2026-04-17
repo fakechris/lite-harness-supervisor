@@ -2,9 +2,11 @@ from enum import Enum
 
 class TopState(str, Enum):
     READY = "READY"
+    ATTACHED = "ATTACHED"
     RUNNING = "RUNNING"
     GATING = "GATING"
     VERIFYING = "VERIFYING"
+    RECOVERY_NEEDED = "RECOVERY_NEEDED"
     PAUSED_FOR_HUMAN = "PAUSED_FOR_HUMAN"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
@@ -22,6 +24,7 @@ class DeliveryState(str, Enum):
 class DecisionType(str, Enum):
     CONTINUE = "CONTINUE"
     RETRY = "RETRY"
+    RE_INJECT = "RE_INJECT"
     VERIFY_STEP = "VERIFY_STEP"
     ADVANCE_STEP = "ADVANCE_STEP"
     BRANCH = "BRANCH"

@@ -13,6 +13,7 @@ from supervisor.domain.state_machine import FINAL_STATES, transition_top_state
 from supervisor.gates.continue_gate import ContinueGate
 from supervisor.gates.branch_gate import BranchGate
 from supervisor.gates.finish_gate import FinishGate
+from supervisor.gates.rules import is_admin_only_evidence
 from supervisor.llm.judge_client import JudgeClient
 from supervisor.verifiers.suite import VerifierSuite
 from supervisor.adapters.transcript_adapter import TranscriptAdapter
@@ -21,7 +22,7 @@ from supervisor.gates.supervision_policy import SupervisionPolicyEngine
 from supervisor.history import latest_oracle_consultation_id_for_run
 from supervisor.interventions import AutoInterventionManager
 from supervisor.notifications import NotificationEvent, NotificationManager
-from supervisor.pause_summary import latest_human_escalation, summarize_state
+from supervisor.pause_summary import PAUSE_CLASSES, latest_human_escalation, summarize_state
 from supervisor.progress import write_progress
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ def build_context(spec, state) -> dict:
     return {
         "spec_id": spec.id,
         "current_node_id": state.current_node_id,
+        "top_state": state.top_state.value,
         "last_agent_question": state.last_event.get("payload", {}).get("question", ""),
         "last_agent_checkpoint": state.last_agent_checkpoint,
         "done_node_ids": state.done_node_ids,
@@ -43,6 +45,13 @@ def build_context(spec, state) -> dict:
             "used_global": state.retry_budget.used_global,
         },
     }
+
+
+# Upper bound on attach-boundary re-injections before falling through to a
+# recovery pause. If the agent keeps emitting admin-only checkpoints after
+# this many re-injects, the supervisor stops retrying and surfaces a recovery
+# pause so an operator can look at the pane.
+MAX_RE_INJECTS = 3
 
 
 class SupervisorLoop:
@@ -69,8 +78,18 @@ class SupervisorLoop:
 
     def handle_event(self, state, event):
         state.last_event = event
+        # States where an arriving checkpoint must NOT force a transition to
+        # GATING. RECOVERY_NEEDED belongs here: its allowed transitions are
+        # only RUNNING / PAUSED_FOR_HUMAN / terminals (see
+        # `supervisor/domain/state_machine.py`), so re-entering GATING would
+        # raise InvalidTopStateTransition. In practice a run only lands in
+        # RECOVERY_NEEDED persistently if the sidecar crashed between
+        # `_enter_recovery()` and its follow-up transition — without this
+        # guard a resume in that condition becomes a permanent crash loop.
         preserve_state = {
+            TopState.ATTACHED,
             TopState.VERIFYING,
+            TopState.RECOVERY_NEEDED,
             TopState.PAUSED_FOR_HUMAN,
             TopState.COMPLETED,
             TopState.FAILED,
@@ -101,6 +120,8 @@ class SupervisorLoop:
         cp = state.last_agent_checkpoint or {}
         cp_status = cp.get("status", "")
 
+        # `blocked` always wins: an agent asking for external input is a
+        # legitimate human pause regardless of attach state.
         if cp_status == "blocked":
             return SupervisorDecision.make(
                 decision=DecisionType.ESCALATE_TO_HUMAN.value,
@@ -111,6 +132,33 @@ class SupervisorLoop:
                 triggered_by_seq=triggered_by_seq,
                 triggered_by_checkpoint_id=triggered_by_checkpoint_id,
             )
+
+        # ATTACHED-boundary guard runs BEFORE the step_done / workflow_done
+        # short-circuits.  A first checkpoint claiming step_done/workflow_done
+        # with admin-only evidence would otherwise skip straight to
+        # VERIFY_STEP, bypassing the first-execution gate entirely — exactly
+        # the escape hatch the gate is meant to close. Limited to statuses
+        # that make affirmative progress claims; empty/partial statuses fall
+        # through to ContinueGate so their missing-status problem isn't
+        # hidden behind a RE_INJECT reason string.
+        if (
+            state.top_state == TopState.ATTACHED
+            and cp_status in ("working", "step_done", "workflow_done")
+            and is_admin_only_evidence(cp.get("evidence"))
+        ):
+            return SupervisorDecision.make(
+                decision=DecisionType.RE_INJECT.value,
+                reason=(
+                    f"attached: first checkpoint claims {cp_status!r} with no "
+                    f"execution evidence on current_node"
+                ),
+                gate_type="checkpoint_status",
+                confidence=0.95,
+                needs_human=False,
+                triggered_by_seq=triggered_by_seq,
+                triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+            )
+
         if cp_status == "step_done":
             return SupervisorDecision.make(
                 decision=DecisionType.VERIFY_STEP.value,
@@ -152,12 +200,38 @@ class SupervisorLoop:
             kind = decision.decision.upper()
 
         if kind == DecisionType.CONTINUE.value:
+            state.re_inject_count = 0
             transition_top_state(state, TopState.RUNNING, reason="continue decision")
             return
         if kind == DecisionType.VERIFY_STEP.value:
+            state.re_inject_count = 0
             transition_top_state(state, TopState.VERIFYING, reason="verify_step decision")
             return
+        if kind == DecisionType.RE_INJECT.value:
+            # Attach-boundary re-inject: MUST NOT touch current_attempt or the
+            # retry budget — this is the whole point of having RE_INJECT as a
+            # separate decision from RETRY.  The run stays in ATTACHED so the
+            # next checkpoint also gets first-execution-evidence scrutiny.
+            state.re_inject_count += 1
+            # Cap unbounded loops: if the agent keeps emitting admin-only
+            # checkpoints after MAX_RE_INJECTS re-injections, stop trying and
+            # surface a recovery pause so an operator can intervene. Without
+            # this cap, RE_INJECT can loop forever (the agent is responsive,
+            # so the delivery-ack timeout never fires).
+            if state.re_inject_count > MAX_RE_INJECTS:
+                self._pause_for_human(state, {
+                    "reason": (
+                        f"re-inject exhausted after {MAX_RE_INJECTS} attempts: "
+                        f"agent keeps returning admin-only checkpoints for "
+                        f"node {state.current_node_id}"
+                    ),
+                    "node_id": state.current_node_id,
+                    "re_inject_count": state.re_inject_count,
+                    "pause_class": "recovery",
+                })
+            return
         if kind == DecisionType.RETRY.value:
+            state.re_inject_count = 0
             state.current_attempt += 1
             state.retry_budget.used_global += 1
             if (state.current_attempt >= state.retry_budget.per_node
@@ -170,6 +244,7 @@ class SupervisorLoop:
                     ),
                     "node_id": state.current_node_id,
                     "current_attempt": state.current_attempt,
+                    "pause_class": "recovery",
                 })
             else:
                 transition_top_state(state, TopState.RUNNING, reason="retry decision")
@@ -187,10 +262,9 @@ class SupervisorLoop:
             transition_top_state(state, TopState.RUNNING, reason="branch decision")
             return
         if kind == DecisionType.ESCALATE_TO_HUMAN.value:
-            self._pause_for_human(
-                state,
-                decision.to_dict() if hasattr(decision, "to_dict") else decision,
-            )
+            pause_payload = decision.to_dict() if hasattr(decision, "to_dict") else dict(decision)
+            pause_payload["pause_class"] = self._classify_gate_escalation(decision)
+            self._pause_for_human(state, pause_payload)
             # Create RoutingDecision for audit trail
             decision_id = (
                 decision.decision_id if hasattr(decision, "decision_id")
@@ -226,7 +300,9 @@ class SupervisorLoop:
                     next_action=f"thin-supervisor run summarize {state.run_id}",
                 )
             else:
-                self._pause_for_human(state, finish)
+                # Finish gate rejected — evidence insufficient for completion.
+                # Operator reviews the finish proof, not the session health.
+                self._pause_for_human(state, {**finish, "pause_class": "review"})
             return
         raise ValueError(f"unsupported decision: {kind}")
 
@@ -248,7 +324,7 @@ class SupervisorLoop:
                         next_action=f"thin-supervisor run summarize {state.run_id}",
                     )
                 else:
-                    self._pause_for_human(state, finish)
+                    self._pause_for_human(state, {**finish, "pause_class": "review"})
             else:
                 state.current_node_id = next_id
                 state.current_attempt = 0
@@ -272,6 +348,7 @@ class SupervisorLoop:
                 ),
                 "node_id": state.current_node_id,
                 "verification": verification,
+                "pause_class": "recovery",
             })
         else:
             transition_top_state(state, TopState.RUNNING, reason="verification failed but retry budget remains")
@@ -289,6 +366,18 @@ class SupervisorLoop:
 
     def _pause_for_human(self, state, payload: dict | None = None) -> dict:
         details = dict(payload or {})
+        pclass = str(details.get("pause_class", "")).strip().lower()
+        if pclass not in PAUSE_CLASSES:
+            # Every pause path must declare its class. Silent defaults here
+            # would re-hide the business-vs-recovery split we are explicitly
+            # trying to surface. If this raises in production, the caller
+            # forgot to tag a new pause site — tag it, don't widen the
+            # fallback.
+            raise ValueError(
+                f"_pause_for_human requires payload['pause_class'] ∈ {PAUSE_CLASSES}; "
+                f"got {details.get('pause_class')!r}"
+            )
+        details["pause_class"] = pclass
         transition_top_state(state, TopState.PAUSED_FOR_HUMAN, reason="paused for human")
         state.human_escalations.append(details)
         summary = summarize_state(state.to_dict())
@@ -308,8 +397,57 @@ class SupervisorLoop:
             workspace_root=state.workspace_root,
             surface_type=state.surface_type,
             delivery_state=state.delivery_state,
+            pause_class=pclass,
         ))
         return event_payload
+
+    def _enter_recovery(self, state, payload: dict | None = None) -> dict:
+        """Record a recovery-needed transition.
+
+        Mirrors `_pause_for_human` but targets `RECOVERY_NEEDED` — the
+        supervisor owns the run from here and a live auto-intervention recipe
+        will be attempted. If that recipe fails, the caller is responsible
+        for falling through to `_pause_for_human(pause_class='recovery')`.
+
+        Deliberately does NOT fire an operator notification. The whole point
+        of RECOVERY_NEEDED is "do not wake a human yet" — observability
+        surfaces read the session event log directly.
+        """
+        details = dict(payload or {})
+        pclass = str(details.get("pause_class", "")).strip().lower()
+        if pclass != "recovery":
+            raise ValueError(
+                f"_enter_recovery requires pause_class='recovery'; got {details.get('pause_class')!r}"
+            )
+        details["pause_class"] = pclass
+        transition_top_state(state, TopState.RECOVERY_NEEDED, reason="recovery needed")
+        self.store.append_session_event(state.run_id, "recovery_needed", details)
+        return details
+
+    @staticmethod
+    def _classify_gate_escalation(decision) -> str:
+        """Derive pause_class for an ESCALATE_TO_HUMAN gate decision.
+
+        The gate issues one enum value but the human reason behind it can be
+        business, safety, or review. We inspect the reason text; fall back to
+        `business` (the most common non-recovery escalate trigger per
+        `skills/thin-supervisor/references/escalation-rules.md`).
+        """
+        if hasattr(decision, "reason"):
+            reason = str(decision.reason or "")
+        elif isinstance(decision, dict):
+            reason = str(decision.get("reason", "") or "")
+        else:
+            reason = ""
+        lowered = reason.lower()
+        if reason.startswith("requires review by:") or "insufficient evidence" in lowered:
+            return "review"
+        if any(
+            word in lowered
+            for word in ("dangerous", "destructive", "irreversible", "authorization")
+        ):
+            return "safety"
+        return "business"
 
     def _notify_transition(self, state, *, event_type: str, reason: str, next_action: str) -> None:
         payload = {
@@ -470,9 +608,12 @@ class SupervisorLoop:
         policy = self.policy_engine.determine(self.worker_profile, contract, state)
         logger.info("supervision policy: %s (%s)", policy.mode, policy.reason)
 
-        # READY → RUNNING: inject first instruction
+        # READY → ATTACHED: inject first instruction. ATTACHED gates the first
+        # checkpoint — a CONTINUE requires real execution evidence on the
+        # current node, not clarify/plan/attach artifacts. Fresh register only;
+        # resume paths skip this branch and keep their existing top_state.
         if state.top_state == TopState.READY:
-            transition_top_state(state, TopState.RUNNING, reason="initial handoff")
+            transition_top_state(state, TopState.ATTACHED, reason="initial handoff")
             self.store.save(state)
             pending_text = terminal.read(lines=read_lines)
             # Only parse the LAST checkpoint in the pane to avoid stale ones
@@ -504,12 +645,13 @@ class SupervisorLoop:
                         triggered_by_decision_id="",
                         trigger_type="init",
                         policy=policy,
+                        first_node_delivery=True,
                     )
                     state.last_injected_node_id = state.current_node_id
                     state.last_injected_attempt = 0
                     state.last_injection_seq = state.checkpoint_seq
                     self.store.save(state)
-                    if not self._inject_or_pause(state, terminal, instruction):
+                    if not self._inject_or_pause(state, terminal, instruction, spec=spec):
                         return
                     delivery_ack_deadline = time.monotonic() + DELIVERY_ACK_TIMEOUT
                 pending_text = None
@@ -533,16 +675,19 @@ class SupervisorLoop:
                     "timeout_sec": DELIVERY_ACK_TIMEOUT,
                     "injection_seq": state.last_injection_seq,
                     "delivery_state": state.delivery_state,
+                    "pause_class": "recovery",
                 }
                 self.store.append_session_event(state.run_id, "delivery_ack_timeout", payload)
                 logger.warning("delivery ack timeout: no checkpoint after injection for %ds", DELIVERY_ACK_TIMEOUT)
-                pause_payload = self._pause_for_human(state, payload)
-                if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
+                recovery_payload = self._enter_recovery(state, payload)
+                if self._attempt_auto_intervention(spec, state, terminal, recovery_payload):
                     # Auto-intervention injected a new instruction — reset tracking
                     state.last_injection_seq = state.checkpoint_seq
                     delivery_ack_deadline = now + DELIVERY_ACK_TIMEOUT
                     self.store.save(state)
                     continue
+                # Recipe exhausted — surface to a human with recovery class
+                self._pause_for_human(state, payload)
                 self.store.save(state)
                 return
 
@@ -567,16 +712,19 @@ class SupervisorLoop:
                             "reason": f"agent idle timeout after {int(idle_for)}s without checkpoint or visible output",
                             "idle_timeout_sec": effective_idle_timeout_sec,
                             "node_id": state.current_node_id,
+                            "pause_class": "recovery",
                         }
                         self.store.append_event({"type": "timeout", "payload": payload})
                         self.store.append_session_event(state.run_id, "agent_idle_timeout", payload)
                         self.handle_event(state, {"type": "timeout", "payload": payload})
-                        pause_payload = self._pause_for_human(state, payload)
-                        if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
+                        recovery_payload = self._enter_recovery(state, payload)
+                        if self._attempt_auto_intervention(spec, state, terminal, recovery_payload):
                             last_activity_at = now
                             self.store.save(state)
                             time.sleep(effective_poll_interval)
                             continue
+                        # Recipe exhausted — surface to a human with recovery class
+                        self._pause_for_human(state, payload)
                         self.store.save(state)
                         return
                 time.sleep(effective_poll_interval)
@@ -623,6 +771,7 @@ class SupervisorLoop:
                                 "reason": reason,
                                 "checkpoint_node": checkpoint.current_node,
                                 "state_node": state.current_node_id,
+                                "pause_class": "recovery",
                             }
                             self.store.append_session_event(
                                 state.run_id, "observation_delivery_stalled", payload
@@ -649,14 +798,18 @@ class SupervisorLoop:
                         )
                         self.store.save(state)
                         if state.node_mismatch_count >= max_node_mismatch:
-                            pause_payload = self._pause_for_human(state, {
+                            mismatch_payload = {
                                 "reason": f"node mismatch persisted for {state.node_mismatch_count} checkpoints",
                                 "checkpoint_node": checkpoint.current_node,
                                 "state_node": state.current_node_id,
-                            })
-                            if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
+                                "pause_class": "recovery",
+                            }
+                            recovery_payload = self._enter_recovery(state, mismatch_payload)
+                            if self._attempt_auto_intervention(spec, state, terminal, recovery_payload):
                                 restart_loop = True
                                 break
+                            # Recipe exhausted — surface to a human with recovery class
+                            self._pause_for_human(state, mismatch_payload)
                             self.store.save(state)
                             return
                         preserve_checkpoint_buffer = True
@@ -685,8 +838,11 @@ class SupervisorLoop:
                 self.handle_event(state, event)
 
                 # 4. Gate → SupervisorDecision
+                #    ATTACHED uses the same gate as GATING so the first
+                #    checkpoint after register is gated for execution evidence
+                #    (not admin-only artifacts) before CONTINUE can advance.
                 decision: SupervisorDecision | None = None
-                if state.top_state == TopState.GATING:
+                if state.top_state in (TopState.GATING, TopState.ATTACHED):
                     decision = self.gate(
                         spec, state,
                         triggered_by_seq=checkpoint.checkpoint_seq,
@@ -701,6 +857,39 @@ class SupervisorLoop:
                         if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
                             restart_loop = True
                             break
+
+                # 4b. RE_INJECT — attach-boundary re-inject of a focused
+                # first-execution prompt.  Dedicated branch so retry-counter
+                # semantics can never leak into this path. Skipped when
+                # apply_decision already paused the run (re-inject cap
+                # exhausted) — we do not want to inject again after the
+                # recovery pause fires.
+                if (
+                    decision
+                    and decision.decision.upper() == DecisionType.RE_INJECT.value
+                    and state.top_state == TopState.ATTACHED
+                ):
+                    node = spec.get_node(state.current_node_id)
+                    re_instruction = self.composer.build(
+                        node, state,
+                        triggered_by_decision_id=decision.decision_id,
+                        trigger_type="re_inject",
+                        policy=policy,
+                        first_node_delivery=True,
+                    )
+                    state.last_injected_node_id = state.current_node_id
+                    state.last_injected_attempt = state.current_attempt
+                    state.last_injection_seq = state.checkpoint_seq
+                    self.store.save(state)
+                    if not self._inject_or_pause(state, terminal, re_instruction, spec=spec):
+                        return
+                    delivery_ack_deadline = time.monotonic() + DELIVERY_ACK_TIMEOUT
+                    logger.info(
+                        "re-injected: %s (id=%s, decision=%s)",
+                        node.id, re_instruction.instruction_id, decision.decision_id,
+                    )
+                    restart_loop = True
+                    break
 
                 # 5. Verify
                 if state.top_state == TopState.VERIFYING:
@@ -748,6 +937,7 @@ class SupervisorLoop:
                             triggered_by_decision_id=decision_id,
                             trigger_type=trigger,
                             policy=policy,
+                            first_node_delivery=(trigger in ("node_advance", "branch")),
                         )
                         if continue_guidance:
                             deferred_continue = (instruction, state.current_node_id, state.current_attempt)
@@ -758,7 +948,7 @@ class SupervisorLoop:
                         state.last_injected_attempt = state.current_attempt
                         state.last_injection_seq = state.checkpoint_seq
                         self.store.save(state)
-                        if not self._inject_or_pause(state, terminal, instruction):
+                        if not self._inject_or_pause(state, terminal, instruction, spec=spec):
                             return
                         delivery_ack_deadline = time.monotonic() + DELIVERY_ACK_TIMEOUT
                         logger.info("injected: %s (id=%s, trigger=%s)", node.id, instruction.instruction_id, trigger)
@@ -783,7 +973,7 @@ class SupervisorLoop:
                 state.last_injected_attempt = state.current_attempt
                 state.last_injection_seq = state.checkpoint_seq
                 self.store.save(state)
-                if not self._inject_or_pause(state, terminal, deferred_continue_instruction):
+                if not self._inject_or_pause(state, terminal, deferred_continue_instruction, spec=spec):
                     return
                 delivery_ack_deadline = time.monotonic() + DELIVERY_ACK_TIMEOUT
                 logger.info(
@@ -818,7 +1008,7 @@ class SupervisorLoop:
             return state.workspace_root
         return None
 
-    def _inject_or_pause(self, state, terminal, instruction) -> bool:
+    def _inject_or_pause(self, state, terminal, instruction, *, spec=None) -> bool:
         # Observation-only surfaces (e.g., JSONL) — write instruction but don't
         # pretend delivery succeeded. Record the undelivered instruction and
         # pause so a human/operator can move the run onto a delivery-capable
@@ -840,6 +1030,7 @@ class SupervisorLoop:
                 ),
                 "node_id": state.current_node_id,
                 "instruction_id": instruction.instruction_id,
+                "pause_class": "recovery",
             })
             self.store.save(state)
             return False
@@ -855,12 +1046,21 @@ class SupervisorLoop:
                 "error": str(exc),
             }
             self.store.append_session_event(state.run_id, "injection_failed", payload)
-            pause_payload = self._pause_for_human(state, {
-                "reason": str(exc),
+            inject_fail_payload = {
+                "reason": f"injection failed: {exc}",
                 "node_id": state.current_node_id,
                 "instruction_id": instruction.instruction_id,
-            })
-            self._attempt_auto_intervention(None, state, terminal, pause_payload)
+                "pause_class": "recovery",
+            }
+            # If caller threaded the spec through, try an auto-intervention
+            # re-inject; otherwise fall through to a recovery-flavored human
+            # pause (AutoInterventionManager short-circuits on spec=None).
+            if spec is not None:
+                recovery_payload = self._enter_recovery(state, inject_fail_payload)
+                if self._attempt_auto_intervention(spec, state, terminal, recovery_payload):
+                    self.store.save(state)
+                    return True
+            self._pause_for_human(state, inject_fail_payload)
             self.store.save(state)
             return False
 

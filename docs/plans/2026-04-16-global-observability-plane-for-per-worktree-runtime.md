@@ -172,11 +172,34 @@ Required fields:
   "is_orphaned": bool,
   "is_completed": bool,
   "pause_reason": str,
+  "pause_class": "business" | "safety" | "review" | "recovery" | "",
   "next_action": str,
   "last_checkpoint_summary": str,
   "last_update_at": str,
+  "tag": str,  # derived display tag, see below
 }
 ```
+
+`tag` is a derived display label (never persisted). The supervision
+state-machine redesign (2026-04-16) introduced new `TopState` values
+(`ATTACHED`, `RECOVERY_NEEDED`) and a `pause_class` taxonomy on
+escalation records (`business` / `safety` / `review` / `recovery`).
+Every read surface (status, ps, dashboard, tui, observe) renders the
+same tag set:
+
+- `completed` — terminal state (COMPLETED / FAILED / ABORTED)
+- `paused-business`, `paused-safety`, `paused-review`, `paused-recovery`
+  — PAUSED_FOR_HUMAN split by class; legacy paused runs without a class
+  render as plain `paused`
+- `attached` — fresh register / attach boundary; awaiting first
+  execution evidence for the current node (takes precedence over
+  `daemon` / `foreground`)
+- `recovery` — RECOVERY_NEEDED; supervisor is mid auto-intervention
+  (takes precedence over `daemon` / `foreground`)
+- `daemon`, `foreground` — live controllers in RUNNING / GATING /
+  VERIFYING
+- `orphaned` — persisted actionable state with no live owner
+- `local` — fallback
 
 This does **not** need to become a new source of truth file on disk.
 

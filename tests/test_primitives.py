@@ -85,6 +85,33 @@ class TestHandoffInstruction:
         assert inst.trigger_type == "init"
         assert inst.triggered_by_decision_id == "dec_xyz"
 
+    def test_composer_emits_first_node_evidence_clause(self, tmp_path):
+        """When first_node_delivery=True, the checkpoint protocol suffix must
+        call out that the first checkpoint needs real execution evidence —
+        not clarify/plan/attach/baseline artifacts."""
+        spec = load_spec("specs/examples/linear_plan.example.yaml")
+        store = StateStore(str(tmp_path / "runtime"))
+        state = store.load_or_init(spec)
+        composer = InstructionComposer()
+        node = spec.get_node("write_test")
+
+        first = composer.build(
+            node, state,
+            triggered_by_decision_id="",
+            trigger_type="init",
+            first_node_delivery=True,
+        )
+        assert "FIRST checkpoint for this node" in first.content
+        assert "Clarify, plan, spec, attach" in first.content
+
+        subsequent = composer.build(
+            node, state,
+            triggered_by_decision_id="",
+            trigger_type="continue",
+            first_node_delivery=False,
+        )
+        assert "FIRST checkpoint for this node" not in subsequent.content
+
     def test_composer_preserves_continue_guidance_for_continue_trigger(self, tmp_path):
         spec = load_spec("specs/examples/linear_plan.example.yaml")
         store = StateStore(str(tmp_path / "runtime"))

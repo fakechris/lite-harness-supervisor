@@ -129,6 +129,36 @@ def test_handle_event_preserves_verifying_state_on_new_checkpoint(tmp_path):
     assert state.top_state == TopState.VERIFYING
 
 
+def test_handle_event_preserves_recovery_needed_on_new_checkpoint(tmp_path):
+    """Regression: a checkpoint arriving while state is RECOVERY_NEEDED must
+    NOT trigger a transition to GATING. RECOVERY_NEEDED's allowed transitions
+    do not include GATING, so this would raise InvalidTopStateTransition and
+    (since the exception handler persists the pre-crash state) produce a
+    permanent crash loop after a resume."""
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    state.top_state = TopState.RECOVERY_NEEDED
+    loop = SupervisorLoop(store)
+
+    event = {
+        "type": "agent_output",
+        "payload": {
+            "checkpoint": {
+                "status": "working",
+                "current_node": "write_test",
+                "summary": "post-recovery checkpoint",
+            }
+        },
+    }
+
+    # Must not raise.
+    loop.handle_event(state, event)
+
+    assert state.last_agent_checkpoint["summary"] == "post-recovery checkpoint"
+    assert state.top_state == TopState.RECOVERY_NEEDED
+
+
 def test_apply_verification_success_advances_and_notifies(tmp_path):
     spec = load_spec("specs/examples/linear_plan.example.yaml")
     store = StateStore(str(tmp_path / "runtime"))
@@ -213,7 +243,7 @@ def test_continue_transition_is_persisted_as_continue_injection(tmp_path):
                     "current_node: write_test\n"
                     "summary: making progress\n"
                     "evidence:\n"
-                    "  - ran: echo ok\n"
+                    "  - verifier: ok\n"
                     "candidate_next_actions:\n"
                     "  - continue\n"
                     "needs:\n"
@@ -228,7 +258,7 @@ def test_continue_transition_is_persisted_as_continue_injection(tmp_path):
                     "current_node: write_test\n"
                     "summary: done\n"
                     "evidence:\n"
-                    "  - ran: echo ok\n"
+                    "  - verifier: ok\n"
                     "candidate_next_actions:\n"
                     "  - continue\n"
                     "needs:\n"
@@ -243,7 +273,7 @@ def test_continue_transition_is_persisted_as_continue_injection(tmp_path):
                     "current_node: implement_feature\n"
                     "summary: done\n"
                     "evidence:\n"
-                    "  - ran: echo ok\n"
+                    "  - verifier: ok\n"
                     "candidate_next_actions:\n"
                     "  - continue\n"
                     "needs:\n"
@@ -258,7 +288,7 @@ def test_continue_transition_is_persisted_as_continue_injection(tmp_path):
                     "current_node: final_verify\n"
                     "summary: done\n"
                     "evidence:\n"
-                    "  - ran: echo ok\n"
+                    "  - verifier: ok\n"
                     "candidate_next_actions:\n"
                     "  - continue\n"
                     "needs:\n"

@@ -335,6 +335,9 @@ class SupervisorState:
     auto_intervention_count: int = 0
     node_mismatch_count: int = 0
     last_mismatch_node_id: str = ""
+    # RE_INJECT loop bound — incremented on each attach-boundary re-inject,
+    # reset when any other decision advances the run. Cap lives in loop.py.
+    re_inject_count: int = 0
     schema_version: int = 1
 
     def to_dict(self) -> dict[str, Any]:
@@ -377,5 +380,6 @@ class SupervisorState:
             auto_intervention_count=data.get("auto_intervention_count", 0),
             node_mismatch_count=data.get("node_mismatch_count", 0),
             last_mismatch_node_id=data.get("last_mismatch_node_id", ""),
+            re_inject_count=data.get("re_inject_count", 0),
             schema_version=data.get("schema_version", 1),
         )

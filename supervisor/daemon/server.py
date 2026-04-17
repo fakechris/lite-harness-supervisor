@@ -57,6 +57,12 @@ RECOVERABLE_ORPHANED_STATES = {
     TopState.RUNNING,
     TopState.GATING,
     TopState.VERIFYING,
+    # A daemon crash mid-attach leaves the run in ATTACHED with no owner;
+    # the operator can still resume it.  Symmetric treatment for
+    # RECOVERY_NEEDED — the supervisor was mid auto-intervention and
+    # the next loop iteration will re-run the recipe.
+    TopState.ATTACHED,
+    TopState.RECOVERY_NEEDED,
 }
 
 
@@ -210,6 +216,7 @@ class DaemonServer:
                 "reason": recovery_detail,
                 "orphaned_from": previous_top_state,
                 "delivery_state_at_crash": delivery,
+                "pause_class": "recovery",
             })
             store = StateStore(str(run_dir))
             store._session_seq = store._read_last_seq()
@@ -461,7 +468,14 @@ class DaemonServer:
             # Match by spec_id + pane_target (not just pane)
             if (state_data.get("spec_id") == target_spec.id
                     and state_data.get("pane_target", "") == pane_target
-                    and state_data.get("top_state") in ("PAUSED_FOR_HUMAN", "RUNNING", "READY", "GATING", "VERIFYING")):
+                    and state_data.get("top_state") in (
+                        "PAUSED_FOR_HUMAN", "RUNNING", "READY",
+                        "GATING", "VERIFYING",
+                        # New states from the state-machine redesign: a run
+                        # stranded mid-attach or mid-recovery is still the
+                        # right target for resume.
+                        "ATTACHED", "RECOVERY_NEEDED",
+                    )):
                 run_id = state_data["run_id"]
                 resumable_state = state_data.get("top_state", "")
                 if resumable_state in {"GATING", "VERIFYING"}:
@@ -469,7 +483,7 @@ class DaemonServer:
                         "ok": False,
                         "error": (
                             f"run {run_id} is in {resumable_state} and cannot safely resume. "
-                            "Stop or inspect the run before restarting it."
+                            "Stop or observe the run before restarting it."
                         ),
                     }
                 current_spec_hash = StateStore._hash_spec(spec_path)
@@ -523,6 +537,21 @@ class DaemonServer:
                         state.node_mismatch_count = 0
                         state.last_mismatch_node_id = ""
                         state.human_escalations = []
+                        store.append_session_event(
+                            run_id,
+                            "resume_requested",
+                            {"resumed_from": resumed_from},
+                        )
+                        store.save(state)
+                    elif state.top_state == TopState.RECOVERY_NEEDED:
+                        # Resume from a crash-stranded recovery state: a run
+                        # only persists RECOVERY_NEEDED if the sidecar died
+                        # between `_enter_recovery` and the follow-up
+                        # transition. Flip it to RUNNING so the resumed
+                        # sidecar can re-run the recovery path (or, if the
+                        # original fault has cleared, just continue).
+                        transition_top_state(state, TopState.RUNNING, reason="resume requested")
+                        state.delivery_state = DeliveryState.IDLE
                         store.append_session_event(
                             run_id,
                             "resume_requested",

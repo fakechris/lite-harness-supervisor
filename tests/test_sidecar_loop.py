@@ -98,7 +98,7 @@ def _make_checkpoint(status: str, node: str, summary: str) -> str:
         f"current_node: {node}\n"
         f"summary: {summary}\n"
         f"evidence:\n"
-        f"  - ran: echo ok\n"
+        f"  - verifier: ok\n"
         f"candidate_next_actions:\n"
         f"  - continue\n"
         f"needs:\n"
@@ -125,7 +125,7 @@ def _make_checkpoint_with_seq(status: str, node: str, summary: str, seq: int) ->
         f"current_node: {node}\n"
         f"summary: {summary}\n"
         f"evidence:\n"
-        f"  - ran: echo ok\n"
+        f"  - verifier: ok\n"
         f"candidate_next_actions:\n"
         f"  - continue\n"
         f"needs:\n"
@@ -383,7 +383,10 @@ def test_sidecar_notifies_on_checkpoint_mismatch_pause(tmp_path):
     assert final.top_state == TopState.PAUSED_FOR_HUMAN
     assert channel.events
     assert channel.events[-1].reason == "node mismatch persisted for 5 checkpoints"
-    assert "--pane" in channel.events[-1].next_action
+    # Node-mismatch pauses are `recovery` class — operator's first move is
+    # observe, not a blind resume that would loop into the same fault.
+    assert channel.events[-1].pause_class == "recovery"
+    assert channel.events[-1].next_action == f"thin-supervisor observe {final.run_id}"
 
 
 def test_sidecar_discards_stale_mismatch_batch_after_auto_intervention(tmp_path):
@@ -455,7 +458,10 @@ def test_sidecar_persists_node_mismatch_count_across_loop_restarts(tmp_path):
         stop_event=_StopAfter(terminal, 3),
     )
 
-    assert partial.top_state == TopState.RUNNING
+    # Fresh attach lands in ATTACHED; node mismatches don't emit execution
+    # evidence, so no CONTINUE fires and the run stays on the attach side of
+    # the boundary.
+    assert partial.top_state == TopState.ATTACHED
     assert partial.node_mismatch_count == 3
     assert partial.last_mismatch_node_id == "final_verify"
 
@@ -743,3 +749,381 @@ def test_sidecar_notifies_on_verified_step_and_completion(tmp_path):
     ]
     assert "step_verified" in session_events
     assert "run_completed" in session_events
+
+
+# ---------------------------------------------------------------------------
+# Slice 3: RECOVERY_NEEDED + broader auto-intervention
+# ---------------------------------------------------------------------------
+
+
+def test_enter_recovery_requires_pause_class_recovery(tmp_path):
+    """_enter_recovery must reject payloads without pause_class='recovery'.
+
+    RECOVERY_NEEDED is reserved for auto-recoverable triggers. Allowing other
+    pause classes here would collapse the taxonomy we just introduced.
+    """
+    import pytest
+
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    with pytest.raises(ValueError, match="pause_class='recovery'"):
+        loop._enter_recovery(state, {"reason": "x", "pause_class": "business"})
+    with pytest.raises(ValueError, match="pause_class='recovery'"):
+        loop._enter_recovery(state, {"reason": "x"})
+
+
+def test_recovery_needed_auto_recovers_node_mismatch_without_human_pause(tmp_path):
+    """A node-mismatch storm with an active auto-intervention recipe should
+    recover silently — operator is never notified with `human_pause`."""
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(
+        spec,
+        spec_path="/tmp/plan.yaml",
+        pane_target="%0",
+        surface_type="tmux",
+    )
+    channel = RecordingChannel()
+    loop = SupervisorLoop(
+        store,
+        notification_manager=NotificationManager([channel]),
+        auto_intervention_manager=AutoInterventionManager(mode="notify_then_ai"),
+    )
+
+    terminal = MockTerminal([
+        _make_checkpoint("step_done", "write_test", "wrote the test"),
+        _make_checkpoint("working", "final_verify", "mismatch 1"),
+        _make_checkpoint("working", "final_verify", "mismatch 2"),
+        _make_checkpoint("working", "final_verify", "mismatch 3"),
+        _make_checkpoint("working", "final_verify", "mismatch 4"),
+        _make_checkpoint("working", "final_verify", "mismatch 5"),
+        _make_checkpoint("step_done", "implement_feature", "feature done"),
+        _make_checkpoint("step_done", "final_verify", "all done"),
+    ])
+
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+
+    assert final.top_state == TopState.COMPLETED
+    event_types = [event.event_type for event in channel.events]
+    assert "human_pause" not in event_types
+    assert "auto_intervention" in event_types
+    # Session log should contain the recovery_needed transition
+    session_types = [
+        json.loads(line)["event_type"]
+        for line in store.session_log_path.read_text().splitlines()
+    ]
+    assert "recovery_needed" in session_types
+
+
+def test_recovery_needed_checkpoint_arrival_does_not_crash(tmp_path):
+    """Crash-resume scenario: if a state is persisted as RECOVERY_NEEDED
+    (sidecar died between `_enter_recovery` and the follow-up transition),
+    the next checkpoint must not crash on an illegal `RECOVERY_NEEDED → GATING`
+    transition. `handle_event` preserves the state instead of forcing a
+    transition, so the loop can re-run the recovery path cleanly.
+    """
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    # Stage the state directly into RECOVERY_NEEDED to simulate the post-
+    # crash persistence shape. RUNNING is the legal source state for
+    # `_enter_recovery`; call it through the legitimate entry point so the
+    # transition rules stay honest.
+    from supervisor.domain.state_machine import transition_top_state
+    transition_top_state(state, TopState.RUNNING, reason="simulate running")
+    loop._enter_recovery(state, {"reason": "simulated crash", "pause_class": "recovery"})
+    assert state.top_state == TopState.RECOVERY_NEEDED
+
+    event = {
+        "type": "agent_output",
+        "payload": {
+            "checkpoint": {
+                "status": "working",
+                "current_node": state.current_node_id,
+                "evidence": [{"verifier": "ok"}],
+            }
+        },
+    }
+    # No exception: the arriving checkpoint is absorbed without forcing a
+    # transition. State stays RECOVERY_NEEDED for the recovery path to handle.
+    loop.handle_event(state, event)
+    assert state.top_state == TopState.RECOVERY_NEEDED
+
+
+def test_recovery_needed_falls_through_to_pause_when_budget_exhausted(tmp_path):
+    """If auto-intervention has no plan left, recovery must fall through to
+    a `PAUSED_FOR_HUMAN` with `pause_class='recovery'`."""
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(
+        spec,
+        spec_path="/tmp/plan.yaml",
+        pane_target="%0",
+        surface_type="tmux",
+    )
+    # max=0 means every recipe request is refused — same shape as budget
+    # exhaustion.
+    channel = RecordingChannel()
+    loop = SupervisorLoop(
+        store,
+        notification_manager=NotificationManager([channel]),
+        auto_intervention_manager=AutoInterventionManager(
+            mode="notify_then_ai",
+            max_auto_interventions=0,
+        ),
+    )
+
+    terminal = MockTerminal([
+        _make_checkpoint("step_done", "write_test", "wrote the test"),
+        _make_checkpoint("working", "final_verify", "mismatch 1"),
+        _make_checkpoint("working", "final_verify", "mismatch 2"),
+        _make_checkpoint("working", "final_verify", "mismatch 3"),
+        _make_checkpoint("working", "final_verify", "mismatch 4"),
+        _make_checkpoint("working", "final_verify", "mismatch 5"),
+    ])
+
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+
+    assert final.top_state == TopState.PAUSED_FOR_HUMAN
+    assert final.human_escalations[-1]["pause_class"] == "recovery"
+    # Both events should fire: first recovery_needed, then human_pause
+    session_types = [
+        json.loads(line)["event_type"]
+        for line in store.session_log_path.read_text().splitlines()
+    ]
+    assert session_types.count("recovery_needed") >= 1
+    assert "human_pause" in session_types
+    # Operator notification must carry the recovery-class routing
+    assert channel.events[-1].event_type == "human_pause"
+    assert channel.events[-1].pause_class == "recovery"
+
+
+# ---------------------------------------------------------------------------
+# Slice 4 — ATTACHED + first-execution gate
+# ---------------------------------------------------------------------------
+
+
+def _admin_only_checkpoint(node: str, summary: str) -> str:
+    """First-checkpoint-after-attach that cites only admin artifacts.
+
+    This is the Phase 17 incident shape: attach + clarify + plan, but no
+    concrete work on the current node.  The ATTACHED gate must treat this as
+    admin-only evidence and re-inject, not CONTINUE.
+    """
+    return (
+        f"<checkpoint>\n"
+        f"status: working\n"
+        f"current_node: {node}\n"
+        f"summary: {summary}\n"
+        f"evidence:\n"
+        f"  - attach: opened pane tmux://alpha\n"
+        f"  - clarify: confirmed spec scope\n"
+        f"  - plan: drafted step order\n"
+        f"candidate_next_actions:\n"
+        f"  - continue\n"
+        f"needs:\n"
+        f"  - none\n"
+        f"question_for_supervisor:\n"
+        f"  - none\n"
+        f"</checkpoint>\n"
+    )
+
+
+def test_fresh_attach_lands_in_attached_not_running(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    assert state.top_state == TopState.READY
+
+    # No checkpoint yet — loop injects, ATTACHED persists.
+    class _StopOnInject:
+        def __init__(self, terminal):
+            self.terminal = terminal
+
+        def is_set(self):
+            return bool(self.terminal.injected)
+
+    terminal = MockTerminal([""])
+    loop = SupervisorLoop(store)
+    final = loop.run_sidecar(
+        spec, state, terminal, poll_interval=0, read_lines=50,
+        stop_event=_StopOnInject(terminal),
+    )
+    assert final.top_state == TopState.ATTACHED
+    assert len(terminal.injected) == 1
+
+
+def test_attached_admin_only_checkpoint_reinjects_without_pause(tmp_path):
+    """Phase 17 regression: attach → admin-only checkpoint → RE_INJECT, not pause.
+
+    The gate must emit RE_INJECT (not CONTINUE, not RETRY), no operator
+    notification fires, and the retry budget is untouched.  State remains
+    ATTACHED so the next checkpoint is scrutinized again.
+    """
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    channel = RecordingChannel()
+    loop = SupervisorLoop(store, notification_manager=NotificationManager([channel]))
+
+    class _StopAfterReInject:
+        def __init__(self, terminal):
+            self.terminal = terminal
+
+        def is_set(self):
+            # First inject is the initial handoff, second is the RE_INJECT.
+            return len(self.terminal.injected) >= 2
+
+    terminal = MockTerminal([
+        "",  # initial inject
+        _admin_only_checkpoint("write_test", "attached and reviewed plan"),
+    ])
+
+    partial = loop.run_sidecar(
+        spec, state, terminal, poll_interval=0, read_lines=50,
+        stop_event=_StopAfterReInject(terminal),
+    )
+
+    assert partial.top_state == TopState.ATTACHED
+    # Retry budget untouched — RE_INJECT is not RETRY.
+    assert partial.current_attempt == 0
+    assert partial.retry_budget.used_global == 0
+    # No operator notification for an attach-boundary re-inject.
+    assert not any(e.event_type == "human_pause" for e in channel.events)
+    # Decision log must show a RE_INJECT.
+    decisions = [
+        json.loads(line) for line in store.decision_log_path.read_text().splitlines()
+    ]
+    assert any(d.get("decision", "").upper() == "RE_INJECT" for d in decisions)
+
+
+def test_attached_real_execution_advances_to_running(tmp_path):
+    """ATTACHED + concrete execution evidence → CONTINUE → RUNNING.
+
+    Stops after the first gate decision to capture the ATTACHED→RUNNING
+    transition explicitly, rather than letting the run complete and lose the
+    intermediate state.
+    """
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    class _StopAfterGate:
+        def __init__(self, store):
+            self.store = store
+
+        def is_set(self):
+            path = self.store.session_log_path
+            if not path.exists():
+                return False
+            for line in path.read_text().splitlines():
+                if '"event_type": "gate_decision"' in line:
+                    record = json.loads(line)
+                    if record.get("payload", {}).get("decision", "").upper() == "CONTINUE":
+                        return True
+            return False
+
+    terminal = MockTerminal([
+        "",
+        # _make_checkpoint uses "verifier: ok" — real execution evidence.
+        _make_checkpoint("working", "write_test", "started writing the test"),
+        _make_checkpoint("step_done", "write_test", "wrote the test"),
+        _make_checkpoint("step_done", "implement_feature", "feature done"),
+        _make_checkpoint("step_done", "final_verify", "all done"),
+    ])
+    partial = loop.run_sidecar(
+        spec, state, terminal, poll_interval=0, read_lines=50,
+        stop_event=_StopAfterGate(store),
+    )
+    # After a CONTINUE on real execution evidence, we must be in RUNNING
+    # (or a post-RUNNING state like VERIFYING) — never back-sliding to ATTACHED.
+    assert partial.top_state in (
+        TopState.RUNNING, TopState.VERIFYING, TopState.COMPLETED,
+    )
+
+    # At least one CONTINUE was emitted out of ATTACHED.
+    decisions = [
+        json.loads(line)
+        for line in store.decision_log_path.read_text().splitlines()
+    ]
+    assert any(d.get("decision", "").upper() == "CONTINUE" for d in decisions)
+
+
+def test_re_inject_loop_caps_and_pauses_recovery(tmp_path):
+    """If the agent keeps emitting admin-only checkpoints after attach, the
+    supervisor must not RE_INJECT forever. After MAX_RE_INJECTS attempts it
+    pauses with pause_class='recovery' so an operator can intervene.
+
+    Without this cap, a responsive-but-off-task agent would loop gate →
+    RE_INJECT → inject → admin-only cp → gate → … indefinitely; the
+    delivery-ack timeout is the only other bound and it only fires when the
+    agent goes silent.
+    """
+    from supervisor.loop import MAX_RE_INJECTS
+
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    channel = RecordingChannel()
+    loop = SupervisorLoop(store, notification_manager=NotificationManager([channel]))
+
+    # Feed MAX_RE_INJECTS + 2 admin-only checkpoints so the cap is definitely
+    # tripped. Initial inject reads "" then each subsequent admin-only cp
+    # triggers another RE_INJECT until the cap fires.
+    outputs: list[str] = [""]  # initial handoff reads empty
+    for _ in range(MAX_RE_INJECTS + 2):
+        outputs.append(_admin_only_checkpoint("write_test", "still reviewing plan"))
+    terminal = MockTerminal(outputs)
+
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+
+    assert final.top_state == TopState.PAUSED_FOR_HUMAN
+    # Recovery pause — not business/safety/review.
+    assert final.human_escalations
+    assert final.human_escalations[-1].get("pause_class") == "recovery"
+    # Retry budget still untouched — RE_INJECT must not bleed into RETRY
+    # semantics even when the cap trips.
+    assert final.current_attempt == 0
+    assert final.retry_budget.used_global == 0
+    # Operator notification fired with the recovery class.
+    pause_events = [e for e in channel.events if e.event_type == "human_pause"]
+    assert pause_events and pause_events[-1].pause_class == "recovery"
+
+
+def test_non_fresh_resume_skips_attached(tmp_path):
+    """A state that already has a RUNNING checkpoint must not re-enter ATTACHED.
+
+    Covers the 'resume after PAUSED_FOR_HUMAN[business]' path: re-gating a run
+    that has already proved it can execute would be a regression for every
+    resume flow.
+    """
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    # Simulate a run that already advanced past the attach boundary.
+    state.top_state = TopState.RUNNING
+    store.save(state)
+
+    loop = SupervisorLoop(store)
+    terminal = MockTerminal([
+        _make_checkpoint("step_done", "write_test", "wrote the test"),
+        _make_checkpoint("step_done", "implement_feature", "feature done"),
+        _make_checkpoint("step_done", "final_verify", "all done"),
+    ])
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+
+    # Must complete without ever re-entering ATTACHED from RUNNING.
+    assert final.top_state == TopState.COMPLETED
+    session_log_lines = store.session_log_path.read_text().splitlines()
+    transitions = [
+        (json.loads(line)["payload"]["from"], json.loads(line)["payload"]["to"])
+        for line in session_log_lines
+        if '"top_state_change"' in line
+    ]
+    assert not any(src == "RUNNING" and dst == "ATTACHED" for src, dst in transitions)

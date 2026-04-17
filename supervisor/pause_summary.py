@@ -4,6 +4,9 @@ import shlex
 from typing import Any
 
 
+PAUSE_CLASSES = ("business", "safety", "review", "recovery")
+
+
 def latest_human_escalation(state: dict[str, Any]) -> dict[str, Any]:
     escalations = state.get("human_escalations", []) or []
     if not escalations:
@@ -22,7 +25,24 @@ def pause_reason(state: dict[str, Any]) -> str:
     return str(reason).strip()
 
 
+def pause_class(state: dict[str, Any]) -> str:
+    """Return `pause_class` for the latest escalation, or "" if none/unknown.
+
+    `pause_class` is set by `_pause_for_human` in the runtime; surfaces rely on it
+    to distinguish business/safety/review from recovery so operators can tell
+    "I'm blocked on your input" from "supervisor recovery exhausted" without
+    parsing `reason` strings.
+    """
+    if state.get("top_state") != "PAUSED_FOR_HUMAN":
+        return ""
+    latest = latest_human_escalation(state)
+    value = str(latest.get("pause_class", "")).strip().lower()
+    return value if value in PAUSE_CLASSES else ""
+
+
 def is_waiting_for_review(state: dict[str, Any]) -> bool:
+    if pause_class(state) == "review":
+        return True
     reason = pause_reason(state)
     return reason.startswith("requires review by:")
 
@@ -36,6 +56,10 @@ def status_reason(state: dict[str, Any]) -> str:
         if delivery == "TIMED_OUT":
             return "delivery_timed_out"
         return ""
+    if top_state == "ATTACHED":
+        return "attached_awaiting_first_execution"
+    if top_state == "RECOVERY_NEEDED":
+        return "supervisor_recovering"
     if top_state == "COMPLETED":
         return "workflow_done"
     current_node = str(state.get("current_node_id", "")).strip()
@@ -60,10 +84,30 @@ def next_action(state: dict[str, Any]) -> str:
             return f"thin-supervisor run summarize {run_id}"
         return ""
 
+    # ATTACHED is transient — operator should just wait for the agent to emit
+    # real execution evidence on the current node. If the run is stuck here,
+    # observing the pane is the next step.  `observe` is the real read-only
+    # CLI command; the run's own transient nature provides the "if-persists"
+    # semantics (it auto-advances on real evidence).
+    if top_state == "ATTACHED":
+        if run_id:
+            return f"thin-supervisor observe {run_id}"
+        return ""
+
+    # Supervisor is actively auto-recovering — operator shouldn't act yet, but
+    # if they're watching, `observe` is the right read-only command.
+    if top_state == "RECOVERY_NEEDED":
+        if run_id:
+            return f"thin-supervisor observe {run_id}"
+        return ""
+
     if top_state != "PAUSED_FOR_HUMAN":
         return ""
 
     reason = pause_reason(state)
+    pclass = pause_class(state)
+
+    # Review pauses: reviewer is named in the reason, not the class.
     if reason.startswith("requires review by:"):
         reviewer = reason.split(":", 1)[1].strip() or "human"
         if run_id:
@@ -72,6 +116,13 @@ def next_action(state: dict[str, Any]) -> str:
     spec_path = state.get("spec_path", "")
     pane_target = state.get("pane_target", "")
     surface_type = state.get("surface_type", "")
+
+    # Recovery pauses mean "supervisor tried and failed to advance the run."
+    # The operator's first move is observation, not a blind resume — resuming
+    # without diagnosing the pane can loop right back into the same fault.
+    if pclass == "recovery" and run_id:
+        return f"thin-supervisor observe {run_id}"
+
     if spec_path and pane_target:
         command = (
             f"thin-supervisor run resume --spec {shlex.quote(spec_path)} "
@@ -89,6 +140,7 @@ def next_action(state: dict[str, Any]) -> str:
 def summarize_state(state: dict[str, Any]) -> dict[str, Any]:
     summary = dict(state)
     summary["pause_reason"] = pause_reason(state)
+    summary["pause_class"] = pause_class(state)
     summary["status_reason"] = status_reason(state)
     summary["next_action"] = next_action(state)
     summary["is_waiting_for_review"] = is_waiting_for_review(state)

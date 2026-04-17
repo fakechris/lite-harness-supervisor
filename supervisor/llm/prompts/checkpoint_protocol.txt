@@ -29,3 +29,15 @@ Notes:
   and emit a new checkpoint for the same current_node.
 - When the supervisor injects a new node objective, switch to that node
   and emit checkpoints for the new current_node.
+
+First checkpoint for a newly-injected current_node:
+- The first `working` checkpoint after a node is injected MUST cite evidence
+  of concrete work on that node's objective. Valid evidence includes:
+    - a command you actually ran (with observable output),
+    - a file you actually modified,
+    - a verifier or test result.
+- Clarify, plan, spec, review, attach, and baseline-check artifacts from
+  earlier phases are NOT evidence of progress on the newly-injected node.
+  Do not list them under `evidence:` for the first checkpoint of that node.
+- If you have not yet produced any work on the new node, do not emit a
+  checkpoint yet — start the work first.

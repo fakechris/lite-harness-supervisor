@@ -1807,9 +1807,11 @@ def _display_view(record) -> dict:
         "pane_target": record.pane_target,
         "controller_mode": record.controller_mode,
         "pause_reason": record.pause_reason,
+        "pause_class": record.pause_class,
         "next_action": record.next_action,
         "status_reason": record.last_checkpoint_summary,
         "daemon_socket": record.daemon_socket,
+        "tag": record.tag,
     }
     orphan_non_paused = (
         record.is_orphaned
@@ -1900,11 +1902,22 @@ def cmd_status(args):
             pass
         return f"  worktree={wt}"
 
+    def _state_label(r: dict) -> str:
+        # Decorate paused runs with their pause_class, so operators see the
+        # business/safety/review/recovery split at a glance without reading
+        # the reason line.  ATTACHED and RECOVERY_NEEDED render as-is — the
+        # top_state is already specific.
+        state = r.get("top_state", "")
+        pclass = r.get("pause_class", "")
+        if state == "PAUSED_FOR_HUMAN" and pclass:
+            return f"{state}[{pclass}]"
+        return state
+
     if daemon_runs:
         print("Active runs:")
         for r in daemon_runs:
             print(
-                f"  [daemon]  {r['run_id']}  {r['top_state']}  "
+                f"  [daemon]  {r['run_id']}  {_state_label(r)}  "
                 f"node={r.get('current_node', '')}  "
                 f"pane={r.get('pane_target', '?')}{_wt_suffix(r)}"
             )
@@ -1920,7 +1933,7 @@ def cmd_status(args):
         for r in foreground_runs:
             print(
                 f"  [foreground]  {r.get('run_id', '?')}  "
-                f"{r.get('top_state', '?')}  "
+                f"{_state_label(r)}  "
                 f"node={r.get('current_node', '')}  "
                 f"pane={r.get('pane_target', '?')}{_wt_suffix(r)}"
             )
@@ -1932,7 +1945,7 @@ def cmd_status(args):
         for r in orphaned_runs:
             print(
                 f"  [orphaned]  {r.get('run_id', '?')}  "
-                f"{r.get('top_state', '?')}  "
+                f"{_state_label(r)}  "
                 f"node={r.get('current_node', '')}  "
                 f"pane={r.get('pane_target', '?')}{_wt_suffix(r)}"
             )

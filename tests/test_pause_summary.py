@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from supervisor.pause_summary import summarize_state
+from supervisor.pause_summary import pause_class, summarize_state
 
 
 def test_summarize_state_suggests_resume_for_general_human_pause():
@@ -40,3 +40,85 @@ def test_summarize_state_prefers_review_ack_when_finish_gate_requires_reviewer()
     assert summary["pause_reason"] == "requires review by: human"
     assert summary["next_action"] == "thin-supervisor run review run_456 --by human"
     assert summary["is_waiting_for_review"] is True
+
+
+def test_summarize_state_recovery_class_suggests_observe_not_resume():
+    """Recovery pauses surface `observe` — a blind resume on a recovery pause
+    loops the run straight back into the same delivery/idle/inject fault."""
+    summary = summarize_state({
+        "run_id": "run_rec",
+        "top_state": "PAUSED_FOR_HUMAN",
+        "spec_path": "/tmp/spec.yaml",
+        "pane_target": "%3",
+        "surface_type": "tmux",
+        "human_escalations": [
+            {
+                "reason": "no checkpoint received within delivery timeout after injection",
+                "pause_class": "recovery",
+            }
+        ],
+    })
+
+    assert summary["pause_class"] == "recovery"
+    assert summary["next_action"] == "thin-supervisor observe run_rec"
+    assert summary["is_waiting_for_review"] is False
+
+
+def test_summarize_state_business_class_keeps_resume_hint():
+    summary = summarize_state({
+        "run_id": "run_biz",
+        "top_state": "PAUSED_FOR_HUMAN",
+        "spec_path": "/tmp/spec.yaml",
+        "pane_target": "%4",
+        "surface_type": "tmux",
+        "human_escalations": [
+            {"reason": "missing API key", "pause_class": "business"}
+        ],
+    })
+
+    assert summary["pause_class"] == "business"
+    assert "--pane %4" in summary["next_action"]
+    assert summary["next_action"].startswith("thin-supervisor run resume ")
+
+
+def test_pause_class_helper_rejects_unknown_values():
+    state = {
+        "top_state": "PAUSED_FOR_HUMAN",
+        "human_escalations": [{"reason": "x", "pause_class": "bogus"}],
+    }
+    # Unknown class must not leak out as authoritative — surfaces would
+    # otherwise render undefined tags.
+    assert pause_class(state) == ""
+
+
+def test_pause_class_helper_returns_empty_when_not_paused():
+    state = {
+        "top_state": "RUNNING",
+        "human_escalations": [{"reason": "old", "pause_class": "business"}],
+    }
+    assert pause_class(state) == ""
+
+
+def test_summarize_state_recovery_needed_suggests_observe():
+    """RECOVERY_NEEDED is transient — if the operator sees it, they can
+    `observe` to watch the pane, but should generally wait."""
+    summary = summarize_state({
+        "run_id": "run_rec_needed",
+        "top_state": "RECOVERY_NEEDED",
+        "human_escalations": [],
+    })
+
+    assert summary["status_reason"] == "supervisor_recovering"
+    assert summary["next_action"] == "thin-supervisor observe run_rec_needed"
+    assert summary["is_waiting_for_review"] is False
+
+
+def test_summarize_state_attached_suggests_observe():
+    """ATTACHED is transient — `observe` is the real read-only CLI command."""
+    summary = summarize_state({
+        "run_id": "run_attach",
+        "top_state": "ATTACHED",
+        "human_escalations": [],
+    })
+    assert summary["status_reason"] == "attached_awaiting_first_execution"
+    assert summary["next_action"] == "thin-supervisor observe run_attach"
