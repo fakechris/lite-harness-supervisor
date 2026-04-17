@@ -735,6 +735,69 @@ class TestDaemonResume:
         assert result["ok"] is False
         assert "cannot safely resume" in result["error"]
 
+    def test_resume_recovery_needed_transitions_back_to_running(self, tmp_path, monkeypatch):
+        """Reviewer P2-4: a run persisted in RECOVERY_NEEDED (sidecar crashed
+        between `_enter_recovery` and the follow-up transition) must be
+        resumable.  The resume path flips it back to RUNNING so the resumed
+        sidecar can re-run the recovery recipe or simply continue.
+        """
+        spec_path = tmp_path / "test.yaml"
+        spec_path.write_text(
+            "kind: linear_plan\n"
+            "id: test\n"
+            "goal: test\n"
+            "steps:\n"
+            "  - id: s1\n"
+            "    type: task\n"
+            "    objective: do something\n"
+            "    verify:\n"
+            "      - type: command\n"
+            "        run: echo ok\n"
+            "        expect: pass\n"
+        )
+        spec = load_spec(str(spec_path))
+        run_dir = tmp_path / "runs" / "run_recovery"
+        store = StateStore(str(run_dir))
+        state = store.load_or_init(
+            spec,
+            spec_path=str(spec_path),
+            pane_target="%2",
+            workspace_root=str(tmp_path),
+        )
+        # Direct assignment bypasses the transition table; the resume path is
+        # what we're exercising, not how the state got persisted.
+        state.top_state = TopState.RECOVERY_NEEDED
+        store.save(state)
+
+        monkeypatch.setattr("supervisor.daemon.server.acquire_pane_lock", lambda pane, owner: (True, {}))
+        monkeypatch.setattr("supervisor.daemon.server.update_daemon", lambda *a, **k: None)
+        monkeypatch.setattr("threading.Thread", _DummyThread)
+
+        server = DaemonServer(runs_dir=str(tmp_path / "runs"))
+        result = server._do_resume({"spec_path": str(spec_path), "pane_target": "%2"})
+
+        assert result["ok"] is True
+        assert result["resumed_from"] == TopState.RECOVERY_NEEDED.value
+        resumed = StateStore(str(run_dir)).load_or_init(spec, spec_path=str(spec_path), pane_target="%2")
+        assert resumed.top_state == TopState.RUNNING
+        session_events = (run_dir / "session_log.jsonl").read_text()
+        assert "resume_requested" in session_events
+
+    def test_recoverable_orphaned_states_includes_attached_and_recovery(self):
+        """Reviewer P2-4: RECOVERABLE_ORPHANED_STATES must include ATTACHED
+        and RECOVERY_NEEDED.  A daemon crash during either leaves an orphan
+        that the operator can still recover — observability surfaces render
+        these as actionable, so the daemon entry point must too.
+        """
+        from supervisor.daemon.server import RECOVERABLE_ORPHANED_STATES
+        assert TopState.ATTACHED in RECOVERABLE_ORPHANED_STATES
+        assert TopState.RECOVERY_NEEDED in RECOVERABLE_ORPHANED_STATES
+        # The legacy in-flight states must still be covered too — this test
+        # doubles as a fence against a future refactor dropping them.
+        assert TopState.RUNNING in RECOVERABLE_ORPHANED_STATES
+        assert TopState.GATING in RECOVERABLE_ORPHANED_STATES
+        assert TopState.VERIFYING in RECOVERABLE_ORPHANED_STATES
+
     def test_resume_rejects_legacy_state_without_spec_hash(self, tmp_path, monkeypatch):
         spec_path = tmp_path / "test.yaml"
         spec_path.write_text(
