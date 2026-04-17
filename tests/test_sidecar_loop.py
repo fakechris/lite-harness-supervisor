@@ -1153,6 +1153,79 @@ def test_attached_workflow_done_admin_only_reinjects_not_verify(tmp_path):
     assert "workflow_done" in decision.reason
 
 
+def test_attached_admin_only_with_missing_input_text_escalates_at_loop_level(tmp_path):
+    """Regression for the loop-integration gap found after PR #71.
+
+    ContinueGate already ran escalation-before-attach, but the supervisor
+    loop has its OWN ATTACHED admin-only guard that short-circuits to
+    RE_INJECT before ContinueGate is called.  That means a first checkpoint
+    with admin-only evidence AND `need credentials` text in
+    needs / question_for_supervisor would (incorrectly) route to RE_INJECT
+    instead of ESCALATE_TO_HUMAN.
+
+    This test exercises the real runtime entry point `loop.gate()` — the
+    previous P2-3 test only covered `ContinueGate.decide()` in isolation
+    and never hit the loop-level short-circuit.  Covers both
+    `status: working` and `status: step_done` variants.
+    """
+    from supervisor.domain.enums import DecisionType
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+
+    def _mk_state():
+        store = StateStore(str(tmp_path / f"runtime_{id(object())}"))
+        s = store.load_or_init(spec)
+        s.top_state = TopState.ATTACHED
+        return SupervisorLoop(store), s
+
+    # status: working + admin-only + missing-input text → ESCALATE
+    loop, state = _mk_state()
+    state.last_agent_checkpoint = {
+        "status": "working",
+        "current_node": state.current_node_id,
+        "summary": "attached and reviewed plan",
+        "evidence": [
+            {"attach": "tmux://alpha"},
+            {"plan": "drafted step order"},
+        ],
+        "needs": ["need credentials for upstream API"],
+        "question_for_supervisor": ["need access token to proceed"],
+    }
+    d = loop.gate(spec, state)
+    assert d.decision == DecisionType.ESCALATE_TO_HUMAN.value
+    assert d.needs_human is True
+    assert d.reason == "missing external input"
+
+    # status: step_done + admin-only + missing-input text → ESCALATE
+    # (must not fall through to the VERIFY_STEP short-circuit either)
+    loop, state = _mk_state()
+    state.last_agent_checkpoint = {
+        "status": "step_done",
+        "current_node": state.current_node_id,
+        "summary": "claimed done",
+        "evidence": [
+            {"clarify": "confirmed spec scope"},
+        ],
+        "needs": ["need credentials to proceed"],
+    }
+    d = loop.gate(spec, state)
+    assert d.decision == DecisionType.ESCALATE_TO_HUMAN.value
+
+    # Negative control: ATTACHED + admin-only + NO escalation signal → still
+    # RE_INJECT.  The fix must not over-escalate on plain admin-only output.
+    loop, state = _mk_state()
+    state.last_agent_checkpoint = {
+        "status": "working",
+        "current_node": state.current_node_id,
+        "summary": "attached and reviewed plan",
+        "evidence": [
+            {"attach": "tmux://alpha"},
+            {"plan": "drafted step order"},
+        ],
+    }
+    d = loop.gate(spec, state)
+    assert d.decision == DecisionType.RE_INJECT.value
+
+
 def test_attached_step_done_real_evidence_verifies(tmp_path):
     """Counter-example for P1-2: `step_done` with real execution evidence on
     the current node is the legitimate shape — must route to VERIFY_STEP so

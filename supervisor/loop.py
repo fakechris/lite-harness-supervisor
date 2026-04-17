@@ -13,7 +13,7 @@ from supervisor.domain.state_machine import FINAL_STATES, transition_top_state
 from supervisor.gates.continue_gate import ContinueGate
 from supervisor.gates.branch_gate import BranchGate
 from supervisor.gates.finish_gate import FinishGate
-from supervisor.gates.rules import is_admin_only_evidence
+from supervisor.gates.rules import classify_checkpoint, is_admin_only_evidence
 from supervisor.llm.judge_client import JudgeClient
 from supervisor.verifiers.suite import VerifierSuite
 from supervisor.adapters.transcript_adapter import TranscriptAdapter
@@ -141,11 +141,50 @@ class SupervisorLoop:
         # that make affirmative progress claims; empty/partial statuses fall
         # through to ContinueGate so their missing-status problem isn't
         # hidden behind a RE_INJECT reason string.
+        #
+        # Business escalation wins over RE_INJECT: if the first checkpoint
+        # cites admin-only evidence AND also carries a MISSING_EXTERNAL_INPUT /
+        # DANGEROUS_ACTION / BLOCKED signal in needs / question_for_supervisor,
+        # the correct move is ESCALATE_TO_HUMAN, not a re-inject.  ContinueGate
+        # already enforces this ordering internally, but the loop short-circuits
+        # around ContinueGate for status-based decisions, so we replicate the
+        # classification here.
         if (
             state.top_state == TopState.ATTACHED
             and cp_status in ("working", "step_done", "workflow_done")
             and is_admin_only_evidence(cp.get("evidence"))
         ):
+            cp_class = classify_checkpoint(cp)
+            if cp_class == "MISSING_EXTERNAL_INPUT":
+                return SupervisorDecision.make(
+                    decision=DecisionType.ESCALATE_TO_HUMAN.value,
+                    reason="missing external input",
+                    gate_type="checkpoint_status",
+                    confidence=0.98,
+                    needs_human=True,
+                    triggered_by_seq=triggered_by_seq,
+                    triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+                )
+            if cp_class == "DANGEROUS_ACTION":
+                return SupervisorDecision.make(
+                    decision=DecisionType.ESCALATE_TO_HUMAN.value,
+                    reason="dangerous irreversible action",
+                    gate_type="checkpoint_status",
+                    confidence=0.99,
+                    needs_human=True,
+                    triggered_by_seq=triggered_by_seq,
+                    triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+                )
+            if cp_class == "BLOCKED":
+                return SupervisorDecision.make(
+                    decision=DecisionType.ESCALATE_TO_HUMAN.value,
+                    reason="agent reported blocked",
+                    gate_type="checkpoint_status",
+                    confidence=0.95,
+                    needs_human=True,
+                    triggered_by_seq=triggered_by_seq,
+                    triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+                )
             return SupervisorDecision.make(
                 decision=DecisionType.RE_INJECT.value,
                 reason=(
