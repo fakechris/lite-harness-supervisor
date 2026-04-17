@@ -17,7 +17,8 @@ class InstructionComposer:
     def build(self, node, state, *, triggered_by_decision_id: str = "",
               trigger_type: str = "node_advance",
               verification: dict | None = None,
-              policy: SupervisionPolicy | None = None) -> HandoffInstruction:
+              policy: SupervisionPolicy | None = None,
+              first_node_delivery: bool = False) -> HandoffInstruction:
 
         mode = policy.mode if policy else "strict_verifier"
         parts = []
@@ -51,7 +52,9 @@ class InstructionComposer:
                 )
                 parts.append(f"Previous verification failed: {details}")
 
-        parts.append(self._checkpoint_protocol_suffix(node.id))
+        parts.append(self._checkpoint_protocol_suffix(
+            node.id, first_node_delivery=first_node_delivery,
+        ))
 
         content = "\n\n".join(parts)
 
@@ -64,9 +67,21 @@ class InstructionComposer:
         )
 
     @staticmethod
-    def _checkpoint_protocol_suffix(node_id: str) -> str:
-        return (
+    def _checkpoint_protocol_suffix(node_id: str, *, first_node_delivery: bool = False) -> str:
+        base = (
             f"Stay on current_node: {node_id}.\n"
             "After meaningful progress, output a checkpoint block exactly like:\n"
             f"{checkpoint_example_block(node_id)}"
+        )
+        if not first_node_delivery:
+            return base
+        return (
+            base
+            + "\n\nThis is the FIRST checkpoint for this node. Its `evidence:` "
+            f"must cite concrete work on node {node_id} — a command you ran, "
+            "a file you modified, or a verifier result on this node's objective. "
+            "Clarify, plan, spec, attach, or baseline-check artifacts from earlier "
+            "phases are NOT evidence of progress on this node and must not be listed. "
+            "If you have not yet produced any work on this node, start the work "
+            "first and emit the checkpoint after."
         )

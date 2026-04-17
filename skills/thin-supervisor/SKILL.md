@@ -306,8 +306,25 @@ if missing, starts the daemon if needed, and validates the execution surface.
 Execution commands now reject draft specs. This is intentional: user
 confirmation is part of the execution contract.
 
-Do not start coding, git cleanup, worktree edits, or long test runs
-until these commands succeed.
+### After attach: restate the first node before executing
+
+Once register succeeds, the supervisor will inject the first node's objective.
+Before emitting any checkpoint, **explicitly restate the first node's
+objective to yourself** and pick the very first concrete action that moves
+that objective forward (a file to edit, a command to run, a verifier to
+exercise). Only then start working.
+
+Do NOT emit a first checkpoint that merely reports:
+- "attach succeeded"
+- "baseline tests pass"
+- "clarify/spec artifacts exist"
+
+Those are prior-phase artifacts, not execution evidence for the new node.
+The first checkpoint for a newly-injected node must cite real work on that
+node. See `references/contract.md` for the full rule.
+
+Do not start unrelated coding, git cleanup, worktree edits, or long test
+runs until these commands succeed.
 
 ---
 
@@ -343,6 +360,23 @@ question_for_supervisor:
   - none
 </checkpoint>
 ```
+
+### First-checkpoint rule
+
+The **first** checkpoint for any newly-injected `current_node` MUST cite
+evidence of concrete work on that specific node — a command run, a file
+modified, or a verifier result on that node's objective. Prior-phase
+artifacts (clarify notes, spec files, plan review, attach success,
+baseline test runs) do NOT count as evidence for a newly-injected node.
+
+If you have not yet produced work on the new node, don't emit a checkpoint
+yet — start the work first, then checkpoint.
+
+### Subsequent-checkpoint rule
+
+After the first valid execution checkpoint, continue emitting a checkpoint
+roughly every 2–3 significant actions. "Meaningful progress" from the
+previous note applies from this point forward.
 
 ### Status values
 

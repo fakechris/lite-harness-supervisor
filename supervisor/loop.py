@@ -504,6 +504,7 @@ class SupervisorLoop:
                         triggered_by_decision_id="",
                         trigger_type="init",
                         policy=policy,
+                        first_node_delivery=True,
                     )
                     state.last_injected_node_id = state.current_node_id
                     state.last_injected_attempt = 0
@@ -748,6 +749,7 @@ class SupervisorLoop:
                             triggered_by_decision_id=decision_id,
                             trigger_type=trigger,
                             policy=policy,
+                            first_node_delivery=(trigger in ("node_advance", "branch")),
                         )
                         if continue_guidance:
                             deferred_continue = (instruction, state.current_node_id, state.current_attempt)

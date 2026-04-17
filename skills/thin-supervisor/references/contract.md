@@ -11,6 +11,7 @@ These rules are execution contracts, not optimization targets.
 - Do not modify the generated spec during execution unless the user explicitly asks to revise the plan.
 - Emit checkpoint blocks after meaningful progress, blockers, step completion, and workflow completion.
 - Keep `current_node` aligned with the active spec node. Never jump ahead in checkpoints.
+- The **first checkpoint for a newly-injected node** must cite evidence of concrete work on that node's objective — e.g. a command run, a file changed, a verifier result. Clarify, plan, spec, attach, or baseline-check artifacts do not count as execution evidence for a newly-injected node.
 
 ## Approval Contract
 

@@ -17,8 +17,13 @@
 
 ## BLOCKED vs. WORKING
 
-If the agent emits `status: blocked`, that means it genuinely cannot proceed.
-Escalate immediately — don't wait for retry.
+`status: blocked` is reserved for **genuine external blockers**: missing credentials, missing
+business input, spec ambiguity that requires the user, or a dangerous action that needs
+authorization. Escalate immediately — don't wait for retry.
+
+`status: blocked` is NOT for operational faults like delivery timeouts, session stalls,
+send-keys failures, or pane-level observation gaps. Those are supervisor-recovery concerns,
+not business escalations, and the worker should not emit `blocked` for them.
 
 If the agent emits `status: working`, that means it's making progress.
 Do not interrupt.
