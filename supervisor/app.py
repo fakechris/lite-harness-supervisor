@@ -1379,6 +1379,34 @@ def cmd_eval(args):
             print(f"Approved by:  {record['approved_by']}")
         return 0
 
+    if args.eval_action == "improve":
+        try:
+            payload = _run_eval_improve(
+                args,
+                runtime_dir=runtime_dir,
+                load_eval_suite=load_eval_suite,
+                propose_candidate_policy=propose_candidate_policy,
+                save_candidate_manifest=save_candidate_manifest,
+                review_candidate_manifest=review_candidate_manifest,
+                build_candidate_dossier=build_candidate_dossier,
+                run_canary_eval=run_canary_eval,
+                evaluate_candidate_gate=evaluate_candidate_gate,
+                promote_candidate=promote_candidate,
+                save_eval_report=save_eval_report,
+            )
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            print(f"Stage:        {payload['stage']}")
+            print(f"Candidate:    {payload['candidate_id']}")
+            print(f"Next action:  {payload['next_action']}")
+            if payload.get("promotion"):
+                print(f"Promotion:    {payload['promotion'].get('status', '?')}")
+        return 0
+
     if args.eval_action == "promotion-history":
         try:
             history = list_promotions(runtime_dir=runtime_dir)
@@ -1402,7 +1430,7 @@ def cmd_eval(args):
             print(name)
         return 0
 
-    print("Usage: thin-supervisor-dev eval {list,run,replay,compare,canary,rollout-history,expand,propose,review-candidate,candidate-status,gate-candidate,promote-candidate,promotion-history} ...")
+    print("Usage: thin-supervisor-dev eval {list,run,replay,compare,canary,rollout-history,expand,propose,review-candidate,candidate-status,gate-candidate,promote-candidate,improve,promotion-history} ...")
     return 1
 
 
@@ -1428,17 +1456,194 @@ def _prepare_candidate_gate(
         canary_report = run_canary_eval(
             args.run_id,
             runtime_dir=runtime_dir,
-            max_mismatch_rate=args.max_mismatch_rate,
-            max_friction_events=args.max_friction_events,
+            max_mismatch_rate=getattr(args, "max_mismatch_rate", 0.25),
+            max_friction_events=getattr(args, "max_friction_events", 0),
         )
     gate = evaluate_candidate_gate(review, suite=suite, canary_report=canary_report)
     gate["manifest_path"] = getattr(args, "manifest", "")
     return review, gate
 
 
+def _run_eval_improve(
+    args,
+    *,
+    runtime_dir,
+    load_eval_suite,
+    propose_candidate_policy,
+    save_candidate_manifest,
+    review_candidate_manifest,
+    build_candidate_dossier,
+    run_canary_eval,
+    evaluate_candidate_gate,
+    promote_candidate,
+    save_eval_report,
+):
+    suite_ref = args.suite_file or args.suite
+    suite = load_eval_suite(suite_ref)
+    proposal = propose_candidate_policy(
+        suite,
+        objective=args.objective,
+        baseline_policy=args.baseline_policy,
+    )
+    manifest_path = save_candidate_manifest(proposal, runtime_dir=runtime_dir)
+    manifest = _manifest_from_proposal(proposal)
+    review = review_candidate_manifest(manifest)
+
+    if getattr(args, "save_report", False):
+        proposal["report_path"] = str(
+            save_eval_report(proposal, report_kind="proposal", runtime_dir=runtime_dir)
+        )
+        review["report_path"] = str(
+            save_eval_report(
+                {**review, "manifest_path": str(manifest_path)},
+                report_kind="review",
+                runtime_dir=runtime_dir,
+            )
+        )
+
+    dossier = build_candidate_dossier(manifest_path=str(manifest_path), runtime_dir=runtime_dir)
+    candidate_id = review["candidate_id"]
+    payload = {
+        "stage": "proposed",
+        "candidate_id": candidate_id,
+        "candidate_manifest_path": str(manifest_path),
+        "next_action": dossier.get("next_action", review.get("next_action", "")),
+        "proposal": proposal,
+        "review": review,
+        "dossier": dossier,
+    }
+
+    if getattr(args, "dry_run", False):
+        _maybe_save_improve_report(args, payload, runtime_dir=runtime_dir, save_eval_report=save_eval_report)
+        return payload
+
+    canary_report = None
+    if getattr(args, "run_id", []):
+        canary_report = run_canary_eval(
+            args.run_id,
+            runtime_dir=runtime_dir,
+            max_mismatch_rate=getattr(args, "max_mismatch_rate", 0.25),
+            max_friction_events=getattr(args, "max_friction_events", 0),
+        )
+    gate = evaluate_candidate_gate(review, suite=suite, canary_report=canary_report)
+    gate["manifest_path"] = str(manifest_path)
+    if getattr(args, "save_report", False):
+        gate["report_path"] = str(
+            save_eval_report(gate, report_kind="gate", runtime_dir=runtime_dir)
+        )
+
+    dossier = build_candidate_dossier(manifest_path=str(manifest_path), runtime_dir=runtime_dir)
+    payload.update(
+        {
+            "stage": "gated",
+            "next_action": gate.get("next_action", dossier.get("next_action", "")),
+            "gate": gate,
+            "dossier": dossier,
+        }
+    )
+
+    if not getattr(args, "approved_by", ""):
+        _maybe_save_improve_report(args, payload, runtime_dir=runtime_dir, save_eval_report=save_eval_report)
+        return payload
+
+    if gate.get("decision") != "promote" and not getattr(args, "force", False):
+        payload["promotion_skipped_reason"] = f"gate decision={gate.get('decision', '')}"
+        _maybe_save_improve_report(args, payload, runtime_dir=runtime_dir, save_eval_report=save_eval_report)
+        return payload
+
+    gate["objective"] = review.get("objective", "")
+    gate["touched_fragments"] = list(review.get("touched_fragments", []) or [])
+    promotion = promote_candidate(
+        gate,
+        runtime_dir=runtime_dir,
+        approved_by=args.approved_by,
+        force=args.force,
+    )
+    if getattr(args, "save_report", False):
+        promotion["report_path"] = str(
+            save_eval_report(promotion, report_kind="promotion", runtime_dir=runtime_dir)
+        )
+
+    dossier = build_candidate_dossier(manifest_path=str(manifest_path), runtime_dir=runtime_dir)
+    payload.update(
+        {
+            "stage": "promoted",
+            "next_action": dossier.get("next_action", payload.get("next_action", "")),
+            "promotion": promotion,
+            "dossier": dossier,
+        }
+    )
+    _maybe_save_improve_report(args, payload, runtime_dir=runtime_dir, save_eval_report=save_eval_report)
+    return payload
+
+
+def _manifest_from_proposal(proposal: dict) -> dict:
+    candidate = dict(proposal.get("candidate") or {})
+    candidate_id = str(candidate.get("candidate_id") or "").strip()
+    return {
+        "candidate_id": candidate_id,
+        "proposal": {
+            "suite": proposal.get("suite", ""),
+            "objective": proposal.get("objective", ""),
+            "baseline_policy": proposal.get("baseline_policy", ""),
+            "recommended_candidate_policy": proposal.get("recommended_candidate_policy", ""),
+            "rationale": proposal.get("rationale", ""),
+        },
+        "candidate": candidate,
+    }
+
+
+def _maybe_save_improve_report(args, payload: dict, *, runtime_dir: str, save_eval_report) -> None:
+    if not (getattr(args, "save_report", False) or getattr(args, "output", "")):
+        return
+    payload["report_path"] = str(
+        save_eval_report(
+            payload,
+            report_kind="improve",
+            runtime_dir=runtime_dir,
+            output_path=getattr(args, "output", ""),
+        )
+    )
+
+
 # ------------------------------------------------------------------
 # skill install
 # ------------------------------------------------------------------
+
+
+def _read_skill_frontmatter_name(skill_dir: Path) -> str:
+    skill_file = skill_dir / "SKILL.md"
+    if not skill_file.exists():
+        return ""
+    for line in skill_file.read_text(encoding="utf-8").splitlines()[:20]:
+        if line.startswith("name:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def _remove_duplicate_skill_entries(
+    skill_root: Path,
+    *,
+    canonical_dirname: str,
+    canonical_skill_name: str,
+) -> list[Path]:
+    removed: list[Path] = []
+    if not skill_root.exists():
+        return removed
+
+    for child in skill_root.iterdir():
+        if child.name == canonical_dirname:
+            continue
+        if not child.is_dir():
+            continue
+        if _read_skill_frontmatter_name(child) != canonical_skill_name:
+            continue
+        if child.is_symlink():
+            child.unlink()
+        else:
+            shutil.rmtree(child)
+        removed.append(child)
+    return removed
 
 
 def cmd_skill_install(args):
@@ -1447,33 +1652,50 @@ def cmd_skill_install(args):
 
     # Try editable install path first, then pip install path
     skill_src = Path(__file__).resolve().parent.parent / "skills"
+    packaged_skill_src = Path(__file__).resolve().parent.parent / "packaging"
     if not skill_src.exists():
         # pip install: skills may be in the package data or repo checkout
         # Fall back to downloading from GitHub
         print("Skills not found locally. Install from repo:")
         print("  git clone https://github.com/fakechris/thin-supervisor")
-        print("  cp -r thin-supervisor/skills/thin-supervisor-codex ~/.codex/skills/thin-supervisor")
+        print("  cp -r thin-supervisor/packaging/thin-supervisor-codex ~/.codex/skills/thin-supervisor")
         print("  cp -r thin-supervisor/skills/thin-supervisor ~/.claude/skills/thin-supervisor")
         return 1
     installed = []
 
-    # Codex
+    install_roots: dict[Path, set[str]] = {}
+
     codex_home = Path.home() / ".codex"
     if codex_home.exists():
-        dest = codex_home / "skills" / "thin-supervisor"
-        src = skill_src / "thin-supervisor-codex"
-        if src.exists():
-            shutil.copytree(str(src), str(dest), dirs_exist_ok=True)
-            installed.append(f"Codex: {dest}")
+        install_roots.setdefault((codex_home / "skills").resolve(), set()).add("codex")
 
-    # Claude Code
     claude_home = Path.home() / ".claude"
     if claude_home.exists():
-        dest = claude_home / "skills" / "thin-supervisor"
-        src = skill_src / "thin-supervisor"
+        install_roots.setdefault((claude_home / "skills").resolve(), set()).add("claude")
+
+    for skill_root, agents in sorted(install_roots.items(), key=lambda item: str(item[0])):
+        skill_root.mkdir(parents=True, exist_ok=True)
+        dest = skill_root / "thin-supervisor"
+
+        # If both agents share the same underlying skill root, install one
+        # canonical visible skill to avoid duplicate /thin-supervisor entries.
+        if agents == {"codex"}:
+            src = packaged_skill_src / "thin-supervisor-codex"
+            label = "Codex"
+        else:
+            src = skill_src / "thin-supervisor"
+            label = "Claude Code" if agents == {"claude"} else "Codex + Claude (shared skill root)"
+
         if src.exists():
             shutil.copytree(str(src), str(dest), dirs_exist_ok=True)
-            installed.append(f"Claude Code: {dest}")
+            removed = _remove_duplicate_skill_entries(
+                skill_root,
+                canonical_dirname="thin-supervisor",
+                canonical_skill_name="thin-supervisor",
+            )
+            installed.append(f"{label}: {dest}")
+            for path in removed:
+                installed.append(f"Removed duplicate alias: {path}")
 
     if installed:
         print("Skills installed:")
@@ -1482,7 +1704,7 @@ def cmd_skill_install(args):
         print("\nInvoke with /thin-supervisor in your agent.")
     else:
         print("No agent detected (~/.codex or ~/.claude not found).")
-        print("Install manually: cp -r skills/thin-supervisor-codex ~/.codex/skills/thin-supervisor")
+        print("Install manually: cp -r packaging/thin-supervisor-codex ~/.codex/skills/thin-supervisor")
         return 1
     return 0
 
@@ -2099,6 +2321,19 @@ def _add_eval_parser(sub) -> None:
     p_eval_promote.add_argument("--save-report", action="store_true", help="Persist report under .supervisor/evals/reports/")
     p_eval_promote.add_argument("--config", default=None, help="Config YAML path")
     p_eval_promote.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    p_eval_improve = eval_sub.add_parser("improve", help="Run propose -> review/status -> gate -> optional promote as one orchestration command")
+    p_eval_improve.add_argument("--suite", default="approval-core", help="Bundled suite name")
+    p_eval_improve.add_argument("--suite-file", default=None, help="Path to a JSONL eval suite")
+    p_eval_improve.add_argument("--baseline-policy", default="builtin-approval-v1", help="Baseline policy id")
+    p_eval_improve.add_argument("--objective", required=True, choices=["reduce_repeated_confirmation", "reduce_false_approval"], help="Optimization objective")
+    p_eval_improve.add_argument("--run-id", action="append", default=[], help="Optional canary run id (repeatable)")
+    p_eval_improve.add_argument("--approved-by", default="", help="Approver identity; omitted means stop before promotion")
+    p_eval_improve.add_argument("--force", action="store_true", help="Allow promotion even if gate is not yet promote")
+    p_eval_improve.add_argument("--dry-run", action="store_true", help="Stop after proposal/review without gating or promotion")
+    p_eval_improve.add_argument("--output", default="", help="Optional final improve report output path")
+    p_eval_improve.add_argument("--save-report", action="store_true", help="Persist stage reports under .supervisor/evals/reports/")
+    p_eval_improve.add_argument("--config", default=None, help="Config YAML path")
+    p_eval_improve.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     p_eval_history = eval_sub.add_parser("promotion-history", help="Show promotion registry history")
     p_eval_history.add_argument("--config", default=None, help="Config YAML path")
     p_eval_history.add_argument("--json", action="store_true", help="Print machine-readable JSON")

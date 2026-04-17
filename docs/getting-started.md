@@ -28,7 +28,7 @@ The most common setup. Codex runs in a visible tmux pane, supervisor watches fro
 
 ```bash
 # From the thin-supervisor repo
-cp -r skills/thin-supervisor-codex ~/.codex/skills/thin-supervisor
+cp -r packaging/thin-supervisor-codex ~/.codex/skills/thin-supervisor
 ```
 
 This teaches Codex the checkpoint protocol and the 4-stage workflow (Clarify → Plan → Approve → Execute).
@@ -126,6 +126,7 @@ thin-supervisor-dev eval review-candidate --candidate-id <candidate_id> --json
 thin-supervisor-dev eval candidate-status --candidate-id <candidate_id> --json
 thin-supervisor-dev eval gate-candidate --candidate-id <candidate_id> --run-id <run_id> --json
 thin-supervisor-dev eval promote-candidate --candidate-id <candidate_id> --approved-by human --json
+thin-supervisor-dev eval improve --suite approval-core --objective reduce_false_approval --approved-by human --run-id <run_id> --json
 thin-supervisor-dev eval promotion-history --json
 thin-supervisor-dev eval rollout-history --candidate-id <candidate_id> --json
 thin-supervisor-dev learn friction summarize --run-id <run_id> --json
@@ -138,7 +139,7 @@ tail -f .supervisor/runtime/daemon.log
 thin-supervisor bridge read work:0 50
 ```
 
-`--save-report` writes eval artifacts under `.supervisor/evals/reports/`. With `thin-supervisor-dev eval propose`, the same run also writes a candidate-lineage manifest under `.supervisor/evals/candidates/`. Use `thin-supervisor-dev eval review-candidate` to turn that manifest into a human promotion-review summary, `thin-supervisor-dev eval candidate-status` to inspect the full lifecycle dossier, `thin-supervisor-dev eval canary --candidate-id ... --phase shadow|limited` to record real rollout attempts, then `thin-supervisor-dev eval gate-candidate` to combine compare and optional canary signals before promotion, and finally `thin-supervisor-dev eval promote-candidate` to record the approved decision.
+`--save-report` writes eval artifacts under `.supervisor/evals/reports/`. With `thin-supervisor-dev eval propose`, the same run also writes a candidate-lineage manifest under `.supervisor/evals/candidates/`. Use `thin-supervisor-dev eval review-candidate` to turn that manifest into a human promotion-review summary, `thin-supervisor-dev eval candidate-status` to inspect the full lifecycle dossier, `thin-supervisor-dev eval canary --candidate-id ... --phase shadow|limited` to record real rollout attempts, then `thin-supervisor-dev eval gate-candidate` to combine compare and optional canary signals before promotion, and finally `thin-supervisor-dev eval promote-candidate` to record the approved decision. `thin-supervisor-dev eval improve` wraps that same current-main flow into one command when you want the old “improve this candidate” UX without manually chaining every subcommand.
 
 Normal task users should not need `thin-supervisor-dev`. It is reserved for local tuning, canary evaluation, and candidate promotion work.
 
@@ -417,7 +418,7 @@ If your agent supports skills (like Codex's `~/.codex/skills/` or Claude's `~/.c
 
 ```bash
 # Adapt the Codex skill for your agent
-cp -r skills/thin-supervisor-codex ~/.your-agent/skills/thin-supervisor
+cp -r packaging/thin-supervisor-codex ~/.your-agent/skills/thin-supervisor
 ```
 
 The Skill teaches the agent the checkpoint protocol and the 4-stage workflow.
