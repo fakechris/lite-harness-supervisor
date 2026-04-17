@@ -56,6 +56,7 @@ REC_NODE_MISMATCH_PERSISTED: Final[str] = "rec.node_mismatch_persisted"
 REC_RETRY_BUDGET_EXHAUSTED: Final[str] = "rec.retry_budget_exhausted"
 REC_REINJECTION_EXHAUSTED: Final[str] = "rec.reinjection_exhausted"
 REC_VERIFICATION_RETRY_EXHAUSTED: Final[str] = "rec.verification_retry_exhausted"
+REC_CRASH_DURING_RECOVERY: Final[str] = "rec.crash_during_recovery"
 
 
 # --- Verification failures ---
@@ -78,11 +79,22 @@ class ReasonCodeError(ValueError):
 
 
 def is_valid_reason_code(code: str | None) -> bool:
-    """Return True iff `code` matches ``<family>.<name>`` with a frozen family."""
+    """Return True iff `code` is a known, wire-valid reason_code.
+
+    Validation is a whitelist against `KNOWN_REASON_CODES` — not just a
+    regex match against the four family prefixes. Why: the normalizer is
+    the only decoder of this wire field, and "looks like esc.*" is not
+    enough to trust a code. An LLM-hallucinated code like
+    ``esc.i_made_this_up`` matches the regex but is meaningless to every
+    downstream consumer (analytics, routing, replay). Fail closed so
+    those systems only ever see canonical values.
+    """
 
     if not isinstance(code, str) or not code:
         return False
-    return bool(_REASON_CODE_RE.match(code))
+    if not _REASON_CODE_RE.match(code):
+        return False
+    return code in KNOWN_REASON_CODES
 
 
 def validate_reason_code(code: str) -> str:
@@ -131,6 +143,7 @@ KNOWN_REASON_CODES: Final[frozenset[str]] = frozenset(
         REC_RETRY_BUDGET_EXHAUSTED,
         REC_REINJECTION_EXHAUSTED,
         REC_VERIFICATION_RETRY_EXHAUSTED,
+        REC_CRASH_DURING_RECOVERY,
         VER_TEST_FAILED,
         SEM_PROGRESS_CLASS_CONTRADICTION,
         SEM_EVIDENCE_SCOPE_CONTRADICTION,

@@ -92,24 +92,6 @@ def test_is_admin_only_evidence_verifier_counts():
     assert is_admin_only_evidence([{"result": "verified step_1"}]) is False
 
 
-def test_attached_admin_only_evidence_reinjects():
-    gate = ContinueGate(JudgeClient())
-    decision = gate.decide({
-        "top_state": TopState.ATTACHED.value,
-        "last_agent_question": "",
-        "last_agent_checkpoint": {
-            "status": "working",
-            "summary": "attached to pane and reviewed plan",
-            "evidence": [
-                {"attach": "tmux://alpha"},
-                {"plan": "step order confirmed"},
-            ],
-        },
-    })
-    assert decision.decision == DecisionType.RE_INJECT.value
-    assert decision.needs_human is False
-
-
 def test_attached_real_execution_continues():
     gate = ContinueGate(JudgeClient())
     decision = gate.decide({
@@ -160,20 +142,19 @@ def test_attached_blocked_still_escalates():
     assert decision.needs_human is True
 
 
-def test_attached_admin_only_with_missing_input_text_escalates_not_reinject():
-    """Reviewer P2-3: escalation classification must beat the ATTACHED
-    admin-only guard.  A first-checkpoint that cites only admin artifacts
-    AND carries MISSING_EXTERNAL_INPUT text in `needs` / `question_for_supervisor`
-    is a legitimate business pause, not a re-inject candidate — waking the
-    human is the correct move.
+def test_admin_only_with_missing_input_text_escalates():
+    """Escalation classification beats any default-CONTINUE fallback: a
+    checkpoint citing only admin artifacts AND carrying
+    MISSING_EXTERNAL_INPUT text in `needs` / `question_for_supervisor` is
+    a legitimate business pause, so ContinueGate must escalate.
 
-    Critically, `status` stays at `working` here (not `blocked`): the block
-    signal comes from the needs/question text, not the status field, so this
-    probes the escalation classifier path, not the status-based shortcut.
+    Critically, `status` stays at `working` here (not `blocked`): the
+    block signal comes from the needs/question text, not the status
+    field, so this probes the escalation classifier path, not the
+    status-based shortcut.
     """
     gate = ContinueGate(JudgeClient())
     decision = gate.decide({
-        "top_state": TopState.ATTACHED.value,
         "last_agent_question": "",
         "last_agent_checkpoint": {
             "status": "working",
@@ -188,5 +169,3 @@ def test_attached_admin_only_with_missing_input_text_escalates_not_reinject():
     })
     assert decision.decision == DecisionType.ESCALATE_TO_HUMAN.value
     assert decision.needs_human is True
-    # Must NOT have been routed through the RE_INJECT attach-boundary guard.
-    assert decision.reason != "attached: first checkpoint has no execution evidence on current_node"

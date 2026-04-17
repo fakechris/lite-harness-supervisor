@@ -359,6 +359,12 @@ class SupervisorState:
     # RE_INJECT loop bound — incremented on each attach-boundary re-inject,
     # reset when any other decision advances the run. Cap lives in loop.py.
     re_inject_count: int = 0
+    # Captures the top_state at the moment of the most recent pause_for_human
+    # transition, so a resume can restore ATTACHED semantics (first-execution-
+    # evidence gating) when the pause originated on the attach boundary.
+    # Empty string means "never paused" / "last pause did not originate from
+    # a gated state we need to restore".
+    pre_pause_top_state: str = ""
     schema_version: int = 1
 
     def to_dict(self) -> dict[str, Any]:
@@ -402,5 +408,6 @@ class SupervisorState:
             node_mismatch_count=data.get("node_mismatch_count", 0),
             last_mismatch_node_id=data.get("last_mismatch_node_id", ""),
             re_inject_count=data.get("re_inject_count", 0),
+            pre_pause_top_state=data.get("pre_pause_top_state", ""),
             schema_version=data.get("schema_version", 1),
         )

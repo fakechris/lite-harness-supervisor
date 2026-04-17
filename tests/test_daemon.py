@@ -735,11 +735,14 @@ class TestDaemonResume:
         assert result["ok"] is False
         assert "cannot safely resume" in result["error"]
 
-    def test_resume_recovery_needed_transitions_back_to_running(self, tmp_path, monkeypatch):
-        """Reviewer P2-4: a run persisted in RECOVERY_NEEDED (sidecar crashed
-        between `_enter_recovery` and the follow-up transition) must be
-        resumable.  The resume path flips it back to RUNNING so the resumed
-        sidecar can re-run the recovery recipe or simply continue.
+    def test_resume_recovery_needed_leaves_state_for_sidecar_failsafe(self, tmp_path, monkeypatch):
+        """A run persisted in RECOVERY_NEEDED (sidecar crashed between
+        `_enter_recovery` and its follow-up transition) must be resumable,
+        but the daemon must NOT silently flip the state to RUNNING — the
+        stalled auto-intervention recipe can't be safely replayed without
+        operator review. Instead, the sidecar's boot-time fail-safe in
+        `_run_sidecar_inner` handles it by pausing for human with
+        rec.crash_during_recovery.
         """
         spec_path = tmp_path / "test.yaml"
         spec_path.write_text(
@@ -779,9 +782,107 @@ class TestDaemonResume:
         assert result["ok"] is True
         assert result["resumed_from"] == TopState.RECOVERY_NEEDED.value
         resumed = StateStore(str(run_dir)).load_or_init(spec, spec_path=str(spec_path), pane_target="%2")
-        assert resumed.top_state == TopState.RUNNING
+        # Daemon must leave the state untouched — the sidecar boot-check is
+        # authoritative for this transition.
+        assert resumed.top_state == TopState.RECOVERY_NEEDED
         session_events = (run_dir / "session_log.jsonl").read_text()
         assert "resume_requested" in session_events
+
+    def test_resume_from_paused_attached_restores_attach_boundary(self, tmp_path, monkeypatch):
+        """A run that paused on the attach boundary (e.g. RE_INJECT cap
+        exhausted) must resume back to ATTACHED, not RUNNING, so the
+        first-execution-evidence gate still runs on the next checkpoint.
+        Without this, the agent could slip through with admin-only
+        evidence after a human resumes a Phase-17-style pause.
+        """
+        spec_path = tmp_path / "test.yaml"
+        spec_path.write_text(
+            "kind: linear_plan\n"
+            "id: test\n"
+            "goal: test\n"
+            "steps:\n"
+            "  - id: s1\n"
+            "    type: task\n"
+            "    objective: do something\n"
+            "    verify:\n"
+            "      - type: command\n"
+            "        run: echo ok\n"
+            "        expect: pass\n"
+        )
+        spec = load_spec(str(spec_path))
+        run_dir = tmp_path / "runs" / "run_attached_pause"
+        store = StateStore(str(run_dir))
+        state = store.load_or_init(
+            spec,
+            spec_path=str(spec_path),
+            pane_target="%3",
+            workspace_root=str(tmp_path),
+        )
+        # Simulate prior state: paused from ATTACHED (RE_INJECT exhausted
+        # path captured the source top_state).
+        state.top_state = TopState.PAUSED_FOR_HUMAN
+        state.pre_pause_top_state = TopState.ATTACHED.value
+        state.re_inject_count = 4  # exceeded MAX_RE_INJECTS
+        store.save(state)
+
+        monkeypatch.setattr("supervisor.daemon.server.acquire_pane_lock", lambda pane, owner: (True, {}))
+        monkeypatch.setattr("supervisor.daemon.server.update_daemon", lambda *a, **k: None)
+        monkeypatch.setattr("threading.Thread", _DummyThread)
+
+        server = DaemonServer(runs_dir=str(tmp_path / "runs"))
+        result = server._do_resume({"spec_path": str(spec_path), "pane_target": "%3"})
+
+        assert result["ok"] is True
+        resumed = StateStore(str(run_dir)).load_or_init(spec, spec_path=str(spec_path), pane_target="%3")
+        assert resumed.top_state == TopState.ATTACHED
+        # Re-inject counter must be re-armed so the resumed run gets a
+        # fresh window to prove execution evidence.
+        assert resumed.re_inject_count == 0
+        # pre_pause marker is cleared after consumption so a subsequent
+        # pause does not accidentally re-trigger this branch.
+        assert resumed.pre_pause_top_state == ""
+
+    def test_resume_from_paused_running_stays_running(self, tmp_path, monkeypatch):
+        """Symmetry test for the ATTACHED-restore path: a pause that did
+        NOT originate on the attach boundary still resumes to RUNNING.
+        """
+        spec_path = tmp_path / "test.yaml"
+        spec_path.write_text(
+            "kind: linear_plan\n"
+            "id: test\n"
+            "goal: test\n"
+            "steps:\n"
+            "  - id: s1\n"
+            "    type: task\n"
+            "    objective: do something\n"
+            "    verify:\n"
+            "      - type: command\n"
+            "        run: echo ok\n"
+            "        expect: pass\n"
+        )
+        spec = load_spec(str(spec_path))
+        run_dir = tmp_path / "runs" / "run_running_pause"
+        store = StateStore(str(run_dir))
+        state = store.load_or_init(
+            spec,
+            spec_path=str(spec_path),
+            pane_target="%4",
+            workspace_root=str(tmp_path),
+        )
+        state.top_state = TopState.PAUSED_FOR_HUMAN
+        state.pre_pause_top_state = TopState.RUNNING.value
+        store.save(state)
+
+        monkeypatch.setattr("supervisor.daemon.server.acquire_pane_lock", lambda pane, owner: (True, {}))
+        monkeypatch.setattr("supervisor.daemon.server.update_daemon", lambda *a, **k: None)
+        monkeypatch.setattr("threading.Thread", _DummyThread)
+
+        server = DaemonServer(runs_dir=str(tmp_path / "runs"))
+        result = server._do_resume({"spec_path": str(spec_path), "pane_target": "%4"})
+
+        assert result["ok"] is True
+        resumed = StateStore(str(run_dir)).load_or_init(spec, spec_path=str(spec_path), pane_target="%4")
+        assert resumed.top_state == TopState.RUNNING
 
     def test_recoverable_orphaned_states_includes_attached_and_recovery(self):
         """Reviewer P2-4: RECOVERABLE_ORPHANED_STATES must include ATTACHED

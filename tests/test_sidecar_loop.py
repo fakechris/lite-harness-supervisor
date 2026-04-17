@@ -1343,3 +1343,36 @@ def test_non_fresh_resume_skips_attached(tmp_path):
         if '"top_state_change"' in line
     ]
     assert not any(src == "RUNNING" and dst == "ATTACHED" for src, dst in transitions)
+
+
+def test_sidecar_boots_in_recovery_needed_pauses_for_human(tmp_path):
+    """Crash-resume fail-safe: a run whose persisted top_state is
+    RECOVERY_NEEDED must not silently continue. Without the fail-safe the
+    sidecar would enter the main loop with no delivery_ack armed and no
+    pending checkpoint, spinning forever on an empty pane. Instead it
+    must pause for human with pause_class=recovery + rec.crash_during_recovery
+    so an operator can decide how to unstick the run.
+    """
+    from supervisor.protocol.reason_code import REC_CRASH_DURING_RECOVERY
+
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    # Simulate a prior sidecar that crashed between _enter_recovery and
+    # its follow-up transition — the only way RECOVERY_NEEDED ever
+    # persists across process boundaries.
+    state.top_state = TopState.ATTACHED
+    state.top_state = TopState.RECOVERY_NEEDED
+    store.save(state)
+
+    loop = SupervisorLoop(store)
+    terminal = MockTerminal([""])  # empty pane — no checkpoint to drive a transition
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+
+    assert final.top_state == TopState.PAUSED_FOR_HUMAN
+    assert final.human_escalations
+    last = final.human_escalations[-1]
+    assert last["pause_class"] == "recovery"
+    assert last["reason_code"] == REC_CRASH_DURING_RECOVERY
+    # Must not have attempted any inject — no recipe to replay.
+    assert terminal.injected == []

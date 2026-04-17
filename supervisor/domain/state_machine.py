@@ -67,6 +67,7 @@ ALLOWED_TOP_STATE_TRANSITIONS: dict[TopState, set[TopState]] = {
         TopState.ABORTED,
     },
     TopState.PAUSED_FOR_HUMAN: {
+        TopState.ATTACHED,
         TopState.RUNNING,
         TopState.COMPLETED,
         TopState.FAILED,

@@ -131,29 +131,46 @@ def detect_contradiction(
     # Worker says they are making execution progress on the current node,
     # but the mechanical admin-only-evidence heuristic disagrees. Re-
     # inject (attach-boundary) — do NOT touch the retry budget.
-    if normalized.progress_class == "execution" and is_admin_only_evidence(
-        cp_dict.get("evidence")
-    ):
-        return ContradictionOutcome(
-            route="execution_semantic_contradiction",
-            reason_code=SEM_PROGRESS_CLASS_CONTRADICTION,
-            detail=(
-                "worker declared progress_class=execution but evidence "
-                "is admin-only"
-            ),
+    #
+    # Yield to a legitimate escalation on the same checkpoint: a worker
+    # declaring ``escalation_class="business"`` with non-empty
+    # ``blocking_inputs``, or ``escalation_class="review"``, is already
+    # asking for human attention. A mis-set ``progress_class`` on that
+    # same payload is secondary noise, not a reason to silently RE_INJECT
+    # — doing so would swallow a valid escalation signal. The loop-level
+    # fast-paths in `SupervisorLoop.gate()` route these to ESCALATE with
+    # the correct reason_code; we only need to avoid pre-empting them.
+    worker_declared_valid_escalation = (
+        (
+            normalized.escalation_class == "business"
+            and bool(normalized.blocking_inputs)
         )
+        or normalized.escalation_class == "review"
+    )
+    if not worker_declared_valid_escalation:
+        if normalized.progress_class == "execution" and is_admin_only_evidence(
+            cp_dict.get("evidence")
+        ):
+            return ContradictionOutcome(
+                route="execution_semantic_contradiction",
+                reason_code=SEM_PROGRESS_CLASS_CONTRADICTION,
+                detail=(
+                    "worker declared progress_class=execution but evidence "
+                    "is admin-only"
+                ),
+            )
 
-    if normalized.evidence_scope == "current_node" and is_admin_only_evidence(
-        cp_dict.get("evidence")
-    ):
-        return ContradictionOutcome(
-            route="execution_semantic_contradiction",
-            reason_code=SEM_EVIDENCE_SCOPE_CONTRADICTION,
-            detail=(
-                "worker declared evidence_scope=current_node but the "
-                "cited evidence is admin-only"
-            ),
-        )
+        if normalized.evidence_scope == "current_node" and is_admin_only_evidence(
+            cp_dict.get("evidence")
+        ):
+            return ContradictionOutcome(
+                route="execution_semantic_contradiction",
+                reason_code=SEM_EVIDENCE_SCOPE_CONTRADICTION,
+                detail=(
+                    "worker declared evidence_scope=current_node but the "
+                    "cited evidence is admin-only"
+                ),
+            )
 
     # --- 4. Runtime-owned field conflict ------------------------------
     # Worker asserted a value for a field the runtime owns. Runtime
