@@ -30,19 +30,15 @@ logger = logging.getLogger(__name__)
 class TelegramCommandChannel:
     """Full operator command channel over Telegram Bot API.
 
-    Implements the NotificationChannel protocol (outbound alerts with
-    inline keyboard buttons) AND runs a getUpdates polling thread for
-    inbound text commands and button callbacks.
+    One instance represents one Provider Instance (a single bot_token)
+    serving a merged set of conversation_targets.  Multiple config
+    entries sharing the same bot_token are merged upstream in
+    OperatorChannelHost.from_config() before this constructor runs —
+    see docs/plans/2026-04-17-im-command-channel-identity-and-merge-semantics.md.
 
-    Config::
-
-        notification_channels:
-          - kind: telegram
-            mode: command
-            bot_token: "123456:ABC-..."
-            chat_id: "-100xxx"
-            allowed_chat_ids: ["-100xxx"]
-            language: "zh"
+    Config (YAML) may list multiple entries with the same bot_token and
+    different chat_ids; they collapse into one instance whose notify()
+    fans out across every merged target.
     """
 
     TELEGRAM_API = "https://api.telegram.org"
@@ -51,21 +47,23 @@ class TelegramCommandChannel:
         self,
         *,
         bot_token: str,
-        chat_id: str,
-        allowed_chat_ids: list[str] | None = None,
-        allowed_user_ids: list[str] | None = None,
+        conversation_targets,
+        allowed_chat_ids=None,
+        allowed_user_ids=None,
         language: str = "zh",
     ):
         if not bot_token:
             raise ValueError("telegram bot_token is required")
-        if not chat_id:
-            raise ValueError("telegram chat_id is required")
+        targets = {str(t) for t in (conversation_targets or []) if t}
+        if not targets:
+            raise ValueError("telegram conversation_targets must be non-empty")
         self.bot_token = bot_token
-        self.chat_id = chat_id
+        self.conversation_targets = targets
         self.language = language
+        allow_chats = {str(c) for c in (allowed_chat_ids or []) if c} or set(targets)
         self.auth = CommandAuth(
-            allowed_chat_ids=allowed_chat_ids or [chat_id],
-            allowed_user_ids=allowed_user_ids,
+            allowed_chat_ids=sorted(allow_chats),
+            allowed_user_ids=sorted({str(u) for u in (allowed_user_ids or []) if u}) or None,
         )
         self._update_offset = 0
         self._stop_event = threading.Event()
@@ -81,10 +79,15 @@ class TelegramCommandChannel:
     # ── NotificationChannel protocol ──────────────────────────────
 
     def notify(self, event: NotificationEvent) -> None:
-        """Send alert with inline keyboard buttons."""
+        """Fan out alert with inline keyboard buttons to every target.
+
+        A single Provider Instance may serve multiple conversation
+        targets; every merged target receives the alert.
+        """
         text = self._format_alert(event)
         keyboard = self._build_alert_keyboard(event.run_id)
-        self._send_message(self.chat_id, text, reply_markup=keyboard)
+        for chat_id in sorted(self.conversation_targets):
+            self._send_message(chat_id, text, reply_markup=keyboard)
 
     # ── Lifecycle ─────────────────────────────────────────────────
 

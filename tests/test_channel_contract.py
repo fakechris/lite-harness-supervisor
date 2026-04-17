@@ -35,7 +35,7 @@ from supervisor.operator.channel_host import (
 class TestProtocolConformance:
     def test_telegram_implements_protocol(self):
         from supervisor.adapters.telegram_command import TelegramCommandChannel
-        ch = TelegramCommandChannel(bot_token="tok", chat_id="123")
+        ch = TelegramCommandChannel(bot_token="tok", conversation_targets=["123"])
         assert isinstance(ch, CommandChannel)
         assert hasattr(ch, "config_identity")
         assert hasattr(ch, "start")
@@ -53,8 +53,8 @@ class TestProtocolConformance:
 
     def test_telegram_config_identity_deterministic(self):
         from supervisor.adapters.telegram_command import TelegramCommandChannel
-        ch1 = TelegramCommandChannel(bot_token="tok_abc", chat_id="123")
-        ch2 = TelegramCommandChannel(bot_token="tok_abc", chat_id="456")
+        ch1 = TelegramCommandChannel(bot_token="tok_abc", conversation_targets=["123"])
+        ch2 = TelegramCommandChannel(bot_token="tok_abc", conversation_targets=["456"])
         assert ch1.config_identity == ch2.config_identity  # same token
 
     def test_lark_config_identity_deterministic(self):
@@ -71,8 +71,8 @@ class TestProtocolConformance:
 
     def test_different_tokens_different_identity(self):
         from supervisor.adapters.telegram_command import TelegramCommandChannel
-        ch1 = TelegramCommandChannel(bot_token="tok_a", chat_id="123")
-        ch2 = TelegramCommandChannel(bot_token="tok_b", chat_id="123")
+        ch1 = TelegramCommandChannel(bot_token="tok_a", conversation_targets=["123"])
+        ch2 = TelegramCommandChannel(bot_token="tok_b", conversation_targets=["123"])
         assert ch1.config_identity != ch2.config_identity
 
 
@@ -207,25 +207,6 @@ class TestOperatorChannelHost:
             host.stop()
             _release_lock(fh)
 
-    def test_same_token_different_chats_both_notify(self, tmp_path):
-        """P2 fix: same bot token, different chat_ids — both get notifications."""
-        ch_1 = _mock_channel("same_id")
-        ch_2 = _mock_channel("same_id")
-        with patch("supervisor.operator.channel_host.LOCK_DIR", str(tmp_path)):
-            host = OperatorChannelHost([ch_1, ch_2])
-            host.start()
-            # Only one transport started (same identity)
-            assert len(host.transport_owners) == 1
-            ch_1.start.assert_called_once()
-            ch_2.start.assert_not_called()
-            # But BOTH channels receive notifications
-            assert len(host.channels) == 2
-            event = MagicMock()
-            host.notify(event)
-            ch_1.notify.assert_called_once_with(event)
-            ch_2.notify.assert_called_once_with(event)
-            host.stop()
-
     def test_start_returns_self(self, tmp_path):
         with patch("supervisor.operator.channel_host.LOCK_DIR", str(tmp_path)):
             host = OperatorChannelHost([])
@@ -243,8 +224,11 @@ class TestOperatorChannelHost:
         from supervisor.adapters.telegram_command import TelegramCommandChannel
         assert isinstance(host._channels[0], TelegramCommandChannel)
 
-    def test_from_config_creates_multiple_chats_same_token(self):
-        """P2: same bot token, different chat_ids — both channels created."""
+    def test_from_config_merges_multiple_chats_same_token(self):
+        """Provider Instance merge: same bot_token collapses into one
+        adapter with both chats as merged conversation targets.  See
+        docs/plans/2026-04-17-im-command-channel-identity-and-merge-semantics.md.
+        """
         from supervisor.config import RuntimeConfig
         config = RuntimeConfig(
             notification_channels=[
@@ -253,9 +237,8 @@ class TestOperatorChannelHost:
             ]
         )
         host = OperatorChannelHost.from_config(config)
-        assert len(host._channels) == 2
-        assert host._channels[0].chat_id == "111"
-        assert host._channels[1].chat_id == "222"
+        assert len(host._channels) == 1
+        assert host._channels[0].conversation_targets == {"111", "222"}
 
     def test_from_config_skips_notify_mode(self):
         from supervisor.config import RuntimeConfig

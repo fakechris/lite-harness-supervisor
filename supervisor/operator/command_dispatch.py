@@ -47,6 +47,16 @@ class CommandAuth:
         self._chat_ids = set(str(c) for c in (allowed_chat_ids or []))
         self._user_ids = set(str(u) for u in (allowed_user_ids or []))
 
+    @property
+    def allowed_chat_ids(self) -> frozenset[str]:
+        """Read-only view of the merged chat allowlist."""
+        return frozenset(self._chat_ids)
+
+    @property
+    def allowed_user_ids(self) -> frozenset[str]:
+        """Read-only view of the merged user allowlist."""
+        return frozenset(self._user_ids)
+
     def is_authorized(self, chat_id: str, user_id: str = "") -> bool:
         if not self._chat_ids and not self._user_ids:
             return False  # fail-closed: empty allowlist rejects all

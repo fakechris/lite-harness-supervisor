@@ -69,7 +69,8 @@ class TestConstruction:
     def test_basic(self):
         ch = _make_channel()
         assert ch.language == "zh"
-        assert ch.allowed_chat_ids == ["oc_xxx"]
+        assert ch.conversation_targets == {"oc_xxx"}
+        assert set(ch.auth.allowed_chat_ids) == {"oc_xxx"}
 
     def test_auth_chat_only(self):
         ch = _make_channel(allowed_chat_ids=["oc_xxx"])
@@ -332,7 +333,10 @@ class TestHttpTextMessageRouting:
     def test_user_authorized_text_event(self):
         """Text message from authorized user in any chat should be processed."""
         ch = _make_channel(
-            callback_port=0, allowed_chat_ids=[], allowed_user_ids=["ou_admin"],
+            callback_port=0,
+            conversation_targets=["oc_default"],
+            allowed_chat_ids=[],
+            allowed_user_ids=["ou_admin"],
         )
         with patch.object(ch, "handle_text_command") as mock_handle:
             server, port = self._start_server(ch)

@@ -97,6 +97,58 @@ def _release_lock(fh: IO) -> None:
         pass
 
 
+# ── Provider Instance merge helpers ──────────────────────────────
+
+
+def _merge_additive_fields(
+    entries: list[dict],
+) -> tuple[list[str], list[str], list[str]]:
+    """Union conversation targets, allowed_chat_ids, allowed_user_ids.
+
+    Legacy scalar `chat_id` and list `chat_ids` both feed the target set.
+    When a group lists only `allowed_chat_ids` (no `chat_id`/`chat_ids`),
+    the allowlist values serve as conversation targets too — that matches
+    how single-entry configs behaved before the merge contract.
+    """
+    targets: set[str] = set()
+    allow_chats: set[str] = set()
+    allow_users: set[str] = set()
+    for e in entries:
+        chat_id = e.get("chat_id")
+        if chat_id:
+            targets.add(str(chat_id))
+        for t in e.get("chat_ids", []) or []:
+            if t:
+                targets.add(str(t))
+        for c in e.get("allowed_chat_ids", []) or []:
+            if c:
+                allow_chats.add(str(c))
+        for u in e.get("allowed_user_ids", []) or []:
+            if u:
+                allow_users.add(str(u))
+    if not targets:
+        targets = set(allow_chats)
+    return sorted(targets), sorted(allow_chats), sorted(allow_users)
+
+
+def _require_match(entries: list[dict], field: str, *, default, label: str) -> None:
+    """Raise ValueError when `field` disagrees across a Provider Instance group.
+
+    Transport-critical fields (language, callback_port, credentials)
+    must not silently diverge — picking one would make behavior depend
+    on config entry order, which violates the merge contract.
+    """
+    seen: set = set()
+    for e in entries:
+        seen.add(e.get(field, default))
+    if len(seen) > 1:
+        raise ValueError(
+            f"{label} provider instance has conflicting {field!r} values "
+            f"across merged config entries: {sorted(str(v) for v in seen)}. "
+            "Transport-critical fields must match exactly."
+        )
+
+
 # ── OperatorChannelHost ──────────────────────────────────────────
 
 
@@ -120,58 +172,114 @@ class OperatorChannelHost:
 
     @classmethod
     def from_config(cls, config) -> "OperatorChannelHost":
-        """Create command channels from config entries with mode=command."""
+        """Build one adapter per Provider Instance from config.
+
+        Multiple `mode: command` entries that share a Provider Instance
+        key (Telegram `bot_token`; Lark `app_id`) merge into a single
+        adapter:
+
+        - additive fields (conversation targets, allowed_chat_ids,
+          allowed_user_ids) are set-unioned;
+        - transport-critical fields (language; Lark app_secret,
+          callback_port, verification_token, encrypt_key) must match
+          exactly across entries — any disagreement raises ValueError
+          so the daemon fails closed at startup instead of silently
+          picking one value.
+
+        See docs/plans/2026-04-17-im-command-channel-identity-and-merge-semantics.md.
+        """
+        entries = getattr(config, "notification_channels", []) or []
+        command_entries = [
+            e for e in entries
+            if isinstance(e, dict)
+            and e.get("mode", "notify") == "command"
+            and e.get("kind", "").strip() in ("telegram", "lark")
+        ]
+
         channels: list[CommandChannel] = []
-        for entry in getattr(config, "notification_channels", []) or []:
-            if not isinstance(entry, dict):
-                continue
-            kind = entry.get("kind", "").strip()
-            mode = entry.get("mode", "notify")
-            if mode != "command":
-                continue
-            if kind == "telegram":
-                try:
-                    from supervisor.adapters.telegram_command import TelegramCommandChannel
-                    channels.append(TelegramCommandChannel(
-                        bot_token=entry.get("bot_token", ""),
-                        chat_id=entry.get("chat_id", ""),
-                        allowed_chat_ids=entry.get("allowed_chat_ids"),
-                        allowed_user_ids=entry.get("allowed_user_ids"),
-                        language=entry.get("language", "zh"),
-                    ))
-                except (ValueError, Exception) as exc:
-                    logger.warning("skipping telegram command channel: %s", exc)
-            elif kind == "lark":
-                try:
-                    from supervisor.adapters.lark_command import LarkCommandChannel
-                    channels.append(LarkCommandChannel(
-                        app_id=entry.get("app_id", ""),
-                        app_secret=entry.get("app_secret", ""),
-                        allowed_chat_ids=entry.get("allowed_chat_ids"),
-                        allowed_user_ids=entry.get("allowed_user_ids"),
-                        language=entry.get("language", "zh"),
-                        callback_port=entry.get("callback_port", 9876),
-                        verification_token=entry.get("verification_token", ""),
-                        encrypt_key=entry.get("encrypt_key", ""),
-                    ))
-                except (ValueError, Exception) as exc:
-                    logger.warning("skipping lark command channel: %s", exc)
+        channels.extend(cls._build_telegram_channels(command_entries))
+        channels.extend(cls._build_lark_channels(command_entries))
         return cls(channels)
+
+    @staticmethod
+    def _build_telegram_channels(entries: list[dict]) -> list[CommandChannel]:
+        from supervisor.adapters.telegram_command import TelegramCommandChannel
+
+        groups: dict[str, list[dict]] = {}
+        for e in entries:
+            if e.get("kind") != "telegram":
+                continue
+            token = e.get("bot_token", "").strip()
+            if not token:
+                continue
+            groups.setdefault(token, []).append(e)
+
+        built: list[CommandChannel] = []
+        for token, group in groups.items():
+            _require_match(group, "language", default="zh", label="telegram")
+            language = group[0].get("language", "zh")
+            targets, allow_chats, allow_users = _merge_additive_fields(group)
+            try:
+                built.append(TelegramCommandChannel(
+                    bot_token=token,
+                    conversation_targets=targets,
+                    allowed_chat_ids=allow_chats,
+                    allowed_user_ids=allow_users,
+                    language=language,
+                ))
+            except ValueError as exc:
+                logger.warning("skipping telegram command channel: %s", exc)
+        return built
+
+    @staticmethod
+    def _build_lark_channels(entries: list[dict]) -> list[CommandChannel]:
+        from supervisor.adapters.lark_command import LarkCommandChannel
+
+        groups: dict[str, list[dict]] = {}
+        for e in entries:
+            if e.get("kind") != "lark":
+                continue
+            app_id = e.get("app_id", "").strip()
+            if not app_id:
+                continue
+            groups.setdefault(app_id, []).append(e)
+
+        built: list[CommandChannel] = []
+        for app_id, group in groups.items():
+            _require_match(group, "app_secret", default="", label="lark")
+            _require_match(group, "language", default="zh", label="lark")
+            _require_match(group, "callback_port", default=9876, label="lark")
+            _require_match(group, "verification_token", default="", label="lark")
+            _require_match(group, "encrypt_key", default="", label="lark")
+            targets, allow_chats, allow_users = _merge_additive_fields(group)
+            try:
+                built.append(LarkCommandChannel(
+                    app_id=app_id,
+                    app_secret=group[0].get("app_secret", ""),
+                    conversation_targets=targets,
+                    allowed_chat_ids=allow_chats,
+                    allowed_user_ids=allow_users,
+                    language=group[0].get("language", "zh"),
+                    callback_port=group[0].get("callback_port", 9876),
+                    verification_token=group[0].get("verification_token", ""),
+                    encrypt_key=group[0].get("encrypt_key", ""),
+                ))
+            except ValueError as exc:
+                logger.warning("skipping lark command channel: %s", exc)
+        return built
 
     def start(self) -> "OperatorChannelHost":
         """Start inbound transports, acquiring cross-process locks.
 
-        Lock only controls who runs the polling thread / HTTP server.
-        ALL channels remain available for outbound notifications
+        Each channel corresponds to one Provider Instance (merge has
+        already happened in from_config), so there is at most one
+        adapter per identity in `self._channels`.  The lock only
+        controls who runs the polling thread / HTTP server; every
+        channel remains available for outbound notifications
         regardless of lock ownership.  Returns self.
         """
         for channel in self._channels:
             identity = channel.config_identity
-            if identity in self._locks:
-                # Same identity already has transport started in this
-                # process — skip starting a duplicate poller/server,
-                # but the channel is still in _channels for notify().
-                continue
             lock = _try_acquire_lock(identity)
             if not lock:
                 logger.warning(
