@@ -158,6 +158,20 @@ class TestInjectionReadiness:
         assert outcome == "defer"
         assert reason == "buffer_changed"
 
+    def test_cursor_typing_status_treats_idle_codex_prompt_as_not_busy(self):
+        status = TerminalAdapter._cursor_typing_status(
+            "› \n",
+            {"active": True, "dead": False, "cursor_x": 2, "cursor_y": 0, "height": 1},
+        )
+        assert status == "not_busy"
+
+    def test_cursor_typing_status_treats_prompt_with_user_input_as_busy(self):
+        status = TerminalAdapter._cursor_typing_status(
+            "› hello\n",
+            {"active": True, "dead": False, "cursor_x": 6, "cursor_y": 0, "height": 1},
+        )
+        assert status == "busy"
+
 
 class TestListPanes:
 

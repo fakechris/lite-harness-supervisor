@@ -355,12 +355,16 @@ class TerminalAdapter:
 
     @staticmethod
     def _runtime_prompt_prefix(snapshot: str) -> str | None:
-        lines = [line.rstrip() for line in snapshot.replace("\r", "").splitlines()]
+        lines = snapshot.replace("\r", "").splitlines()
         for line in reversed(lines):
+            if line.startswith("› "):
+                return "› "
+            if line.startswith("❯ "):
+                return "❯ "
             stripped = line.strip()
-            if stripped.startswith("›"):
+            if stripped == "›":
                 return "›"
-            if stripped.startswith("❯"):
+            if stripped == "❯":
                 return "❯"
         return None
 
@@ -379,7 +383,7 @@ class TerminalAdapter:
         line_index = cursor_y - capture_start_row
         if line_index < 0 or line_index >= len(lines):
             return "unknown"
-        line = lines[line_index].rstrip()
+        line = lines[line_index]
         if not line.startswith(prefix):
             return "not_busy"
         return "busy" if cursor_x > len(prefix) else "not_busy"
