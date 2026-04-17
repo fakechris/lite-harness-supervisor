@@ -4,10 +4,36 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import pytest
 import yaml
 
 from supervisor import app
 from supervisor.config import RuntimeConfig
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_session_index(monkeypatch):
+    """Isolate status/list tests from real global registries.
+
+    `cmd_status` / `cmd_list` route through `collect_sessions()`, which in
+    turn reads `list_known_worktrees()`, `list_daemons()`, and
+    `list_pane_owners()`. Without stubbing these, tests inherit state from
+    prior runs on the developer's machine. Tests that need specific
+    registries patch these on top of the autouse defaults.
+    """
+    monkeypatch.setattr(
+        "supervisor.operator.session_index.list_known_worktrees", lambda: []
+    )
+    monkeypatch.setattr(
+        "supervisor.operator.session_index.list_daemons", lambda: []
+    )
+    monkeypatch.setattr(
+        "supervisor.operator.session_index.list_pane_owners", lambda: []
+    )
+    monkeypatch.setattr(
+        "supervisor.operator.session_index._discover_git_worktrees",
+        lambda cwd: [],
+    )
 
 
 class _DaemonWithNoRuns:
@@ -45,9 +71,9 @@ def test_parse_runtime_argv_keeps_run_subcommands():
 
 
 def _write_completed_state(tmp_path, *, run_id: str = "run_completed") -> None:
-    runtime_dir = tmp_path / ".supervisor" / "runtime"
-    runtime_dir.mkdir(parents=True)
-    (runtime_dir / "state.json").write_text(json.dumps({
+    run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(json.dumps({
         "run_id": run_id,
         "top_state": "COMPLETED",
         "current_node_id": "verify",
@@ -2032,3 +2058,192 @@ def test_skill_install_dedupes_shared_skill_root_and_removes_legacy_alias(
                 visible_names.append(line.split(":", 1)[1].strip())
                 break
     assert visible_names.count("thin-supervisor") == 1
+
+
+# ─────────────────────────────────────────────────────────────────
+# Task 3: status is global-first across worktrees
+#
+# Per docs/plans/2026-04-16-global-observability-plane-for-per-worktree-runtime.md:
+#   - `status` must route through collect_sessions() so runs in OTHER
+#     worktrees (known_worktrees, live daemon cwds, pane-owner cwds) show up
+#   - `status --local` restricts to the current cwd only
+#   - output must print the worktree root explicitly when the run is not in cwd
+# ─────────────────────────────────────────────────────────────────
+
+
+def _write_paused_state_in(worktree: Path, *, run_id: str) -> None:
+    run_dir = worktree / ".supervisor" / "runtime" / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(json.dumps({
+        "run_id": run_id,
+        "top_state": "PAUSED_FOR_HUMAN",
+        "current_node_id": "step_paused",
+        "pane_target": "%22",
+        "spec_path": "/tmp/spec.yaml",
+        "surface_type": "tmux",
+        "controller_mode": "daemon",
+        "human_escalations": [{"reason": "needs human review"}],
+    }))
+
+
+def _write_running_state_in(worktree: Path, *, run_id: str,
+                            controller_mode: str = "daemon") -> None:
+    run_dir = worktree / ".supervisor" / "runtime" / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(json.dumps({
+        "run_id": run_id,
+        "top_state": "RUNNING",
+        "current_node_id": "step_run",
+        "pane_target": "%33",
+        "spec_path": "/tmp/spec.yaml",
+        "surface_type": "tmux",
+        "controller_mode": controller_mode,
+    }))
+
+
+def _write_completed_state_in(worktree: Path, *, run_id: str) -> None:
+    run_dir = worktree / ".supervisor" / "runtime" / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(json.dumps({
+        "run_id": run_id,
+        "top_state": "COMPLETED",
+        "current_node_id": "verify",
+        "pane_target": "%44",
+        "spec_path": "/tmp/spec.yaml",
+        "surface_type": "tmux",
+    }))
+
+
+def _patch_session_index_registries(monkeypatch, *,
+                                     known_worktrees=(),
+                                     daemons=(),
+                                     pane_owners=()) -> None:
+    monkeypatch.setattr(
+        "supervisor.operator.session_index.list_known_worktrees",
+        lambda: list(known_worktrees),
+    )
+    monkeypatch.setattr(
+        "supervisor.operator.session_index.list_daemons",
+        lambda: list(daemons),
+    )
+    monkeypatch.setattr(
+        "supervisor.operator.session_index.list_pane_owners",
+        lambda: list(pane_owners),
+    )
+    monkeypatch.setattr(
+        "supervisor.operator.session_index._discover_git_worktrees",
+        lambda cwd: [],
+    )
+
+
+def test_status_shows_orphaned_run_from_child_worktree(
+    tmp_path, monkeypatch, capsys,
+):
+    """Root cwd must see a child worktree's orphaned paused run."""
+    root = tmp_path / "root"
+    child = tmp_path / "child"
+    root.mkdir()
+    child.mkdir()
+    monkeypatch.chdir(root)
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
+    _write_paused_state_in(child, run_id="run_child_paused")
+    _patch_session_index_registries(
+        monkeypatch, known_worktrees=[str(child)],
+    )
+
+    result = app.cmd_status(argparse.Namespace(config=None, local=False))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "run_child_paused" in out
+    # Worktree root must be printed explicitly (not cwd)
+    assert str(child.resolve()) in out
+
+
+def test_status_local_flag_restricts_to_current_worktree(
+    tmp_path, monkeypatch, capsys,
+):
+    """`status --local` must hide runs from other worktrees."""
+    root = tmp_path / "root"
+    child = tmp_path / "child"
+    root.mkdir()
+    child.mkdir()
+    monkeypatch.chdir(root)
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
+    _write_paused_state_in(root, run_id="run_in_root")
+    _write_paused_state_in(child, run_id="run_in_child")
+    _patch_session_index_registries(
+        monkeypatch, known_worktrees=[str(child)],
+    )
+
+    result = app.cmd_status(argparse.Namespace(config=None, local=True))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "run_in_root" in out
+    assert "run_in_child" not in out
+
+
+def test_status_buckets_remain_stable_across_worktrees(
+    tmp_path, monkeypatch, capsys,
+):
+    """Daemon / orphaned / completed buckets must survive global scan."""
+    root = tmp_path / "root"
+    wt_a = tmp_path / "wt_a"
+    wt_b = tmp_path / "wt_b"
+    wt_c = tmp_path / "wt_c"
+    for p in (root, wt_a, wt_b, wt_c):
+        p.mkdir()
+    monkeypatch.chdir(root)
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
+
+    _write_running_state_in(wt_a, run_id="run_daemon_live")
+    _write_paused_state_in(wt_b, run_id="run_orphan_paused")
+    _write_completed_state_in(wt_c, run_id="run_done_elsewhere")
+
+    _patch_session_index_registries(
+        monkeypatch,
+        known_worktrees=[str(wt_a), str(wt_b), str(wt_c)],
+        daemons=[{
+            "pid": 1,
+            "cwd": str(wt_a.resolve()),
+            "socket": "/tmp/a.sock",
+            "active_runs": 1,
+        }],
+    )
+
+    result = app.cmd_status(argparse.Namespace(config=None, local=False))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    # All three runs surface
+    assert "run_daemon_live" in out
+    assert "run_orphan_paused" in out
+    assert "run_done_elsewhere" in out
+    # Bucket labels still render
+    assert "Active runs" in out
+    assert "Orphaned" in out or "orphaned" in out.lower()
+    assert "Recently completed" in out
+
+
+def test_status_default_includes_global_worktrees(
+    tmp_path, monkeypatch, capsys,
+):
+    """Without --local, status scans all known worktrees."""
+    root = tmp_path / "root"
+    other = tmp_path / "other"
+    root.mkdir()
+    other.mkdir()
+    monkeypatch.chdir(root)
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
+    _write_running_state_in(other, run_id="run_elsewhere")
+    _patch_session_index_registries(
+        monkeypatch, known_worktrees=[str(other)],
+    )
+
+    result = app.cmd_status(argparse.Namespace(config=None, local=False))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "run_elsewhere" in out
+    assert str(other.resolve()) in out

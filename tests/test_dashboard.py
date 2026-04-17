@@ -6,7 +6,27 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from supervisor import app
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_session_index(monkeypatch):
+    """Isolate status tests from real global registries (see test_app_cli.py)."""
+    monkeypatch.setattr(
+        "supervisor.operator.session_index.list_known_worktrees", lambda: []
+    )
+    monkeypatch.setattr(
+        "supervisor.operator.session_index.list_daemons", lambda: []
+    )
+    monkeypatch.setattr(
+        "supervisor.operator.session_index.list_pane_owners", lambda: []
+    )
+    monkeypatch.setattr(
+        "supervisor.operator.session_index._discover_git_worktrees",
+        lambda cwd: [],
+    )
 
 
 class _DaemonWithRuns:
@@ -33,10 +53,33 @@ class _DaemonStopped:
         return False
 
 
-def test_status_buckets_daemon_runs(monkeypatch, capsys):
-    """cmd_status shows daemon runs under 'Active runs:' section."""
-    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonWithRuns)
-    monkeypatch.setattr(app, "_find_local_run_summaries", lambda: [])
+def test_status_buckets_daemon_runs(tmp_path, monkeypatch, capsys):
+    """cmd_status shows daemon runs under 'Active runs:' section.
+
+    Daemon liveness now flows through `list_daemons()` + session_index,
+    not a direct DaemonClient.status() call.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
+
+    run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_d1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(json.dumps({
+        "run_id": "run_d1",
+        "top_state": "RUNNING",
+        "current_node_id": "step_1",
+        "pane_target": "%3",
+        "controller_mode": "daemon",
+    }))
+    monkeypatch.setattr(
+        "supervisor.operator.session_index.list_daemons",
+        lambda: [{
+            "pid": 1,
+            "cwd": str(tmp_path.resolve()),
+            "socket": "/tmp/a.sock",
+            "active_runs": 1,
+        }],
+    )
 
     result = app.cmd_status(argparse.Namespace(config=None))
 
@@ -105,14 +148,12 @@ def test_ps_shows_idle_state(monkeypatch, capsys):
 
 
 def test_status_alive_foreground_not_orphaned(tmp_path, monkeypatch, capsys):
-    """Active foreground run with alive PID is shown as foreground, not orphaned."""
+    """Active foreground run registered as pane owner is foreground, not orphaned."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
 
-    # Create a foreground run with current process PID (alive)
     run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_fg_alive"
     run_dir.mkdir(parents=True)
-    import os
     (run_dir / "state.json").write_text(json.dumps({
         "run_id": "run_fg_alive",
         "spec_id": "test",
@@ -120,8 +161,17 @@ def test_status_alive_foreground_not_orphaned(tmp_path, monkeypatch, capsys):
         "top_state": "RUNNING",
         "current_node_id": "step_1",
         "controller_mode": "foreground",
-        "_foreground_pid": os.getpid(),  # current process is alive
     }))
+    monkeypatch.setattr(
+        "supervisor.operator.session_index.list_pane_owners",
+        lambda: [{
+            "pid": 1,
+            "cwd": str(tmp_path.resolve()),
+            "run_id": "run_fg_alive",
+            "pane_target": "%1",
+            "controller_mode": "foreground",
+        }],
+    )
 
     result = app.cmd_status(argparse.Namespace(config=None))
 

@@ -1759,37 +1759,91 @@ def cmd_session(args):
     return 0
 
 
+def _display_view(record) -> dict:
+    """Build the display dict for a SessionRecord.
+
+    For orphaned non-paused runs (RUNNING/GATING/VERIFYING without a live
+    controller), rewrite the view to PAUSED_FOR_HUMAN with an injected
+    escalation reason so the operator sees a concrete next action — this
+    preserves the long-standing 'persisted run was left in progress without
+    an active daemon worker' UX that operator tooling depends on.
+    """
+    view = {
+        "run_id": record.run_id,
+        "worktree_root": record.worktree_root,
+        "top_state": record.top_state,
+        "current_node": record.current_node,
+        "pane_target": record.pane_target,
+        "controller_mode": record.controller_mode,
+        "pause_reason": record.pause_reason,
+        "next_action": record.next_action,
+        "status_reason": record.last_checkpoint_summary,
+        "daemon_socket": record.daemon_socket,
+    }
+    orphan_non_paused = (
+        record.is_orphaned
+        and record.top_state in {"RUNNING", "GATING", "VERIFYING"}
+    )
+    if orphan_non_paused:
+        reason = (
+            "foreground process no longer running"
+            if record.controller_mode == "foreground"
+            else "persisted run was left in progress without an active daemon worker"
+        )
+        synthetic = {
+            "run_id": record.run_id,
+            "top_state": "PAUSED_FOR_HUMAN",
+            "current_node_id": record.current_node,
+            "pane_target": record.pane_target,
+            "spec_path": record.spec_path,
+            "surface_type": "tmux",
+            "human_escalations": [{"reason": reason}],
+        }
+        rewritten = summarize_state(synthetic)
+        view["top_state"] = "PAUSED_FOR_HUMAN"
+        view["pause_reason"] = rewritten.get("pause_reason", reason)
+        view["next_action"] = rewritten.get("next_action", "")
+    return view
+
+
 def cmd_status(args):
-    """Show all run states, bucketed by controller mode."""
+    """Show all run states, bucketed by liveness tag.
+
+    Global-first by default: scans every discoverable worktree (cwd,
+    known_worktrees, live daemon cwds, pane-owner cwds, git worktrees).
+    `--local` narrows to the current cwd only.
+    """
     from supervisor.daemon.client import DaemonClient
+    from supervisor.operator.session_index import collect_sessions
+
+    local_only = bool(getattr(args, "local", False))
+    sessions = collect_sessions(local_only=local_only)
 
     daemon_runs: list[dict] = []
     foreground_runs: list[dict] = []
     orphaned_runs: list[dict] = []
     completed_runs: list[dict] = []
 
-    # Collect daemon-managed runs
-    client = DaemonClient()
-    if client.is_running():
-        result = client.status()
-        if result.get("ok"):
-            daemon_runs = result.get("runs", [])
-
-    # Collect local state (foreground, orphaned, completed)
-    for state in _find_local_run_summaries():
-        display = _summarize_local_state_for_hint(state)
-        # Skip daemon-managed runs already shown above
-        if any(r["run_id"] == display.get("run_id") for r in daemon_runs):
+    for rec in sessions:
+        view = _display_view(rec)
+        if rec.is_completed:
+            completed_runs.append(view)
             continue
-        if display.get("orphaned_local_state"):
-            orphaned_runs.append(display)
-        elif state.get("controller_mode") == "foreground":
-            foreground_runs.append(display)
-        elif display.get("top_state") == "COMPLETED":
-            completed_runs.append(display)
-        else:
-            orphaned_runs.append(display)
+        if rec.is_orphaned:
+            orphaned_runs.append(view)
+            continue
+        if rec.is_live and rec.controller_mode == "foreground":
+            foreground_runs.append(view)
+            continue
+        if rec.is_live:
+            daemon_runs.append(view)
+            continue
+        # Persisted local state that isn't actionable (e.g. ABORTED bucket
+        # already handled above). Fall through to orphaned bucket so nothing
+        # silently disappears from operator view.
+        orphaned_runs.append(view)
 
+    client = DaemonClient()
     if not daemon_runs and not foreground_runs and not orphaned_runs and not completed_runs:
         if client.is_running():
             print("Daemon running, no active runs.")
@@ -1797,10 +1851,27 @@ def cmd_status(args):
             print("No runs found. Daemon not running.")
         return 0
 
+    cwd = os.getcwd()
+
+    def _wt_suffix(view: dict) -> str:
+        wt = view.get("worktree_root", "")
+        if not wt:
+            return ""
+        try:
+            if Path(wt).resolve() == Path(cwd).resolve():
+                return ""
+        except (OSError, RuntimeError):
+            pass
+        return f"  worktree={wt}"
+
     if daemon_runs:
         print("Active runs:")
         for r in daemon_runs:
-            print(f"  [daemon]  {r['run_id']}  {r['top_state']}  node={r.get('current_node', '')}  pane={r.get('pane_target', '?')}")
+            print(
+                f"  [daemon]  {r['run_id']}  {r['top_state']}  "
+                f"node={r.get('current_node', '')}  "
+                f"pane={r.get('pane_target', '?')}{_wt_suffix(r)}"
+            )
             if r.get("status_reason"):
                 print(f"    status: {r['status_reason']}")
             if r.get("pause_reason"):
@@ -1811,14 +1882,24 @@ def cmd_status(args):
     if foreground_runs:
         print("Debug foreground runs:")
         for r in foreground_runs:
-            print(f"  [foreground]  {r.get('run_id', '?')}  {r.get('top_state', '?')}  node={r.get('current_node_id', '')}  pane={r.get('pane_target', '?')}")
+            print(
+                f"  [foreground]  {r.get('run_id', '?')}  "
+                f"{r.get('top_state', '?')}  "
+                f"node={r.get('current_node', '')}  "
+                f"pane={r.get('pane_target', '?')}{_wt_suffix(r)}"
+            )
             if r.get("status_reason"):
                 print(f"    status: {r['status_reason']}")
 
     if orphaned_runs:
         print("Orphaned local state:")
         for r in orphaned_runs:
-            print(f"  [orphaned]  {r.get('run_id', '?')}  {r.get('top_state', '?')}  node={r.get('current_node_id', '')}  pane={r.get('pane_target', '?')}")
+            print(
+                f"  [orphaned]  {r.get('run_id', '?')}  "
+                f"{r.get('top_state', '?')}  "
+                f"node={r.get('current_node', '')}  "
+                f"pane={r.get('pane_target', '?')}{_wt_suffix(r)}"
+            )
             if r.get("pause_reason"):
                 print(f"    reason: {r['pause_reason']}")
             if r.get("next_action"):
@@ -1827,7 +1908,10 @@ def cmd_status(args):
     if completed_runs:
         print("Recently completed:")
         for r in completed_runs:
-            print(f"  [done]  {r.get('run_id', '?')}  node={r.get('current_node_id', '')}")
+            print(
+                f"  [done]  {r.get('run_id', '?')}  "
+                f"node={r.get('current_node', '')}{_wt_suffix(r)}"
+            )
             if r.get("next_action"):
                 print(f"    next: {r['next_action']}")
 
@@ -2456,6 +2540,11 @@ def build_runtime_parser() -> argparse.ArgumentParser:
 
     p_status = sub.add_parser("status", help="Show all run states")
     p_status.add_argument("--config", default=None)
+    p_status.add_argument(
+        "--local",
+        action="store_true",
+        help="Restrict to the current worktree (skip other known worktrees)",
+    )
 
     sub.add_parser("stop", help="Stop the supervisor daemon (alias for daemon stop)")
 
