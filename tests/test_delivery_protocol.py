@@ -52,6 +52,26 @@ class MockTerminal:
         return "mock-pane"
 
 
+class BusyThenReadyTerminal(MockTerminal):
+    def __init__(self, outputs: list[str]):
+        super().__init__(outputs)
+        self.readiness_calls = 0
+
+    def injection_readiness(self):
+        self.readiness_calls += 1
+        if self.readiness_calls == 1:
+            return ("defer", "buffer_changed")
+        return ("inject", "idle")
+
+    def inject(self, text: str) -> None:
+        assert self._read_done, "read guard violated"
+        if self.readiness_calls < 2:
+            self._read_done = False
+            raise RuntimeError("injected while terminal was still busy")
+        self.injected.append(text)
+        self._read_done = False
+
+
 def _make_loop(tmp_path, terminal):
     spec = load_spec("specs/examples/linear_plan.example.yaml")
     store = StateStore(str(tmp_path))
@@ -222,6 +242,32 @@ def test_delivery_state_submitted_on_success(tmp_path):
 
     # Should have transitioned through SUBMITTED → STARTED_PROCESSING
     assert state.delivery_state in ("SUBMITTED", "STARTED_PROCESSING", "IDLE")
+
+
+def test_busy_terminal_is_deferred_before_injection(tmp_path, monkeypatch):
+    monkeypatch.setattr("supervisor.loop.time.sleep", lambda _seconds: None)
+    terminal = BusyThenReadyTerminal([""])
+    loop, spec, store = _make_loop(tmp_path, terminal)
+    state = store.load_or_init(spec, spec_path="specs/examples/linear_plan.example.yaml", pane_target="mock-pane")
+    terminal.read()
+    contract = spec.acceptance
+    policy = loop.policy_engine.determine(loop.worker_profile, contract, state)
+    instruction = loop.composer.build(
+        spec.get_node(state.current_node_id),
+        state,
+        triggered_by_decision_id="",
+        trigger_type="init",
+        policy=policy,
+        first_node_delivery=True,
+    )
+
+    delivered = loop._inject_or_pause(state, terminal, instruction, spec=spec)
+
+    assert delivered is True
+    assert terminal.readiness_calls >= 2
+    assert terminal.injected
+    session_log = store.session_log_path.read_text()
+    assert '"event_type": "injection_deferred"' in session_log
 
 
 def test_delivery_state_started_processing_on_checkpoint(tmp_path):

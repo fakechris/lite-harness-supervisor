@@ -133,6 +133,46 @@ class TestInject:
             adapter.inject("again")
 
 
+class TestInjectionReadiness:
+
+    @patch("time.sleep", return_value=None)
+    @patch("subprocess.run")
+    def test_injection_readiness_defers_when_buffer_is_still_changing(self, mock_run, _mock_sleep):
+        def side_effect(cmd, **kwargs):
+            if "display-message" in cmd:
+                return _mock_run(stdout="1 0 0 29 30\n")
+            if "capture-pane" in cmd:
+                count = getattr(side_effect, "captures", 0)
+                side_effect.captures = count + 1
+                if count == 0:
+                    return _mock_run(stdout="buffer snapshot one\n")
+                return _mock_run(stdout="buffer snapshot two\n")
+            return _mock_run(stdout="")
+
+        mock_run.side_effect = side_effect
+        adapter = TerminalAdapter("%0", tmux_socket="/tmp/test.sock")
+        adapter._pane_id = "%0"
+
+        outcome, reason = adapter.injection_readiness()
+
+        assert outcome == "defer"
+        assert reason == "buffer_changed"
+
+    def test_cursor_typing_status_treats_idle_codex_prompt_as_not_busy(self):
+        status = TerminalAdapter._cursor_typing_status(
+            "› \n",
+            {"active": True, "dead": False, "cursor_x": 2, "cursor_y": 0, "height": 1},
+        )
+        assert status == "not_busy"
+
+    def test_cursor_typing_status_treats_prompt_with_user_input_as_busy(self):
+        status = TerminalAdapter._cursor_typing_status(
+            "› hello\n",
+            {"active": True, "dead": False, "cursor_x": 6, "cursor_y": 0, "height": 1},
+        )
+        assert status == "busy"
+
+
 class TestListPanes:
 
     @patch("subprocess.run")
