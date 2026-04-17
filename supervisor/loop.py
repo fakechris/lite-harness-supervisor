@@ -21,7 +21,7 @@ from supervisor.gates.supervision_policy import SupervisionPolicyEngine
 from supervisor.history import latest_oracle_consultation_id_for_run
 from supervisor.interventions import AutoInterventionManager
 from supervisor.notifications import NotificationEvent, NotificationManager
-from supervisor.pause_summary import latest_human_escalation, summarize_state
+from supervisor.pause_summary import PAUSE_CLASSES, latest_human_escalation, summarize_state
 from supervisor.progress import write_progress
 
 logger = logging.getLogger(__name__)
@@ -170,6 +170,7 @@ class SupervisorLoop:
                     ),
                     "node_id": state.current_node_id,
                     "current_attempt": state.current_attempt,
+                    "pause_class": "recovery",
                 })
             else:
                 transition_top_state(state, TopState.RUNNING, reason="retry decision")
@@ -187,10 +188,9 @@ class SupervisorLoop:
             transition_top_state(state, TopState.RUNNING, reason="branch decision")
             return
         if kind == DecisionType.ESCALATE_TO_HUMAN.value:
-            self._pause_for_human(
-                state,
-                decision.to_dict() if hasattr(decision, "to_dict") else decision,
-            )
+            pause_payload = decision.to_dict() if hasattr(decision, "to_dict") else dict(decision)
+            pause_payload["pause_class"] = self._classify_gate_escalation(decision)
+            self._pause_for_human(state, pause_payload)
             # Create RoutingDecision for audit trail
             decision_id = (
                 decision.decision_id if hasattr(decision, "decision_id")
@@ -226,7 +226,9 @@ class SupervisorLoop:
                     next_action=f"thin-supervisor run summarize {state.run_id}",
                 )
             else:
-                self._pause_for_human(state, finish)
+                # Finish gate rejected — evidence insufficient for completion.
+                # Operator reviews the finish proof, not the session health.
+                self._pause_for_human(state, {**finish, "pause_class": "review"})
             return
         raise ValueError(f"unsupported decision: {kind}")
 
@@ -248,7 +250,7 @@ class SupervisorLoop:
                         next_action=f"thin-supervisor run summarize {state.run_id}",
                     )
                 else:
-                    self._pause_for_human(state, finish)
+                    self._pause_for_human(state, {**finish, "pause_class": "review"})
             else:
                 state.current_node_id = next_id
                 state.current_attempt = 0
@@ -272,6 +274,7 @@ class SupervisorLoop:
                 ),
                 "node_id": state.current_node_id,
                 "verification": verification,
+                "pause_class": "recovery",
             })
         else:
             transition_top_state(state, TopState.RUNNING, reason="verification failed but retry budget remains")
@@ -289,6 +292,18 @@ class SupervisorLoop:
 
     def _pause_for_human(self, state, payload: dict | None = None) -> dict:
         details = dict(payload or {})
+        pclass = str(details.get("pause_class", "")).strip().lower()
+        if pclass not in PAUSE_CLASSES:
+            # Every pause path must declare its class. Silent defaults here
+            # would re-hide the business-vs-recovery split we are explicitly
+            # trying to surface. If this raises in production, the caller
+            # forgot to tag a new pause site — tag it, don't widen the
+            # fallback.
+            raise ValueError(
+                f"_pause_for_human requires payload['pause_class'] ∈ {PAUSE_CLASSES}; "
+                f"got {details.get('pause_class')!r}"
+            )
+        details["pause_class"] = pclass
         transition_top_state(state, TopState.PAUSED_FOR_HUMAN, reason="paused for human")
         state.human_escalations.append(details)
         summary = summarize_state(state.to_dict())
@@ -308,8 +323,34 @@ class SupervisorLoop:
             workspace_root=state.workspace_root,
             surface_type=state.surface_type,
             delivery_state=state.delivery_state,
+            pause_class=pclass,
         ))
         return event_payload
+
+    @staticmethod
+    def _classify_gate_escalation(decision) -> str:
+        """Derive pause_class for an ESCALATE_TO_HUMAN gate decision.
+
+        The gate issues one enum value but the human reason behind it can be
+        business, safety, or review. We inspect the reason text; fall back to
+        `business` (the most common non-recovery escalate trigger per
+        `skills/thin-supervisor/references/escalation-rules.md`).
+        """
+        if hasattr(decision, "reason"):
+            reason = str(decision.reason or "")
+        elif isinstance(decision, dict):
+            reason = str(decision.get("reason", "") or "")
+        else:
+            reason = ""
+        lowered = reason.lower()
+        if reason.startswith("requires review by:") or "insufficient evidence" in lowered:
+            return "review"
+        if any(
+            word in lowered
+            for word in ("dangerous", "destructive", "irreversible", "authorization")
+        ):
+            return "safety"
+        return "business"
 
     def _notify_transition(self, state, *, event_type: str, reason: str, next_action: str) -> None:
         payload = {
@@ -534,6 +575,7 @@ class SupervisorLoop:
                     "timeout_sec": DELIVERY_ACK_TIMEOUT,
                     "injection_seq": state.last_injection_seq,
                     "delivery_state": state.delivery_state,
+                    "pause_class": "recovery",
                 }
                 self.store.append_session_event(state.run_id, "delivery_ack_timeout", payload)
                 logger.warning("delivery ack timeout: no checkpoint after injection for %ds", DELIVERY_ACK_TIMEOUT)
@@ -568,6 +610,7 @@ class SupervisorLoop:
                             "reason": f"agent idle timeout after {int(idle_for)}s without checkpoint or visible output",
                             "idle_timeout_sec": effective_idle_timeout_sec,
                             "node_id": state.current_node_id,
+                            "pause_class": "recovery",
                         }
                         self.store.append_event({"type": "timeout", "payload": payload})
                         self.store.append_session_event(state.run_id, "agent_idle_timeout", payload)
@@ -624,6 +667,7 @@ class SupervisorLoop:
                                 "reason": reason,
                                 "checkpoint_node": checkpoint.current_node,
                                 "state_node": state.current_node_id,
+                                "pause_class": "recovery",
                             }
                             self.store.append_session_event(
                                 state.run_id, "observation_delivery_stalled", payload
@@ -654,6 +698,7 @@ class SupervisorLoop:
                                 "reason": f"node mismatch persisted for {state.node_mismatch_count} checkpoints",
                                 "checkpoint_node": checkpoint.current_node,
                                 "state_node": state.current_node_id,
+                                "pause_class": "recovery",
                             })
                             if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
                                 restart_loop = True
@@ -842,6 +887,7 @@ class SupervisorLoop:
                 ),
                 "node_id": state.current_node_id,
                 "instruction_id": instruction.instruction_id,
+                "pause_class": "recovery",
             })
             self.store.save(state)
             return False
@@ -861,6 +907,7 @@ class SupervisorLoop:
                 "reason": str(exc),
                 "node_id": state.current_node_id,
                 "instruction_id": instruction.instruction_id,
+                "pause_class": "recovery",
             })
             self._attempt_auto_intervention(None, state, terminal, pause_payload)
             self.store.save(state)

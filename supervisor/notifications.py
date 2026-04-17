@@ -24,6 +24,7 @@ class NotificationEvent:
     workspace_root: str = ""
     surface_type: str = ""
     delivery_state: str = ""
+    pause_class: str = ""  # "business" | "safety" | "review" | "recovery" | ""
     timestamp: str = ""
 
     def __post_init__(self) -> None:

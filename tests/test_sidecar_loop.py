@@ -383,7 +383,10 @@ def test_sidecar_notifies_on_checkpoint_mismatch_pause(tmp_path):
     assert final.top_state == TopState.PAUSED_FOR_HUMAN
     assert channel.events
     assert channel.events[-1].reason == "node mismatch persisted for 5 checkpoints"
-    assert "--pane" in channel.events[-1].next_action
+    # Node-mismatch pauses are `recovery` class — operator's first move is
+    # inspect, not a blind resume that would loop into the same fault.
+    assert channel.events[-1].pause_class == "recovery"
+    assert channel.events[-1].next_action == f"thin-supervisor inspect {final.run_id}"
 
 
 def test_sidecar_discards_stale_mismatch_batch_after_auto_intervention(tmp_path):
