@@ -186,7 +186,19 @@ notification_channels:
     allowed_user_ids: ["bob"]
 ```
 
-This must become:
+Equivalent single-entry form using the list field `chat_ids`:
+
+```yaml
+notification_channels:
+  - kind: telegram
+    mode: command
+    bot_token: "same-bot"
+    chat_ids: ["chat_A", "chat_B"]
+    allowed_chat_ids: ["chat_A", "chat_B"]
+    allowed_user_ids: ["alice", "bob"]
+```
+
+Either shape must become:
 
 - one logical Telegram command channel
 - conversation targets = `{chat_A, chat_B}`

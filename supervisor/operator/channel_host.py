@@ -219,16 +219,13 @@ class OperatorChannelHost:
             _require_match(group, "language", default="zh", label="telegram")
             language = group[0].get("language", "zh")
             targets, allow_chats, allow_users = _merge_additive_fields(group)
-            try:
-                built.append(TelegramCommandChannel(
-                    bot_token=token,
-                    conversation_targets=targets,
-                    allowed_chat_ids=allow_chats,
-                    allowed_user_ids=allow_users,
-                    language=language,
-                ))
-            except ValueError as exc:
-                logger.warning("skipping telegram command channel: %s", exc)
+            built.append(TelegramCommandChannel(
+                bot_token=token,
+                conversation_targets=targets,
+                allowed_chat_ids=allow_chats,
+                allowed_user_ids=allow_users,
+                language=language,
+            ))
         return built
 
     @staticmethod
@@ -251,21 +248,27 @@ class OperatorChannelHost:
             _require_match(group, "callback_port", default=9876, label="lark")
             _require_match(group, "verification_token", default="", label="lark")
             _require_match(group, "encrypt_key", default="", label="lark")
+            app_secret = group[0].get("app_secret", "").strip()
+            if not app_secret:
+                # Fail-closed: missing credentials would otherwise be
+                # swallowed as "required" ValueError and the misconfigured
+                # provider would silently disappear at startup.
+                raise ValueError(
+                    f"lark provider instance {app_id!r} has empty app_secret "
+                    "across all merged config entries; app_secret is required."
+                )
             targets, allow_chats, allow_users = _merge_additive_fields(group)
-            try:
-                built.append(LarkCommandChannel(
-                    app_id=app_id,
-                    app_secret=group[0].get("app_secret", ""),
-                    conversation_targets=targets,
-                    allowed_chat_ids=allow_chats,
-                    allowed_user_ids=allow_users,
-                    language=group[0].get("language", "zh"),
-                    callback_port=group[0].get("callback_port", 9876),
-                    verification_token=group[0].get("verification_token", ""),
-                    encrypt_key=group[0].get("encrypt_key", ""),
-                ))
-            except ValueError as exc:
-                logger.warning("skipping lark command channel: %s", exc)
+            built.append(LarkCommandChannel(
+                app_id=app_id,
+                app_secret=app_secret,
+                conversation_targets=targets,
+                allowed_chat_ids=allow_chats,
+                allowed_user_ids=allow_users,
+                language=group[0].get("language", "zh"),
+                callback_port=group[0].get("callback_port", 9876),
+                verification_token=group[0].get("verification_token", ""),
+                encrypt_key=group[0].get("encrypt_key", ""),
+            ))
         return built
 
     def start(self) -> "OperatorChannelHost":

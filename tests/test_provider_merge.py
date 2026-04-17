@@ -201,6 +201,20 @@ class TestExactMatchConflictFailsClosed:
         with pytest.raises(ValueError, match="(?i)verification_token"):
             OperatorChannelHost.from_config(config)
 
+    def test_lark_missing_app_secret_across_all_entries_raises(self):
+        """If every merged entry omits app_secret, fail closed loudly —
+        don't silently drop the provider by swallowing the downstream
+        'required' ValueError.
+        """
+        config = RuntimeConfig(notification_channels=[
+            {"kind": "lark", "mode": "command",
+             "app_id": "cli_x", "allowed_chat_ids": ["oc_a"]},
+            {"kind": "lark", "mode": "command",
+             "app_id": "cli_x", "allowed_chat_ids": ["oc_b"]},
+        ])
+        with pytest.raises(ValueError, match="(?i)app_secret"):
+            OperatorChannelHost.from_config(config)
+
     def test_lark_encrypt_key_conflict_raises(self):
         config = RuntimeConfig(notification_channels=[
             {"kind": "lark", "mode": "command",
