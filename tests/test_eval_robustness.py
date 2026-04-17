@@ -184,6 +184,25 @@ def test_sunset_trigger_ignores_pre_window_v2_observations():
     assert not status.ready_to_sunset
 
 
+def test_sunset_trigger_treats_naive_timestamps_as_utc():
+    # compute_fallback_rate_trend treats naive datetimes as UTC (see the
+    # tzinfo=timezone.utc replace step). The windowed filter must do the
+    # same or a naive timestamp near the window boundary would either
+    # raise on astimezone or get shifted to local time and cross a day
+    # boundary. Here all timestamps are naive and on-window — they must
+    # be accepted just like their aware counterparts.
+    ref = date(2026, 4, 17)
+    obs = []
+    for offset in range(14):
+        naive = datetime(2026, 4, 17, 12) - timedelta(days=offset)
+        for surface in FROZEN_INGRESS_SURFACES:
+            obs.append(_obs(surface, schema=2, at=naive, seq=offset))
+
+    status = evaluate_sunset_trigger(obs, reference_day=ref)
+    assert status.frozen_surfaces_covered
+    assert status.ready_to_sunset
+
+
 def test_sunset_trigger_ignores_future_dated_v2_observations():
     # Symmetric to the pre-window filter: a future-dated v2 emission
     # (clock skew, replay job tagged with a future timestamp) must NOT

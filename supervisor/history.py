@@ -175,6 +175,34 @@ def summarize_run(exported: dict) -> dict:
     }
 
 
+def _apply_replay_resume(state) -> None:
+    """Mirror the live daemon resume path while replaying a session log.
+
+    Restores ATTACHED when the pause originated on the attach boundary
+    (captured in pre_pause_top_state), otherwise defaults to RUNNING.
+    Clears the pre-pause snapshot so downstream replay does not inherit
+    a stale value. If live resume and replay resume drift, replayed
+    decisions diverge from the actual run at the first re-attached
+    checkpoint.
+    """
+    if state.top_state != TopState.PAUSED_FOR_HUMAN:
+        return
+    if state.pre_pause_top_state == TopState.ATTACHED.value:
+        transition_top_state(
+            state,
+            TopState.ATTACHED,
+            reason="replay resume requested (restoring attach boundary)",
+        )
+        state.re_inject_count = 0
+    else:
+        transition_top_state(state, TopState.RUNNING, reason="replay resume requested")
+    state.auto_intervention_count = 0
+    state.node_mismatch_count = 0
+    state.last_mismatch_node_id = ""
+    state.human_escalations = []
+    state.pre_pause_top_state = ""
+
+
 def replay_run(exported: dict) -> dict:
     from supervisor.loop import SupervisorLoop
 
@@ -242,12 +270,7 @@ def replay_run(exported: dict) -> dict:
             elif event_type == "verification":
                 loop.apply_verification(spec, state, payload, cwd=state.workspace_root)
             elif event_type == "resume_requested":
-                if state.top_state == TopState.PAUSED_FOR_HUMAN:
-                    transition_top_state(state, TopState.RUNNING, reason="replay resume requested")
-                    state.auto_intervention_count = 0
-                    state.node_mismatch_count = 0
-                    state.last_mismatch_node_id = ""
-                    state.human_escalations = []
+                _apply_replay_resume(state)
 
     mismatches = [record for record in records if not record["matched"]]
     return {

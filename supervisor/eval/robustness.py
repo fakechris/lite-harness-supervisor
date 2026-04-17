@@ -262,10 +262,20 @@ def evaluate_sunset_trigger(
     # Symmetrically, future-dated observations (skewed clocks, stale
     # replay jobs tagged with a future timestamp) must not be allowed
     # to satisfy surface coverage either — cap at reference_day.
+    #
+    # Naive datetimes are treated as UTC to stay consistent with
+    # compute_fallback_rate_trend; otherwise astimezone() on a naive
+    # datetime would either raise or silently interpret it as local
+    # time, shifting observations across day boundaries.
+    def _as_utc_date(ts):
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc).date()
+
     windowed = [
         obs
         for obs in observation_list
-        if window_start <= obs.observed_at.astimezone(timezone.utc).date() <= reference_day
+        if window_start <= _as_utc_date(obs.observed_at) <= reference_day
     ]
 
     trend = compute_fallback_rate_trend(

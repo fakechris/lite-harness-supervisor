@@ -341,3 +341,71 @@ def test_replay_run_passes_runtime_root_to_routing_lookup(tmp_path, monkeypatch)
 
     assert captured["run_id"] == run_id
     assert captured["runtime_dir"] == str(workspace / ".supervisor" / "runtime")
+
+
+def test_apply_replay_resume_restores_attached_when_pre_pause_captured():
+    """Mirror the live daemon resume: a run paused from ATTACHED (captured
+    in pre_pause_top_state) must replay back to ATTACHED, not RUNNING.
+    Otherwise replay diverges from the live path and the attach-boundary
+    gate is bypassed when re-driving the next checkpoint.
+    """
+    from supervisor.domain.enums import TopState
+    from supervisor.domain.models import SupervisorState
+    from supervisor.history import _apply_replay_resume
+
+    state = SupervisorState(
+        run_id="r1",
+        spec_id="s1",
+        mode="linear_plan",
+        top_state=TopState.PAUSED_FOR_HUMAN,
+        current_node_id="n1",
+    )
+    state.top_state = TopState.PAUSED_FOR_HUMAN
+    state.pre_pause_top_state = TopState.ATTACHED.value
+    state.re_inject_count = 7
+
+    _apply_replay_resume(state)
+
+    assert state.top_state == TopState.ATTACHED
+    assert state.re_inject_count == 0
+    assert state.pre_pause_top_state == ""
+
+
+def test_apply_replay_resume_defaults_to_running_when_pre_pause_empty():
+    from supervisor.domain.enums import TopState
+    from supervisor.domain.models import SupervisorState
+    from supervisor.history import _apply_replay_resume
+
+    state = SupervisorState(
+        run_id="r1",
+        spec_id="s1",
+        mode="linear_plan",
+        top_state=TopState.PAUSED_FOR_HUMAN,
+        current_node_id="n1",
+    )
+    state.top_state = TopState.PAUSED_FOR_HUMAN
+    state.pre_pause_top_state = ""
+
+    _apply_replay_resume(state)
+
+    assert state.top_state == TopState.RUNNING
+    assert state.pre_pause_top_state == ""
+
+
+def test_apply_replay_resume_noop_when_not_paused():
+    from supervisor.domain.enums import TopState
+    from supervisor.domain.models import SupervisorState
+    from supervisor.history import _apply_replay_resume
+
+    state = SupervisorState(
+        run_id="r1",
+        spec_id="s1",
+        mode="linear_plan",
+        top_state=TopState.PAUSED_FOR_HUMAN,
+        current_node_id="n1",
+    )
+    state.top_state = TopState.RUNNING
+
+    _apply_replay_resume(state)
+
+    assert state.top_state == TopState.RUNNING
