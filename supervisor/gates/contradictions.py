@@ -50,10 +50,13 @@ class ContradictionOutcome:
 
 
 # Fields the runtime owns — a worker asserting one of these values is
-# treated as advisory at best. Right now only `escalation_class` has a
-# runtime-owned value (``"review"`` is derived from finish-gate state).
-# Kept tiny on purpose; expanding this is a protocol change.
-_RUNTIME_OWNED_ESCALATION_CLASSES = frozenset({"review"})
+# treated as advisory at best. Per Section B of the repartitioning doc
+# (line 549), ``recovery`` is the supervisor / runtime-owned escalation
+# class. ``review`` is explicitly a legitimate worker-declared class
+# (``checkpoint_protocol.txt:63`` — "completion proof is ready and a
+# human must sign off") and must NOT appear here, otherwise the loop
+# would silently ignore a valid request for human review.
+_RUNTIME_OWNED_ESCALATION_CLASSES = frozenset({"recovery"})
 
 
 def detect_contradiction(

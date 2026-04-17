@@ -44,7 +44,11 @@ EVIDENCE_SCOPE_VALUES: Final[frozenset[str]] = frozenset(
     {"current_node", "prior_phase", "unknown"}
 )
 ESCALATION_CLASS_VALUES: Final[frozenset[str]] = frozenset(
-    {"none", "business", "safety", "review"}
+    # "recovery" is explicitly a runtime-owned class per the plan (Section
+    # B, line 549). It is accepted here only so the contradiction detector
+    # can see a worker-emitted "recovery" and demote it — the worker
+    # protocol does not advertise it as a legal worker value.
+    {"none", "business", "safety", "review", "recovery"}
 )
 
 
@@ -142,14 +146,29 @@ def normalize_checkpoint(
 
     version = parse_schema_version(raw)
 
-    progress_class = _normalize_enum(raw.get("progress_class"), PROGRESS_CLASS_VALUES)
-    evidence_scope = _normalize_enum(raw.get("evidence_scope"), EVIDENCE_SCOPE_VALUES)
-    escalation_class = _normalize_enum(
-        raw.get("escalation_class"), ESCALATION_CLASS_VALUES
-    )
-    requires_authorization = _normalize_bool(raw.get("requires_authorization"))
-    blocking_inputs = _normalize_string_list(raw.get("blocking_inputs"))
-    reason_code = _normalize_reason_code(raw.get("reason_code"))
+    # Per Section B of the repartitioning doc, the runtime MUST NOT infer
+    # "new style vs old style" from field presence. Only payloads that
+    # explicitly advertise ``checkpoint_schema_version=2`` are allowed to
+    # carry structured v2 semantics; a v1 / missing-version payload that
+    # happens to include ``requires_authorization`` or ``progress_class``
+    # is treated as if those fields were not there. This keeps legacy
+    # payloads from silently opting into v2 fast-paths on the gate layer.
+    if version == STRUCTURED_SCHEMA_VERSION:
+        progress_class = _normalize_enum(raw.get("progress_class"), PROGRESS_CLASS_VALUES)
+        evidence_scope = _normalize_enum(raw.get("evidence_scope"), EVIDENCE_SCOPE_VALUES)
+        escalation_class = _normalize_enum(
+            raw.get("escalation_class"), ESCALATION_CLASS_VALUES
+        )
+        requires_authorization = _normalize_bool(raw.get("requires_authorization"))
+        blocking_inputs = _normalize_string_list(raw.get("blocking_inputs"))
+        reason_code = _normalize_reason_code(raw.get("reason_code"))
+    else:
+        progress_class = None
+        evidence_scope = None
+        escalation_class = None
+        requires_authorization = None
+        blocking_inputs = ()
+        reason_code = None
 
     return NormalizedCheckpoint(
         schema_version=version,

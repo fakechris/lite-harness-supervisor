@@ -35,6 +35,7 @@ from supervisor.protocol.reason_code import (
     ESC_AUTHORIZATION_CONTRADICTION,
     ESC_AUTHORIZATION_REQUIRED,
     ESC_MISSING_EXTERNAL_INPUT,
+    ESC_REVIEW_REQUIRED,
     SEM_BLOCKING_INPUTS_CONTRADICTION,
     SEM_EVIDENCE_SCOPE_CONTRADICTION,
     SEM_PROGRESS_CLASS_CONTRADICTION,
@@ -51,6 +52,7 @@ SectionERoute = Literal[
     "business_fastpath",
     "execution_semantic_progress_class",
     "execution_semantic_evidence_scope",
+    "review_fastpath",
     "runtime_owned_conflict",
 ]
 
@@ -301,7 +303,40 @@ def _execution_evidence_scope_case(surface_id: str) -> V2SyntheticCase:
     )
 
 
+def _review_fastpath_case(surface_id: str) -> V2SyntheticCase:
+    payload = _base_v2_payload(
+        run_id=f"syn_review_{surface_id}",
+        surface_id=surface_id,
+        summary="completion proof ready, need human sign-off",
+    )
+    payload.update(
+        {
+            "evidence": [
+                {"ran": "pytest -q"},
+                {"result": "5 passed"},
+            ],
+            "progress_class": "execution",
+            "evidence_scope": "current_node",
+            "escalation_class": "review",
+            "requires_authorization": False,
+        }
+    )
+    return V2SyntheticCase(
+        case_id=f"review_fastpath__{surface_id}",
+        route="review_fastpath",
+        surface_id=surface_id,
+        schema_version=2,
+        expected_reason_code=ESC_REVIEW_REQUIRED,
+        payload=payload,
+    )
+
+
 def _runtime_owned_case(surface_id: str) -> V2SyntheticCase:
+    # Worker emits escalation_class=recovery, which the plan (Section B,
+    # line 549) explicitly reserves as a runtime-owned class. The
+    # contradiction detector demotes the worker field to a log-only
+    # signal — the decision path itself does NOT carry the sem.*
+    # reason_code.
     payload = _base_v2_payload(
         run_id=f"syn_runtime_{surface_id}",
         surface_id=surface_id,
@@ -315,7 +350,7 @@ def _runtime_owned_case(surface_id: str) -> V2SyntheticCase:
             ],
             "progress_class": "execution",
             "evidence_scope": "current_node",
-            "escalation_class": "review",
+            "escalation_class": "recovery",
             "requires_authorization": False,
         }
     )
@@ -338,6 +373,7 @@ _BUILDERS = (
     _business_fastpath_case,
     _execution_progress_class_case,
     _execution_evidence_scope_case,
+    _review_fastpath_case,
     _runtime_owned_case,
 )
 

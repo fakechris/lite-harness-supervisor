@@ -39,6 +39,7 @@ def test_corpus_covers_every_route_on_every_frozen_surface():
         "business_fastpath",
         "execution_semantic_progress_class",
         "execution_semantic_evidence_scope",
+        "review_fastpath",
         "runtime_owned_conflict",
     }
     for route in expected_routes:
@@ -115,6 +116,14 @@ def test_execution_semantic_routes_reinject(tmp_path):
     ) + filter_by_route(corpus, "execution_semantic_evidence_scope"):
         decision = _drive(tmp_path / case.case_id, case.payload)
         assert decision.decision == DecisionType.RE_INJECT.value, case.case_id
+        assert decision.reason_code == case.expected_reason_code, case.case_id
+
+
+def test_review_fastpath_escalates_to_human(tmp_path):
+    corpus = build_v2_synthetic_corpus()
+    for case in filter_by_route(corpus, "review_fastpath"):
+        decision = _drive(tmp_path / case.case_id, case.payload)
+        assert decision.decision == DecisionType.ESCALATE_TO_HUMAN.value, case.case_id
         assert decision.reason_code == case.expected_reason_code, case.case_id
 
 

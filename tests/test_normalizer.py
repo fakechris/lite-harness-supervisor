@@ -68,6 +68,33 @@ def test_normalize_v1_checkpoint_leaves_semantic_fields_none():
     assert result.reason_code is None
 
 
+def test_normalize_v1_payload_strips_any_v2_fields_present():
+    # A malformed / transitional payload that omits
+    # checkpoint_schema_version but tries to set requires_authorization
+    # or the other v2 fields MUST NOT leak those values through the
+    # normalizer. Per Section B of the repartitioning doc, the runtime
+    # only trusts v2 semantics on payloads that explicitly advertise
+    # checkpoint_schema_version=2. Otherwise a legacy payload could
+    # silently opt into the v2 safety fast-path by field presence alone.
+    payload = _base_payload(
+        progress_class="execution",
+        evidence_scope="current_node",
+        escalation_class="safety",
+        requires_authorization=True,
+        blocking_inputs=["GITHUB_TOKEN"],
+        reason_code="esc.authorization_required",
+    )
+    result = normalize_checkpoint(payload)
+    assert result is not None
+    assert result.schema_version == LEGACY_SCHEMA_VERSION
+    assert result.progress_class is None
+    assert result.evidence_scope is None
+    assert result.escalation_class is None
+    assert result.requires_authorization is None
+    assert result.blocking_inputs == ()
+    assert result.reason_code is None
+
+
 def test_normalize_v2_passes_through_semantic_fields():
     payload = _base_payload(
         checkpoint_schema_version=2,

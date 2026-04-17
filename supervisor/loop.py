@@ -31,6 +31,7 @@ from supervisor.protocol.reason_code import (
     ESC_AUTHORIZATION_REQUIRED,
     ESC_BLOCKED_GENUINE,
     ESC_MISSING_EXTERNAL_INPUT,
+    ESC_REVIEW_REQUIRED,
     REC_DELIVERY_TIMEOUT,
     REC_IDLE_TIMEOUT,
     REC_INJECT_FAILED,
@@ -202,6 +203,22 @@ class SupervisorLoop:
                     triggered_by_seq=triggered_by_seq,
                     triggered_by_checkpoint_id=triggered_by_checkpoint_id,
                     reason_code=ESC_MISSING_EXTERNAL_INPUT,
+                )
+
+            # 4. Worker declared escalation_class=review. Per the protocol
+            #    prompt ("completion proof is ready and a human must sign
+            #    off"), this is a legitimate request for human review —
+            #    route to ESCALATE_TO_HUMAN with esc.review_required.
+            if normalized.escalation_class == "review":
+                return SupervisorDecision.make(
+                    decision=DecisionType.ESCALATE_TO_HUMAN.value,
+                    reason="worker declared escalation_class=review",
+                    gate_type="checkpoint_status",
+                    confidence=1.0,
+                    needs_human=True,
+                    triggered_by_seq=triggered_by_seq,
+                    triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+                    reason_code=ESC_REVIEW_REQUIRED,
                 )
 
         # `blocked` always wins: an agent asking for external input is a

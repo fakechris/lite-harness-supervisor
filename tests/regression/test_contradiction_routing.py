@@ -130,12 +130,14 @@ def test_evidence_scope_current_node_with_admin_only_evidence_reinjects(tmp_path
 # --- Runtime-owned field conflict ---------------------------------------
 
 
-def test_runtime_owned_escalation_class_review_demoted(tmp_path, capsys):
-    # Worker asserting escalation_class=review is runtime-owned state —
-    # the decision falls through to a non-contradicted path, but the
-    # conflict is logged as a session event. We assert the decision is
-    # not the contradiction-route ESCALATE (because runtime-owned routes
-    # to None from _route_contradiction).
+def test_runtime_owned_escalation_class_recovery_demoted(tmp_path, capsys):
+    # Worker asserting escalation_class=recovery is runtime-owned state
+    # (Section B line 549 reserves "recovery" as a supervisor/runtime-
+    # owned class). The contradiction detector demotes the worker field
+    # to a log-only signal and does NOT set the decision's reason_code to
+    # sem.runtime_owned_field_conflict; the decision falls through to a
+    # non-contradicted path (CONTINUE here, since the rest of the
+    # payload is healthy).
     payload = _base(
         summary="test work ran",
         evidence=[
@@ -144,14 +146,31 @@ def test_runtime_owned_escalation_class_review_demoted(tmp_path, capsys):
         ],
         progress_class="execution",
         evidence_scope="current_node",
+        escalation_class="recovery",
+        requires_authorization=False,
+    )
+    decision = _drive(tmp_path, payload)
+    assert decision.decision == DecisionType.CONTINUE.value
+
+
+def test_worker_declared_review_escalates_with_esc_review_required(tmp_path):
+    # Worker declares escalation_class=review — per the protocol prompt,
+    # this is "completion proof is ready and a human must sign off".
+    # Must escalate to human, carrying esc.review_required.
+    payload = _base(
+        summary="all tests pass, ready for review",
+        evidence=[
+            {"ran": "pytest -q"},
+            {"result": "all green"},
+        ],
+        progress_class="execution",
+        evidence_scope="current_node",
         escalation_class="review",
         requires_authorization=False,
     )
     decision = _drive(tmp_path, payload)
-    # Worker claims execution + real evidence; no contradiction other
-    # than the runtime-owned conflict. The heuristic paths should let
-    # it fall through to ContinueGate → CONTINUE.
-    assert decision.decision == DecisionType.CONTINUE.value
+    assert decision.decision == DecisionType.ESCALATE_TO_HUMAN.value
+    assert decision.reason_code == "esc.review_required"
 
 
 # --- Pure-unit tests on the detector ------------------------------------
