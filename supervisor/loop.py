@@ -32,6 +32,7 @@ from supervisor.protocol.reason_code import (
     ESC_BLOCKED_GENUINE,
     ESC_MISSING_EXTERNAL_INPUT,
     ESC_REVIEW_REQUIRED,
+    REC_CRASH_DURING_RECOVERY,
     REC_DELIVERY_TIMEOUT,
     REC_IDLE_TIMEOUT,
     REC_INJECT_FAILED,
@@ -578,6 +579,12 @@ class SupervisorLoop:
                 f"got {details.get('pause_class')!r}"
             )
         details["pause_class"] = pclass
+        # Capture the source state so resume can restore ATTACHED
+        # semantics when the pause originated on the attach boundary
+        # (e.g. re-inject cap exhausted). Without this, a PAUSED_FOR_HUMAN
+        # → RUNNING resume would skip the first-execution-evidence gate
+        # and let the agent slip through with admin-only evidence.
+        state.pre_pause_top_state = state.top_state.value
         transition_top_state(state, TopState.PAUSED_FOR_HUMAN, reason="paused for human")
         state.human_escalations.append(details)
         summary = summarize_state(state.to_dict())
@@ -813,6 +820,32 @@ class SupervisorLoop:
         contract = spec.acceptance or AcceptanceContract.from_finish_policy(spec.finish_policy, goal=spec.goal)
         policy = self.policy_engine.determine(self.worker_profile, contract, state)
         logger.info("supervision policy: %s (%s)", policy.mode, policy.reason)
+
+        # Boot-time fail-safe: the sidecar should never *start* with
+        # top_state=RECOVERY_NEEDED. That state is transient — `_enter_recovery`
+        # is always immediately followed by `_attempt_auto_intervention` (which
+        # transitions to RUNNING on success) or `_pause_for_human`. If it
+        # persisted across a process boundary, the only explanation is that
+        # the prior sidecar crashed between those two calls. Without this
+        # fail-safe the main loop would spin reading the pane forever with
+        # no delivery_ack_deadline armed and no pending checkpoint to drive
+        # a transition — a permanent hang. Surface to an operator instead.
+        if state.top_state == TopState.RECOVERY_NEEDED:
+            logger.warning(
+                "run %s booted in RECOVERY_NEEDED — prior sidecar crashed mid-recovery",
+                state.run_id,
+            )
+            self._pause_for_human(state, {
+                "reason": (
+                    "sidecar crashed during recovery; the stalled auto-intervention "
+                    "cannot be safely replayed without operator review"
+                ),
+                "node_id": state.current_node_id,
+                "pause_class": "recovery",
+                "reason_code": REC_CRASH_DURING_RECOVERY,
+            })
+            self.store.save(state)
+            return
 
         # READY → ATTACHED: inject first instruction. ATTACHED gates the first
         # checkpoint — a CONTINUE requires real execution evidence on the

@@ -224,6 +224,46 @@ def test_requires_authorization_true_short_circuits_to_escalate(tmp_path):
     assert decision.reason_code == "esc.authorization_required"
 
 
+def test_business_escalation_beats_execution_semantic_contradiction(tmp_path):
+    # Regression: a v2 checkpoint that legitimately declares a business
+    # escalation with non-empty blocking_inputs, but also mis-sets
+    # progress_class=execution with admin-only evidence, must route to
+    # ESCALATE_TO_HUMAN with esc.missing_external_input. The
+    # execution-semantic contradiction detector must yield, otherwise the
+    # mis-set progress_class silently swallows a valid escalation via
+    # RE_INJECT.
+    payload = _base(
+        summary="attached and need external token to proceed",
+        evidence=[{"attach": "opened pane"}, {"plan": "drafted step order"}],
+        progress_class="execution",
+        evidence_scope="current_node",
+        escalation_class="business",
+        requires_authorization=False,
+        blocking_inputs=["need API token"],
+    )
+    decision = _drive(tmp_path, payload)
+    assert decision.decision == DecisionType.ESCALATE_TO_HUMAN.value
+    assert decision.reason_code == ESC_MISSING_EXTERNAL_INPUT
+
+
+def test_review_escalation_beats_execution_semantic_contradiction(tmp_path):
+    # Companion to the business-escalation regression. A worker declaring
+    # escalation_class="review" with a mis-set progress_class must still
+    # reach the review fast-path (esc.review_required), not be swallowed
+    # by an execution-semantic RE_INJECT.
+    payload = _base(
+        summary="ready for review; attaching evidence",
+        evidence=[{"attach": "opened pane"}, {"plan": "drafted plan"}],
+        progress_class="execution",
+        evidence_scope="current_node",
+        escalation_class="review",
+        requires_authorization=False,
+    )
+    decision = _drive(tmp_path, payload)
+    assert decision.decision == DecisionType.ESCALATE_TO_HUMAN.value
+    assert decision.reason_code == "esc.review_required"
+
+
 def test_business_blocking_inputs_short_circuits_to_escalate(tmp_path):
     payload = _base(
         status="working",

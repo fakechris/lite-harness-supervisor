@@ -531,12 +531,35 @@ class DaemonServer:
                     if not acquired:
                         return {"ok": False, "error": f"pane {pane_target} locked by {existing_owner}"}
                     if state.top_state == TopState.PAUSED_FOR_HUMAN:
-                        transition_top_state(state, TopState.RUNNING, reason="resume requested")
+                        # Restore ATTACHED when the pause originated on the
+                        # attach boundary (captured in `pre_pause_top_state`
+                        # by `_pause_for_human`). Otherwise default to
+                        # RUNNING. This preserves the first-execution-
+                        # evidence gate across a resume: a run paused from
+                        # ATTACHED (e.g. RE_INJECT cap exhausted) must still
+                        # require real execution evidence on the next
+                        # checkpoint, not slip into RUNNING and silently
+                        # CONTINUE on admin-only evidence.
+                        if state.pre_pause_top_state == TopState.ATTACHED.value:
+                            transition_top_state(
+                                state,
+                                TopState.ATTACHED,
+                                reason="resume requested (restoring attach boundary)",
+                            )
+                            # Re-arm the re-inject budget so the resumed run
+                            # gets a fresh attempt at proving execution
+                            # evidence, rather than immediately re-exhausting.
+                            state.re_inject_count = 0
+                        else:
+                            transition_top_state(
+                                state, TopState.RUNNING, reason="resume requested"
+                            )
                         state.delivery_state = DeliveryState.IDLE
                         state.auto_intervention_count = 0
                         state.node_mismatch_count = 0
                         state.last_mismatch_node_id = ""
                         state.human_escalations = []
+                        state.pre_pause_top_state = ""
                         store.append_session_event(
                             run_id,
                             "resume_requested",
@@ -544,20 +567,21 @@ class DaemonServer:
                         )
                         store.save(state)
                     elif state.top_state == TopState.RECOVERY_NEEDED:
-                        # Resume from a crash-stranded recovery state: a run
-                        # only persists RECOVERY_NEEDED if the sidecar died
-                        # between `_enter_recovery` and the follow-up
-                        # transition. Flip it to RUNNING so the resumed
-                        # sidecar can re-run the recovery path (or, if the
-                        # original fault has cleared, just continue).
-                        transition_top_state(state, TopState.RUNNING, reason="resume requested")
-                        state.delivery_state = DeliveryState.IDLE
+                        # A persisted RECOVERY_NEEDED means the prior sidecar
+                        # died between `_enter_recovery` and its follow-up
+                        # transition. Do NOT silently flip to RUNNING here —
+                        # the stalled auto-intervention can't be safely
+                        # replayed without knowing what the recipe was
+                        # supposed to inject. The sidecar's boot-time
+                        # fail-safe in `_run_sidecar_inner` will surface this
+                        # as a `rec.crash_during_recovery` pause for an
+                        # operator, so we leave the state untouched and just
+                        # record the resume attempt.
                         store.append_session_event(
                             run_id,
                             "resume_requested",
                             {"resumed_from": resumed_from},
                         )
-                        store.save(state)
                     thread = threading.Thread(
                         target=self._run_worker, args=(entry, target_spec, state),
                         name=f"run-{run_id}", daemon=True,

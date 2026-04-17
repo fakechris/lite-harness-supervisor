@@ -51,6 +51,25 @@ def test_is_valid_reason_code_rejects_bad(bad):
     assert not rc.is_valid_reason_code(bad)
 
 
+@pytest.mark.parametrize(
+    "hallucinated",
+    [
+        # Well-formed prefix but the tail is not in KNOWN_REASON_CODES.
+        # These match the regex and would have leaked through the
+        # earlier regex-only validator.
+        "esc.i_made_this_up",
+        "rec.fantasy_timeout",
+        "ver.creative_failure",
+        "sem.novel_contradiction",
+    ],
+)
+def test_is_valid_reason_code_rejects_unknown_tails(hallucinated):
+    # Whitelist guard — a worker that invents a new code must not leak it
+    # into the normalizer; the routing table only knows about codes in
+    # KNOWN_REASON_CODES. Growing the set requires a doc update first.
+    assert not rc.is_valid_reason_code(hallucinated)
+
+
 def test_validate_reason_code_returns_input_or_raises():
     assert rc.validate_reason_code(rc.REC_DELIVERY_TIMEOUT) == rc.REC_DELIVERY_TIMEOUT
     with pytest.raises(rc.ReasonCodeError):
