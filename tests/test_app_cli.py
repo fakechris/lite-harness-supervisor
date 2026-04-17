@@ -1302,6 +1302,91 @@ def test_eval_improve_stops_before_promote_without_approval(tmp_path, monkeypatc
     assert "promotion" not in payload
 
 
+def test_eval_improve_passes_canary_threshold_overrides(tmp_path, monkeypatch, capsys):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
+    manifest_path = tmp_path / ".supervisor" / "evals" / "candidates" / "candidate_demo.json"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: cfg)
+    monkeypatch.setattr("supervisor.eval.load_eval_suite", lambda ref: object())
+    monkeypatch.setattr("supervisor.eval.propose_candidate_policy", lambda *args, **kwargs: {
+        "suite": "approval-core",
+        "objective": "reduce_false_approval",
+        "baseline_policy": "builtin-approval-v1",
+        "recommended_candidate_policy": "builtin-approval-strict-v1",
+        "candidate": {
+            "candidate_id": "candidate_demo",
+            "candidate_policy": "builtin-approval-strict-v1",
+            "parent_id": "builtin-approval-v1",
+        },
+    })
+    monkeypatch.setattr("supervisor.eval.save_candidate_manifest", lambda *args, **kwargs: manifest_path)
+    monkeypatch.setattr("supervisor.eval.review_candidate_manifest", lambda manifest: {
+        "candidate_id": "candidate_demo",
+        "candidate_policy": "builtin-approval-strict-v1",
+        "review_status": "needs_human_review",
+        "next_action": "thin-supervisor-dev eval canary --run-id <recent_run>",
+        "suite": "approval-core",
+        "objective": "reduce_false_approval",
+        "touched_fragments": ["approval-boundary"],
+    })
+    monkeypatch.setattr("supervisor.eval.build_candidate_dossier", lambda **kwargs: {
+        "candidate": {"candidate_id": "candidate_demo", "candidate_policy": "builtin-approval-strict-v1"},
+        "proposal": {"objective": "reduce_false_approval"},
+        "review": {"review_status": "needs_human_review"},
+        "next_action": "thin-supervisor-dev eval canary --run-id <recent_run>",
+    })
+
+    def _fake_canary(run_ids, *, runtime_dir, max_mismatch_rate, max_friction_events):
+        captured["run_ids"] = list(run_ids)
+        captured["runtime_dir"] = runtime_dir
+        captured["max_mismatch_rate"] = max_mismatch_rate
+        captured["max_friction_events"] = max_friction_events
+        return {"decision": "needs_canary", "run_ids": list(run_ids)}
+
+    monkeypatch.setattr("supervisor.eval.run_canary_eval", _fake_canary)
+    monkeypatch.setattr("supervisor.eval.evaluate_candidate_gate", lambda review, suite, canary_report=None: {
+        "candidate_id": "candidate_demo",
+        "candidate_policy": "builtin-approval-strict-v1",
+        "baseline_policy": "builtin-approval-v1",
+        "suite": "approval-core",
+        "review_status": "needs_human_review",
+        "decision": "needs_canary",
+        "compare": {},
+        "canary": canary_report,
+        "next_action": "thin-supervisor-dev eval canary --run-id <recent_run>",
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="improve",
+        suite="approval-core",
+        suite_file=None,
+        baseline_policy="builtin-approval-v1",
+        objective="reduce_false_approval",
+        run_id=["run_1", "run_2"],
+        max_mismatch_rate=0.1,
+        max_friction_events=2,
+        approved_by="",
+        force=False,
+        dry_run=False,
+        output="",
+        save_report=False,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    assert captured == {
+        "run_ids": ["run_1", "run_2"],
+        "runtime_dir": str(runtime_dir),
+        "max_mismatch_rate": 0.1,
+        "max_friction_events": 2,
+    }
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["gate"]["canary"]["run_ids"] == ["run_1", "run_2"]
+
+
 def test_eval_improve_promotes_when_approved_and_gate_allows(tmp_path, monkeypatch, capsys):
     runtime_dir = tmp_path / ".supervisor" / "runtime"
     cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()

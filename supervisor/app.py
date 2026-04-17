@@ -2327,6 +2327,8 @@ def _add_eval_parser(sub) -> None:
     p_eval_improve.add_argument("--baseline-policy", default="builtin-approval-v1", help="Baseline policy id")
     p_eval_improve.add_argument("--objective", required=True, choices=["reduce_repeated_confirmation", "reduce_false_approval"], help="Optimization objective")
     p_eval_improve.add_argument("--run-id", action="append", default=[], help="Optional canary run id (repeatable)")
+    p_eval_improve.add_argument("--max-mismatch-rate", type=float, default=0.25, help="Canary hold threshold for mismatch rate")
+    p_eval_improve.add_argument("--max-friction-events", type=int, default=0, help="Canary hold threshold for friction events")
     p_eval_improve.add_argument("--approved-by", default="", help="Approver identity; omitted means stop before promotion")
     p_eval_improve.add_argument("--force", action="store_true", help="Allow promotion even if gate is not yet promote")
     p_eval_improve.add_argument("--dry-run", action="store_true", help="Stop after proposal/review without gating or promotion")
