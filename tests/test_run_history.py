@@ -347,9 +347,11 @@ def test_apply_replay_resume_restores_attached_when_pre_pause_captured():
     """Mirror the live daemon resume: a run paused from ATTACHED (captured
     in pre_pause_top_state) must replay back to ATTACHED, not RUNNING.
     Otherwise replay diverges from the live path and the attach-boundary
-    gate is bypassed when re-driving the next checkpoint.
+    gate is bypassed when re-driving the next checkpoint. Also must
+    reset delivery_state to IDLE — the live daemon resume does this and
+    leaving a stale waiting/paused delivery state would skew replay.
     """
-    from supervisor.domain.enums import TopState
+    from supervisor.domain.enums import DeliveryState, TopState
     from supervisor.domain.models import SupervisorState
     from supervisor.history import _apply_replay_resume
 
@@ -363,12 +365,14 @@ def test_apply_replay_resume_restores_attached_when_pre_pause_captured():
     state.top_state = TopState.PAUSED_FOR_HUMAN
     state.pre_pause_top_state = TopState.ATTACHED.value
     state.re_inject_count = 7
+    state.delivery_state = DeliveryState.SUBMITTED
 
     _apply_replay_resume(state)
 
     assert state.top_state == TopState.ATTACHED
     assert state.re_inject_count == 0
     assert state.pre_pause_top_state == ""
+    assert state.delivery_state == DeliveryState.IDLE
 
 
 def test_apply_replay_resume_defaults_to_running_when_pre_pause_empty():

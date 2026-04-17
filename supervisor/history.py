@@ -7,7 +7,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from supervisor.domain.enums import TopState
+from supervisor.domain.enums import DeliveryState, TopState
 from supervisor.domain.state_machine import transition_top_state
 from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
@@ -196,6 +196,7 @@ def _apply_replay_resume(state) -> None:
         state.re_inject_count = 0
     else:
         transition_top_state(state, TopState.RUNNING, reason="replay resume requested")
+    state.delivery_state = DeliveryState.IDLE
     state.auto_intervention_count = 0
     state.node_mismatch_count = 0
     state.last_mismatch_node_id = ""
