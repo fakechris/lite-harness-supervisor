@@ -2136,6 +2136,68 @@ def _patch_session_index_registries(monkeypatch, *,
     )
 
 
+def test_status_empty_with_live_daemon_elsewhere_does_not_claim_local_daemon_down(
+    tmp_path, monkeypatch, capsys,
+):
+    """Empty-state fallback must not probe a cwd-local DaemonClient.
+
+    If another worktree has a live daemon but our cwd has no local
+    daemon and no runs exist anywhere, the old fallback printed
+    "No runs found. Daemon not running." — which is false.  The
+    global-first contract requires consulting the global daemon
+    registry, not a cwd-local probe.
+    """
+    other = tmp_path / "other"
+    cwd = tmp_path / "cwd"
+    other.mkdir()
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+
+    # Poison cwd-local DaemonClient so the old code path would have
+    # reported "Daemon not running" — if cmd_status consults it, this
+    # test fails loudly.
+    class _BoomClient:
+        def is_running(self):
+            raise AssertionError(
+                "cmd_status must not probe cwd-local DaemonClient in "
+                "the empty-state branch"
+            )
+
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _BoomClient)
+
+    # Global daemon registry shows a live daemon in a different worktree;
+    # no runs anywhere (neither cwd nor `other` has state.json files).
+    live_daemons = [{
+        "pid": 42, "cwd": str(other),
+        "socket": "/tmp/other.sock", "active_runs": 0,
+    }]
+    _patch_session_index_registries(monkeypatch, daemons=live_daemons)
+    monkeypatch.setattr(app, "_list_global_daemons", lambda: list(live_daemons))
+
+    result = app.cmd_status(argparse.Namespace(config=None, local=False))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "Daemon not running" not in out
+    assert "Daemons running" in out
+
+
+def test_status_empty_with_no_daemons_anywhere_says_no_daemons(
+    tmp_path, monkeypatch, capsys,
+):
+    """No runs + no live daemons anywhere → explicit 'No daemons running.'"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
+    _patch_session_index_registries(monkeypatch)  # all empty
+
+    result = app.cmd_status(argparse.Namespace(config=None, local=False))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "No runs found" in out
+    assert "No daemons running" in out
+
+
 def test_status_shows_orphaned_run_from_child_worktree(
     tmp_path, monkeypatch, capsys,
 ):

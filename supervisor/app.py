@@ -1838,7 +1838,6 @@ def cmd_status(args):
     known_worktrees, live daemon cwds, pane-owner cwds, git worktrees).
     `--local` narrows to the current cwd only.
     """
-    from supervisor.daemon.client import DaemonClient
     from supervisor.operator.session_index import collect_sessions
 
     local_only = bool(getattr(args, "local", False))
@@ -1868,12 +1867,14 @@ def cmd_status(args):
         # silently disappears from operator view.
         orphaned_runs.append(view)
 
-    client = DaemonClient()
     if not daemon_runs and not foreground_runs and not orphaned_runs and not completed_runs:
-        if client.is_running():
-            print("Daemon running, no active runs.")
+        # Global-first: any live daemon anywhere means "something is up";
+        # don't fall back to a cwd-local DaemonClient probe, which would
+        # lie when a daemon is running in a different worktree.
+        if _list_global_daemons():
+            print("Daemons running, no active runs. (see `thin-supervisor ps`)")
         else:
-            print("No runs found. Daemon not running.")
+            print("No runs found. No daemons running.")
         return 0
 
     cwd = os.getcwd()
