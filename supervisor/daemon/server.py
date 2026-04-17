@@ -57,6 +57,12 @@ RECOVERABLE_ORPHANED_STATES = {
     TopState.RUNNING,
     TopState.GATING,
     TopState.VERIFYING,
+    # A daemon crash mid-attach leaves the run in ATTACHED with no owner;
+    # the operator can still resume it.  Symmetric treatment for
+    # RECOVERY_NEEDED — the supervisor was mid auto-intervention and
+    # the next loop iteration will re-run the recipe.
+    TopState.ATTACHED,
+    TopState.RECOVERY_NEEDED,
 }
 
 
@@ -462,7 +468,14 @@ class DaemonServer:
             # Match by spec_id + pane_target (not just pane)
             if (state_data.get("spec_id") == target_spec.id
                     and state_data.get("pane_target", "") == pane_target
-                    and state_data.get("top_state") in ("PAUSED_FOR_HUMAN", "RUNNING", "READY", "GATING", "VERIFYING")):
+                    and state_data.get("top_state") in (
+                        "PAUSED_FOR_HUMAN", "RUNNING", "READY",
+                        "GATING", "VERIFYING",
+                        # New states from the state-machine redesign: a run
+                        # stranded mid-attach or mid-recovery is still the
+                        # right target for resume.
+                        "ATTACHED", "RECOVERY_NEEDED",
+                    )):
                 run_id = state_data["run_id"]
                 resumable_state = state_data.get("top_state", "")
                 if resumable_state in {"GATING", "VERIFYING"}:
@@ -470,7 +483,7 @@ class DaemonServer:
                         "ok": False,
                         "error": (
                             f"run {run_id} is in {resumable_state} and cannot safely resume. "
-                            "Stop or inspect the run before restarting it."
+                            "Stop or observe the run before restarting it."
                         ),
                     }
                 current_spec_hash = StateStore._hash_spec(spec_path)

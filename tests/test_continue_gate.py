@@ -45,13 +45,38 @@ def test_is_admin_only_evidence_mixed_counts_execution():
     # Any execution-signaled item flips the whole checkpoint to real work
     assert is_admin_only_evidence([
         {"attach": "opened pane"},
-        {"file": "modified src/foo.py"},
+        {"command": "pytest tests/test_foo.py", "output": "2 passed"},
     ]) is False
 
 
 def test_is_admin_only_evidence_accepts_strings():
     assert is_admin_only_evidence(["opened pane", "read plan"]) is True
-    assert is_admin_only_evidence(["ran migration script"]) is False
+    assert is_admin_only_evidence(["pytest tests/test_foo.py -> 3 passed"]) is False
+
+
+def test_is_admin_only_evidence_reviewer_edge_case():
+    """Reviewer P1-1: `modified: .supervisor/specs/foo.yaml` + `ran: git status`
+    is admin activity (editing the spec, checking git), NOT work on the node.
+    Previous loose pattern matching flagged this as real execution — this
+    test locks the tighter behavior so we cannot regress.
+    """
+    assert is_admin_only_evidence([
+        {"modified": ".supervisor/specs/foo.yaml"},
+        {"ran": "git status --short"},
+    ]) is True
+
+
+def test_is_admin_only_evidence_diff_counts():
+    """A real git-diff output snippet counts as execution."""
+    assert is_admin_only_evidence([
+        {"diff": "diff --git a/src/foo.py b/src/foo.py"},
+    ]) is False
+
+
+def test_is_admin_only_evidence_verifier_counts():
+    """Verifier output is an explicit first-class execution signal."""
+    assert is_admin_only_evidence([{"verifier": "ok"}]) is False
+    assert is_admin_only_evidence([{"result": "verified step_1"}]) is False
 
 
 def test_attached_admin_only_evidence_reinjects():

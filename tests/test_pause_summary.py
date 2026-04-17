@@ -42,8 +42,8 @@ def test_summarize_state_prefers_review_ack_when_finish_gate_requires_reviewer()
     assert summary["is_waiting_for_review"] is True
 
 
-def test_summarize_state_recovery_class_suggests_inspect_not_resume():
-    """Recovery pauses surface `inspect` — a blind resume on a recovery pause
+def test_summarize_state_recovery_class_suggests_observe_not_resume():
+    """Recovery pauses surface `observe` — a blind resume on a recovery pause
     loops the run straight back into the same delivery/idle/inject fault."""
     summary = summarize_state({
         "run_id": "run_rec",
@@ -60,7 +60,7 @@ def test_summarize_state_recovery_class_suggests_inspect_not_resume():
     })
 
     assert summary["pause_class"] == "recovery"
-    assert summary["next_action"] == "thin-supervisor inspect run_rec"
+    assert summary["next_action"] == "thin-supervisor observe run_rec"
     assert summary["is_waiting_for_review"] is False
 
 
@@ -99,9 +99,9 @@ def test_pause_class_helper_returns_empty_when_not_paused():
     assert pause_class(state) == ""
 
 
-def test_summarize_state_recovery_needed_suggests_inspect_if_persists():
-    """RECOVERY_NEEDED is transient — if the operator sees it, they can `inspect`
-    when it lingers, but should generally wait."""
+def test_summarize_state_recovery_needed_suggests_observe():
+    """RECOVERY_NEEDED is transient — if the operator sees it, they can
+    `observe` to watch the pane, but should generally wait."""
     summary = summarize_state({
         "run_id": "run_rec_needed",
         "top_state": "RECOVERY_NEEDED",
@@ -109,5 +109,16 @@ def test_summarize_state_recovery_needed_suggests_inspect_if_persists():
     })
 
     assert summary["status_reason"] == "supervisor_recovering"
-    assert summary["next_action"] == "thin-supervisor inspect run_rec_needed --if-persists"
+    assert summary["next_action"] == "thin-supervisor observe run_rec_needed"
     assert summary["is_waiting_for_review"] is False
+
+
+def test_summarize_state_attached_suggests_observe():
+    """ATTACHED is transient — `observe` is the real read-only CLI command."""
+    summary = summarize_state({
+        "run_id": "run_attach",
+        "top_state": "ATTACHED",
+        "human_escalations": [],
+    })
+    assert summary["status_reason"] == "attached_awaiting_first_execution"
+    assert summary["next_action"] == "thin-supervisor observe run_attach"

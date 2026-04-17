@@ -86,17 +86,19 @@ def next_action(state: dict[str, Any]) -> str:
 
     # ATTACHED is transient — operator should just wait for the agent to emit
     # real execution evidence on the current node. If the run is stuck here,
-    # inspecting the pane is the next step.
+    # observing the pane is the next step.  `observe` is the real read-only
+    # CLI command; the run's own transient nature provides the "if-persists"
+    # semantics (it auto-advances on real evidence).
     if top_state == "ATTACHED":
         if run_id:
-            return f"thin-supervisor inspect {run_id} --if-persists"
+            return f"thin-supervisor observe {run_id}"
         return ""
 
     # Supervisor is actively auto-recovering — operator shouldn't act yet, but
-    # if they're watching, `inspect` is the right command if it persists.
+    # if they're watching, `observe` is the right read-only command.
     if top_state == "RECOVERY_NEEDED":
         if run_id:
-            return f"thin-supervisor inspect {run_id} --if-persists"
+            return f"thin-supervisor observe {run_id}"
         return ""
 
     if top_state != "PAUSED_FOR_HUMAN":
@@ -116,10 +118,10 @@ def next_action(state: dict[str, Any]) -> str:
     surface_type = state.get("surface_type", "")
 
     # Recovery pauses mean "supervisor tried and failed to advance the run."
-    # The operator's first move is inspection, not a blind resume — resuming
+    # The operator's first move is observation, not a blind resume — resuming
     # without diagnosing the pane can loop right back into the same fault.
     if pclass == "recovery" and run_id:
-        return f"thin-supervisor inspect {run_id}"
+        return f"thin-supervisor observe {run_id}"
 
     if spec_path and pane_target:
         command = (

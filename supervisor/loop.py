@@ -13,6 +13,7 @@ from supervisor.domain.state_machine import FINAL_STATES, transition_top_state
 from supervisor.gates.continue_gate import ContinueGate
 from supervisor.gates.branch_gate import BranchGate
 from supervisor.gates.finish_gate import FinishGate
+from supervisor.gates.rules import is_admin_only_evidence
 from supervisor.llm.judge_client import JudgeClient
 from supervisor.verifiers.suite import VerifierSuite
 from supervisor.adapters.transcript_adapter import TranscriptAdapter
@@ -103,6 +104,8 @@ class SupervisorLoop:
         cp = state.last_agent_checkpoint or {}
         cp_status = cp.get("status", "")
 
+        # `blocked` always wins: an agent asking for external input is a
+        # legitimate human pause regardless of attach state.
         if cp_status == "blocked":
             return SupervisorDecision.make(
                 decision=DecisionType.ESCALATE_TO_HUMAN.value,
@@ -113,6 +116,26 @@ class SupervisorLoop:
                 triggered_by_seq=triggered_by_seq,
                 triggered_by_checkpoint_id=triggered_by_checkpoint_id,
             )
+
+        # ATTACHED-boundary guard runs BEFORE the step_done / workflow_done
+        # short-circuits.  A first checkpoint claiming step_done/workflow_done
+        # with admin-only evidence would otherwise skip straight to
+        # VERIFY_STEP, bypassing the first-execution gate entirely — exactly
+        # the escape hatch the gate is meant to close.
+        if state.top_state == TopState.ATTACHED and is_admin_only_evidence(cp.get("evidence")):
+            return SupervisorDecision.make(
+                decision=DecisionType.RE_INJECT.value,
+                reason=(
+                    f"attached: first checkpoint claims {cp_status!r} with no "
+                    f"execution evidence on current_node"
+                ),
+                gate_type="checkpoint_status",
+                confidence=0.95,
+                needs_human=False,
+                triggered_by_seq=triggered_by_seq,
+                triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+            )
+
         if cp_status == "step_done":
             return SupervisorDecision.make(
                 decision=DecisionType.VERIFY_STEP.value,

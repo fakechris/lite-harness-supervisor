@@ -11,16 +11,33 @@ class ContinueGate:
     def decide(self, context: dict, *, triggered_by_seq: int = 0) -> SupervisorDecision:
         question = context.get("last_agent_question", "")
         checkpoint = context.get("last_agent_checkpoint", {}) or {}
+        top_state = context.get("top_state", "")
+
+        # Escalation classification must run FIRST.  If the agent is asking
+        # for missing credentials, flagging a dangerous action, or reporting
+        # blocked status, that signal wins over the attach-boundary
+        # re-inject — a first checkpoint with admin-only evidence AND
+        # "need API key" is a legitimate business pause, not a re-inject
+        # candidate.
+        text_hit = classify_text(question)
+        cp_hit = classify_checkpoint(checkpoint)
+
+        escalation_classes = {"MISSING_EXTERNAL_INPUT", "DANGEROUS_ACTION", "BLOCKED"}
+        if text_hit in escalation_classes or cp_hit in escalation_classes:
+            hit = text_hit if text_hit in escalation_classes else cp_hit
+        else:
+            hit = text_hit or cp_hit
 
         # ATTACHED-boundary guard: a CONTINUE here would advance a run whose
         # first checkpoint cited only attach/clarify/plan artifacts — exactly
         # the Phase 17 failure pattern.  RE_INJECT instead, without charging
-        # `current_attempt` or the global retry budget.
-        #
-        # Skip if the agent already flagged an escalation — those paths are
-        # handled below.  Escalation on first checkpoint is still legitimate.
-        top_state = context.get("top_state", "")
-        if top_state == TopState.ATTACHED.value:
+        # `current_attempt` or the global retry budget.  Placed AFTER the
+        # escalation classification so escalations on the first checkpoint
+        # still route to ESCALATE_TO_HUMAN below.
+        if (
+            top_state == TopState.ATTACHED.value
+            and hit not in escalation_classes
+        ):
             cp_status = (checkpoint or {}).get("status", "")
             if cp_status == "working" and is_admin_only_evidence((checkpoint or {}).get("evidence")):
                 return SupervisorDecision.make(
@@ -31,15 +48,6 @@ class ContinueGate:
                     needs_human=False,
                     triggered_by_seq=triggered_by_seq,
                 )
-
-        text_hit = classify_text(question)
-        cp_hit = classify_checkpoint(checkpoint)
-
-        escalation_classes = {"MISSING_EXTERNAL_INPUT", "DANGEROUS_ACTION", "BLOCKED"}
-        if text_hit in escalation_classes or cp_hit in escalation_classes:
-            hit = text_hit if text_hit in escalation_classes else cp_hit
-        else:
-            hit = text_hit or cp_hit
 
         if hit == "SOFT_CONFIRMATION":
             return SupervisorDecision.make(

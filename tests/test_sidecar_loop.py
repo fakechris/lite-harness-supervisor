@@ -98,7 +98,7 @@ def _make_checkpoint(status: str, node: str, summary: str) -> str:
         f"current_node: {node}\n"
         f"summary: {summary}\n"
         f"evidence:\n"
-        f"  - ran: echo ok\n"
+        f"  - verifier: ok\n"
         f"candidate_next_actions:\n"
         f"  - continue\n"
         f"needs:\n"
@@ -125,7 +125,7 @@ def _make_checkpoint_with_seq(status: str, node: str, summary: str, seq: int) ->
         f"current_node: {node}\n"
         f"summary: {summary}\n"
         f"evidence:\n"
-        f"  - ran: echo ok\n"
+        f"  - verifier: ok\n"
         f"candidate_next_actions:\n"
         f"  - continue\n"
         f"needs:\n"
@@ -384,9 +384,9 @@ def test_sidecar_notifies_on_checkpoint_mismatch_pause(tmp_path):
     assert channel.events
     assert channel.events[-1].reason == "node mismatch persisted for 5 checkpoints"
     # Node-mismatch pauses are `recovery` class — operator's first move is
-    # inspect, not a blind resume that would loop into the same fault.
+    # observe, not a blind resume that would loop into the same fault.
     assert channel.events[-1].pause_class == "recovery"
-    assert channel.events[-1].next_action == f"thin-supervisor inspect {final.run_id}"
+    assert channel.events[-1].next_action == f"thin-supervisor observe {final.run_id}"
 
 
 def test_sidecar_discards_stale_mismatch_batch_after_auto_intervention(tmp_path):
@@ -994,7 +994,7 @@ def test_attached_real_execution_advances_to_running(tmp_path):
 
     terminal = MockTerminal([
         "",
-        # _make_checkpoint uses "ran: echo ok" — real execution evidence.
+        # _make_checkpoint uses "verifier: ok" — real execution evidence.
         _make_checkpoint("working", "write_test", "started writing the test"),
         _make_checkpoint("step_done", "write_test", "wrote the test"),
         _make_checkpoint("step_done", "implement_feature", "feature done"),

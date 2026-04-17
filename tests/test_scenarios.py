@@ -78,7 +78,7 @@ def _make_checkpoint(status, node, summary):
         f"status: {status}\n"
         f"current_node: {node}\n"
         f"summary: {summary}\n"
-        f"evidence:\n  - ran: echo ok\n"
+        f"evidence:\n  - verifier: ok\n"
         f"candidate_next_actions:\n  - continue\n"
         f"needs:\n  - none\n"
         f"question_for_supervisor:\n  - none\n"

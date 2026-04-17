@@ -50,28 +50,51 @@ def classify_text(text: str) -> str | None:
             return "BLOCKED"
     return None
 
-# Markers of concrete execution work on the current node.  If ANY evidence
-# item carries one of these, the checkpoint is treated as real progress —
-# not an admin-only artifact.  Used by the ATTACHED-state gate to decide
-# whether to RE_INJECT a first-execution prompt.
+# Concrete markers of execution work on the *current node's objective*.
+#
+# This list is intentionally conservative: false positives on RE_INJECT are
+# cheap (one extra inject, retry budget untouched), false negatives
+# (admin-only checkpoint that slips through to CONTINUE) are the Phase 17
+# failure.  So we require a *specific* signal — test runner invocation,
+# test/build output, diff markers, or completion verbs tied to the work
+# itself — not generic words like "ran" or "modified" that routinely
+# show up in admin activity (e.g. `ran: git status`, `modified:
+# .supervisor/specs/foo.yaml`).
 EXECUTION_EVIDENCE_PATTERNS = [
-    r"\bran\b",
-    r"\bexecuted\b",
-    r"\bcommand\b",
-    r"\bmodified\b",
-    r"\bedited\b",
-    r"\bwrote\b",
-    r"\bcreated\b",
-    r"\bdeleted\b",
-    r"\bchanged\b",
-    r"\bfile\b",
-    r"\bdiff\b",
-    r"\boutput\b",
-    r"\bstdout\b",
-    r"\bstderr\b",
-    r"\bverifier?\b",
+    # Test / build runner invocation
+    r"\bpytest\b",
+    r"\bunittest\b",
+    r"\bjest\b",
+    r"\bcargo\s+test\b",
+    r"\bgo\s+test\b",
+    r"\bnpm\s+(test|run)\b",
+    r"\bmake\s+(test|build|check)\b",
+    r"\btox\b",
+    # Runner output / exit signals
+    r"\btests?\s+pass(ed|es)?\b",
+    r"\btests?\s+fail(ed)?\b",
+    r"\b\d+\s+passed\b",
+    r"\b\d+\s+failed\b",
+    r"\bbuild\s+(succeeded|failed|complete)\b",
+    r"\bcompiled\b",
+    r"\bexit\s+code\s+\d",
+    r"\btraceback\b",
+    # Real diff markers
+    r"\bdiff\s+--git\b",
+    r"^\+\+\+\s",
+    r"^---\s",
+    # Verifier / harness signals
+    r"\bverifier\b",
     r"\bverified\b",
-    r"\btest pass(ed|es)\b",
+    r"\bharness\b",
+    # Commit / merge completion verbs (distinct from 'git status')
+    r"\bgit\s+commit\b",
+    r"\bcommitted\b",
+    r"\bmerged\b",
+    # Implementation / fix verbs tied to the work (not to planning)
+    r"\bimplement(ed|ation)\b",
+    r"\bfixed\b",
+    r"\brefactor(ed|ing)\b",
 ]
 
 
@@ -79,9 +102,18 @@ def is_admin_only_evidence(evidence) -> bool:
     """Returns True if a checkpoint's `evidence` has no concrete execution signal.
 
     "Admin-only" means the agent cited attachment / clarify / plan / spec /
-    baseline artifacts but has not yet produced work on the node's objective.
-    Enforced at the attach boundary so a CONTINUE on attach cannot advance a
-    run that hasn't actually started executing the current node.
+    baseline artifacts (or side-work like `git status` / spec edits) but
+    has not yet produced work on the node's objective.  Enforced at the
+    attach boundary so a CONTINUE on attach cannot advance a run that
+    hasn't actually started executing the current node.
+
+    Default is admin-only.  We only escape to "real work" when at least
+    one evidence item carries a specific execution marker from
+    `EXECUTION_EVIDENCE_PATTERNS`.  Generic verbs like "ran" or "modified"
+    do not qualify on their own: they occur as often in admin activity
+    (git status, spec editing) as in real work, and the cost of one
+    unnecessary RE_INJECT is strictly lower than the cost of a Phase-17
+    false advance.
     """
     if not evidence:
         return True
@@ -98,7 +130,7 @@ def is_admin_only_evidence(evidence) -> bool:
             text = str(item)
         if not text.strip():
             continue
-        if any(re.search(p, text, flags=re.I) for p in EXECUTION_EVIDENCE_PATTERNS):
+        if any(re.search(p, text, flags=re.I | re.M) for p in EXECUTION_EVIDENCE_PATTERNS):
             return False
     return True
 
