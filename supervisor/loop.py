@@ -30,7 +30,6 @@ from supervisor.progress import write_progress
 from supervisor.protocol.reason_code import (
     ESC_AUTHORIZATION_REQUIRED,
     ESC_BLOCKED_GENUINE,
-    ESC_DANGEROUS_IRREVERSIBLE,
     ESC_MISSING_EXTERNAL_INPUT,
     REC_DELIVERY_TIMEOUT,
     REC_IDLE_TIMEOUT,
@@ -145,63 +144,65 @@ class SupervisorLoop:
         # and the v2 semantic fields left as None / ().
         normalized = normalize_checkpoint(cp) if cp else None
 
-        # Structured fail-closed fast-path — worker declared
-        # requires_authorization=true. This is a safety declaration in
-        # the same direction as the fail-closed default, so it takes
-        # precedence over both contradiction detection and the heuristic
-        # paths. (Safety contradictions — requires_authorization=false
-        # alongside a dangerous-action pattern hit — are handled by the
-        # contradiction router below.)
-        if normalized is not None and normalized.requires_authorization is True:
-            return SupervisorDecision.make(
-                decision=DecisionType.ESCALATE_TO_HUMAN.value,
-                reason="worker declared requires_authorization=true",
-                gate_type="checkpoint_status",
-                confidence=1.0,
-                needs_human=True,
-                triggered_by_seq=triggered_by_seq,
-                triggered_by_checkpoint_id=triggered_by_checkpoint_id,
-                reason_code=ESC_DANGEROUS_IRREVERSIBLE,
-            )
-
-        # Section E — contradiction routing runs before the heuristic
-        # ATTACHED guard. A payload with contradicting v2 semantics is
-        # inherently unsafe to trust via the fast path.
-        if normalized is not None and normalized.schema_version == 2:
-            contradiction = detect_contradiction(normalized, question=question)
-            if contradiction is not None:
-                structured = self._route_contradiction(
-                    contradiction,
-                    state=state,
-                    cp_status=cp_status,
+        # Structured fast-paths — all three branches below require a
+        # normalized v2-aware payload. Kept inside one guard block so the
+        # precondition is stated once.
+        if normalized is not None:
+            # 1. Worker declared requires_authorization=true. Per Section D
+            #    of the repartitioning doc, this is a worker-declared
+            #    authorization request and maps to
+            #    esc.authorization_required — distinct from
+            #    esc.dangerous_irreversible which the harness emits when
+            #    the dangerous-action classifier fires on its own.
+            if normalized.requires_authorization is True:
+                return SupervisorDecision.make(
+                    decision=DecisionType.ESCALATE_TO_HUMAN.value,
+                    reason="worker declared requires_authorization=true",
+                    gate_type="checkpoint_status",
+                    confidence=1.0,
+                    needs_human=True,
                     triggered_by_seq=triggered_by_seq,
                     triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+                    reason_code=ESC_AUTHORIZATION_REQUIRED,
                 )
-                if structured is not None:
-                    return structured
 
-        # Structured fast-path — worker declared business escalation with
-        # blocking_inputs listed. Route straight to ESCALATE_TO_HUMAN,
-        # carrying esc.missing_external_input so the escalation reason
-        # code matches a classifier-driven hit.
-        if (
-            normalized is not None
-            and normalized.escalation_class == "business"
-            and normalized.blocking_inputs
-        ):
-            return SupervisorDecision.make(
-                decision=DecisionType.ESCALATE_TO_HUMAN.value,
-                reason=(
-                    "worker declared business escalation with blocking_inputs="
-                    f"{list(normalized.blocking_inputs)}"
-                ),
-                gate_type="checkpoint_status",
-                confidence=1.0,
-                needs_human=True,
-                triggered_by_seq=triggered_by_seq,
-                triggered_by_checkpoint_id=triggered_by_checkpoint_id,
-                reason_code=ESC_MISSING_EXTERNAL_INPUT,
-            )
+            # 2. Section E contradiction routing runs before the heuristic
+            #    ATTACHED guard. A payload with contradicting v2 semantics
+            #    is inherently unsafe to trust via the fast path.
+            if normalized.schema_version == 2:
+                contradiction = detect_contradiction(normalized, question=question)
+                if contradiction is not None:
+                    structured = self._route_contradiction(
+                        contradiction,
+                        state=state,
+                        cp_status=cp_status,
+                        triggered_by_seq=triggered_by_seq,
+                        triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+                    )
+                    if structured is not None:
+                        return structured
+
+            # 3. Worker declared business escalation with blocking_inputs
+            #    listed. Route straight to ESCALATE_TO_HUMAN, carrying
+            #    esc.missing_external_input so the escalation reason code
+            #    matches a classifier-driven hit.
+            if (
+                normalized.escalation_class == "business"
+                and normalized.blocking_inputs
+            ):
+                return SupervisorDecision.make(
+                    decision=DecisionType.ESCALATE_TO_HUMAN.value,
+                    reason=(
+                        "worker declared business escalation with blocking_inputs="
+                        f"{list(normalized.blocking_inputs)}"
+                    ),
+                    gate_type="checkpoint_status",
+                    confidence=1.0,
+                    needs_human=True,
+                    triggered_by_seq=triggered_by_seq,
+                    triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+                    reason_code=ESC_MISSING_EXTERNAL_INPUT,
+                )
 
         # `blocked` always wins: an agent asking for external input is a
         # legitimate human pause regardless of attach state.

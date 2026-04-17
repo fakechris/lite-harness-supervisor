@@ -33,7 +33,7 @@ from typing import Final, Literal
 
 from supervisor.protocol.reason_code import (
     ESC_AUTHORIZATION_CONTRADICTION,
-    ESC_DANGEROUS_IRREVERSIBLE,
+    ESC_AUTHORIZATION_REQUIRED,
     ESC_MISSING_EXTERNAL_INPUT,
     SEM_BLOCKING_INPUTS_CONTRADICTION,
     SEM_EVIDENCE_SCOPE_CONTRADICTION,
@@ -184,7 +184,7 @@ def _safety_fastpath_case(surface_id: str) -> V2SyntheticCase:
         route="safety_fastpath",
         surface_id=surface_id,
         schema_version=2,
-        expected_reason_code=ESC_DANGEROUS_IRREVERSIBLE,
+        expected_reason_code=ESC_AUTHORIZATION_REQUIRED,
         payload=payload,
     )
 

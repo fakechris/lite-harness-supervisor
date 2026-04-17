@@ -161,6 +161,29 @@ def test_sunset_trigger_blocks_on_quiet_day():
     assert not status.ready_to_sunset
 
 
+def test_sunset_trigger_ignores_pre_window_v2_observations():
+    # Per Section B of the repartitioning doc, old pre-window v2
+    # observations do not count toward the coverage trigger. Here
+    # open_relay emitted a v2 checkpoint 30 days ago but only v1 inside
+    # the window — the trigger must NOT fire.
+    ref = date(2026, 4, 17)
+    base = datetime(2026, 4, 17, 12, tzinfo=timezone.utc)
+    obs = []
+    for offset in range(14):
+        obs.append(_obs("tmux", schema=2, at=base - timedelta(days=offset), seq=offset))
+        obs.append(_obs("jsonl", schema=2, at=base - timedelta(days=offset), seq=offset))
+        obs.append(
+            _obs("open_relay", schema=1, at=base - timedelta(days=offset), seq=offset)
+        )
+    # Stale v2 observation from 30 days ago — before the window starts.
+    obs.append(_obs("open_relay", schema=2, at=base - timedelta(days=30), seq=99))
+
+    status = evaluate_sunset_trigger(obs, reference_day=ref)
+    assert not status.frozen_surfaces_covered
+    assert "open_relay" in status.frozen_surfaces_missing_v2
+    assert not status.ready_to_sunset
+
+
 def test_sunset_trigger_blocks_when_fallback_rate_too_high():
     ref = date(2026, 4, 17)
     base = datetime(2026, 4, 17, 12, tzinfo=timezone.utc)

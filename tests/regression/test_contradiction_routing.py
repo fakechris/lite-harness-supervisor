@@ -202,7 +202,7 @@ def test_requires_authorization_true_short_circuits_to_escalate(tmp_path):
     )
     decision = _drive(tmp_path, payload)
     assert decision.decision == DecisionType.ESCALATE_TO_HUMAN.value
-    assert decision.reason_code == "esc.dangerous_irreversible"
+    assert decision.reason_code == "esc.authorization_required"
 
 
 def test_business_blocking_inputs_short_circuits_to_escalate(tmp_path):

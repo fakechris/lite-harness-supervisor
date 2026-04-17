@@ -250,8 +250,23 @@ def evaluate_sunset_trigger(
     """
 
     observation_list = list(observations)
+
+    if reference_day is None:
+        reference_day = datetime.now(tz=timezone.utc).date()
+    window_start = reference_day - timedelta(days=required_consecutive_days - 1)
+
+    # Per Section B of the repartitioning doc, "old pre-window
+    # observations do not count toward the trigger" — including for the
+    # surface-coverage check. A v2 emission 30 days ago does NOT satisfy
+    # the trigger if the surface has only emitted v1 inside the window.
+    windowed = [
+        obs
+        for obs in observation_list
+        if obs.observed_at.astimezone(timezone.utc).date() >= window_start
+    ]
+
     trend = compute_fallback_rate_trend(
-        observation_list,
+        windowed,
         window_days=required_consecutive_days,
         reference_day=reference_day,
     )
@@ -265,9 +280,7 @@ def evaluate_sunset_trigger(
 
     fallback_ok = consecutive >= required_consecutive_days
 
-    report = compute_robustness_report(
-        observation_list, frozen_surfaces=frozen_surfaces
-    )
+    report = compute_robustness_report(windowed, frozen_surfaces=frozen_surfaces)
     surfaces_ok = not report.frozen_surfaces_missing_v2
 
     return SunsetTriggerStatus(
