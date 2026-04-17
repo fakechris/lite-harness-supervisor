@@ -106,8 +106,33 @@ def _discover_git_worktrees(cwd: str) -> list[str]:
     return paths
 
 
+def _find_enclosing_worktree_root(cwd: str) -> str:
+    """Walk upward from cwd to the nearest ancestor holding a runs dir.
+
+    Operators often invoke commands from a subdirectory of the worktree
+    (e.g., `src/` or `tests/`).  Without this climb, `--local` from a
+    subdirectory would scan an empty path and return nothing.  Falls
+    back to the resolved cwd when no ancestor qualifies, preserving the
+    existing behavior for fresh worktrees where `.supervisor/` has not
+    yet been created.
+    """
+    try:
+        cur = Path(cwd).resolve()
+    except (OSError, RuntimeError):
+        return cwd
+    start = cur
+    while True:
+        if (cur / _RUNTIME_SUBPATH).is_dir():
+            return str(cur)
+        parent = cur.parent
+        if parent == cur:
+            return str(start)
+        cur = parent
+
+
 def _resolved_worktree_roots(
-    *, local_only: bool, cwd: str
+    *, local_only: bool, cwd: str,
+    daemons: list[dict], pane_owners: list[dict],
 ) -> list[Path]:
     """Build the deduped, resolved union of worktree roots to scan."""
     roots: list[Path] = []
@@ -125,15 +150,15 @@ def _resolved_worktree_roots(
         seen.add(resolved)
         roots.append(resolved)
 
-    _add(cwd)
+    _add(_find_enclosing_worktree_root(cwd))
     if local_only:
         return roots
 
     for wt in list_known_worktrees():
         _add(wt)
-    for daemon in list_daemons():
+    for daemon in daemons:
         _add(daemon.get("cwd", ""))
-    for owner in list_pane_owners():
+    for owner in pane_owners:
         _add(owner.get("cwd", ""))
     for wt in _discover_git_worktrees(cwd):
         _add(wt)
@@ -240,10 +265,19 @@ def collect_sessions(*, local_only: bool = False) -> list[SessionRecord]:
     known_worktrees, daemon cwds, pane-owner cwds, and git worktrees).
     """
     cwd = os.getcwd()
-    roots = _resolved_worktree_roots(local_only=local_only, cwd=cwd)
+    # Snapshot live registries once to avoid TOCTOU: a daemon that was
+    # present during worktree discovery must still be counted during
+    # liveness classification, or its runs would spuriously surface as
+    # orphaned if the daemon exits between the two reads.
+    daemons = list_daemons()
+    pane_owners = list_pane_owners()
+    roots = _resolved_worktree_roots(
+        local_only=local_only, cwd=cwd,
+        daemons=daemons, pane_owners=pane_owners,
+    )
 
     daemon_by_cwd: dict[Path, dict] = {}
-    for daemon in list_daemons():
+    for daemon in daemons:
         raw = daemon.get("cwd", "")
         if not raw:
             continue
@@ -253,7 +287,7 @@ def collect_sessions(*, local_only: bool = False) -> list[SessionRecord]:
             continue
 
     fg_runs: dict[str, dict] = {}
-    for owner in list_pane_owners():
+    for owner in pane_owners:
         rid = owner.get("run_id", "")
         if rid:
             fg_runs[rid] = owner

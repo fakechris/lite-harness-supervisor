@@ -461,6 +461,23 @@ class TestWorktreeDiscovery:
         assert len(records) == 1
         assert records[0].run_id == "run_once"
 
+    def test_local_only_from_subdirectory_finds_worktree_root(
+        self, fake_worktrees, monkeypatch
+    ):
+        """`--local` invoked from a subdir of the worktree must still scan
+        the worktree's runs.  Operators routinely cd into src/ or tests/;
+        returning an empty list would be a UX footgun."""
+        root, _ = fake_worktrees
+        _write_state(root, "run_in_subdir", top_state="RUNNING")
+        subdir = root / "src" / "deep"
+        subdir.mkdir(parents=True)
+        monkeypatch.chdir(subdir)
+
+        records = collect_sessions(local_only=True)
+
+        assert [r.run_id for r in records] == ["run_in_subdir"]
+        assert records[0].worktree_root == str(root.resolve())
+
     def test_local_only_skips_all_non_cwd_sources(
         self, fake_worktrees, monkeypatch
     ):
