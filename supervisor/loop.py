@@ -34,6 +34,7 @@ def build_context(spec, state) -> dict:
     return {
         "spec_id": spec.id,
         "current_node_id": state.current_node_id,
+        "top_state": state.top_state.value,
         "last_agent_question": state.last_event.get("payload", {}).get("question", ""),
         "last_agent_checkpoint": state.last_agent_checkpoint,
         "done_node_ids": state.done_node_ids,
@@ -70,6 +71,7 @@ class SupervisorLoop:
     def handle_event(self, state, event):
         state.last_event = event
         preserve_state = {
+            TopState.ATTACHED,
             TopState.VERIFYING,
             TopState.PAUSED_FOR_HUMAN,
             TopState.COMPLETED,
@@ -156,6 +158,12 @@ class SupervisorLoop:
             return
         if kind == DecisionType.VERIFY_STEP.value:
             transition_top_state(state, TopState.VERIFYING, reason="verify_step decision")
+            return
+        if kind == DecisionType.RE_INJECT.value:
+            # Attach-boundary re-inject: MUST NOT touch current_attempt or the
+            # retry budget — this is the whole point of having RE_INJECT as a
+            # separate decision from RETRY.  The run stays in ATTACHED so the
+            # next checkpoint also gets first-execution-evidence scrutiny.
             return
         if kind == DecisionType.RETRY.value:
             state.current_attempt += 1
@@ -534,9 +542,12 @@ class SupervisorLoop:
         policy = self.policy_engine.determine(self.worker_profile, contract, state)
         logger.info("supervision policy: %s (%s)", policy.mode, policy.reason)
 
-        # READY → RUNNING: inject first instruction
+        # READY → ATTACHED: inject first instruction. ATTACHED gates the first
+        # checkpoint — a CONTINUE requires real execution evidence on the
+        # current node, not clarify/plan/attach artifacts. Fresh register only;
+        # resume paths skip this branch and keep their existing top_state.
         if state.top_state == TopState.READY:
-            transition_top_state(state, TopState.RUNNING, reason="initial handoff")
+            transition_top_state(state, TopState.ATTACHED, reason="initial handoff")
             self.store.save(state)
             pending_text = terminal.read(lines=read_lines)
             # Only parse the LAST checkpoint in the pane to avoid stale ones
@@ -761,8 +772,11 @@ class SupervisorLoop:
                 self.handle_event(state, event)
 
                 # 4. Gate → SupervisorDecision
+                #    ATTACHED uses the same gate as GATING so the first
+                #    checkpoint after register is gated for execution evidence
+                #    (not admin-only artifacts) before CONTINUE can advance.
                 decision: SupervisorDecision | None = None
-                if state.top_state == TopState.GATING:
+                if state.top_state in (TopState.GATING, TopState.ATTACHED):
                     decision = self.gate(
                         spec, state,
                         triggered_by_seq=checkpoint.checkpoint_seq,
@@ -777,6 +791,32 @@ class SupervisorLoop:
                         if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
                             restart_loop = True
                             break
+
+                # 4b. RE_INJECT — attach-boundary re-inject of a focused
+                # first-execution prompt.  Dedicated branch so retry-counter
+                # semantics can never leak into this path.
+                if decision and decision.decision.upper() == DecisionType.RE_INJECT.value:
+                    node = spec.get_node(state.current_node_id)
+                    re_instruction = self.composer.build(
+                        node, state,
+                        triggered_by_decision_id=decision.decision_id,
+                        trigger_type="re_inject",
+                        policy=policy,
+                        first_node_delivery=True,
+                    )
+                    state.last_injected_node_id = state.current_node_id
+                    state.last_injected_attempt = state.current_attempt
+                    state.last_injection_seq = state.checkpoint_seq
+                    self.store.save(state)
+                    if not self._inject_or_pause(state, terminal, re_instruction, spec=spec):
+                        return
+                    delivery_ack_deadline = time.monotonic() + DELIVERY_ACK_TIMEOUT
+                    logger.info(
+                        "re-injected: %s (id=%s, decision=%s)",
+                        node.id, re_instruction.instruction_id, decision.decision_id,
+                    )
+                    restart_loop = True
+                    break
 
                 # 5. Verify
                 if state.top_state == TopState.VERIFYING:

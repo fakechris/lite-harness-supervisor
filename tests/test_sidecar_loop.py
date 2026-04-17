@@ -458,7 +458,10 @@ def test_sidecar_persists_node_mismatch_count_across_loop_restarts(tmp_path):
         stop_event=_StopAfter(terminal, 3),
     )
 
-    assert partial.top_state == TopState.RUNNING
+    # Fresh attach lands in ATTACHED; node mismatches don't emit execution
+    # evidence, so no CONTINUE fires and the run stays on the attach side of
+    # the boundary.
+    assert partial.top_state == TopState.ATTACHED
     assert partial.node_mismatch_count == 3
     assert partial.last_mismatch_node_id == "final_verify"
 
@@ -861,3 +864,188 @@ def test_recovery_needed_falls_through_to_pause_when_budget_exhausted(tmp_path):
     # Operator notification must carry the recovery-class routing
     assert channel.events[-1].event_type == "human_pause"
     assert channel.events[-1].pause_class == "recovery"
+
+
+# ---------------------------------------------------------------------------
+# Slice 4 — ATTACHED + first-execution gate
+# ---------------------------------------------------------------------------
+
+
+def _admin_only_checkpoint(node: str, summary: str) -> str:
+    """First-checkpoint-after-attach that cites only admin artifacts.
+
+    This is the Phase 17 incident shape: attach + clarify + plan, but no
+    concrete work on the current node.  The ATTACHED gate must treat this as
+    admin-only evidence and re-inject, not CONTINUE.
+    """
+    return (
+        f"<checkpoint>\n"
+        f"status: working\n"
+        f"current_node: {node}\n"
+        f"summary: {summary}\n"
+        f"evidence:\n"
+        f"  - attach: opened pane tmux://alpha\n"
+        f"  - clarify: confirmed spec scope\n"
+        f"  - plan: drafted step order\n"
+        f"candidate_next_actions:\n"
+        f"  - continue\n"
+        f"needs:\n"
+        f"  - none\n"
+        f"question_for_supervisor:\n"
+        f"  - none\n"
+        f"</checkpoint>\n"
+    )
+
+
+def test_fresh_attach_lands_in_attached_not_running(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    assert state.top_state == TopState.READY
+
+    # No checkpoint yet — loop injects, ATTACHED persists.
+    class _StopOnInject:
+        def __init__(self, terminal):
+            self.terminal = terminal
+
+        def is_set(self):
+            return bool(self.terminal.injected)
+
+    terminal = MockTerminal([""])
+    loop = SupervisorLoop(store)
+    final = loop.run_sidecar(
+        spec, state, terminal, poll_interval=0, read_lines=50,
+        stop_event=_StopOnInject(terminal),
+    )
+    assert final.top_state == TopState.ATTACHED
+    assert len(terminal.injected) == 1
+
+
+def test_attached_admin_only_checkpoint_reinjects_without_pause(tmp_path):
+    """Phase 17 regression: attach → admin-only checkpoint → RE_INJECT, not pause.
+
+    The gate must emit RE_INJECT (not CONTINUE, not RETRY), no operator
+    notification fires, and the retry budget is untouched.  State remains
+    ATTACHED so the next checkpoint is scrutinized again.
+    """
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    channel = RecordingChannel()
+    loop = SupervisorLoop(store, notification_manager=NotificationManager([channel]))
+
+    class _StopAfterReInject:
+        def __init__(self, terminal):
+            self.terminal = terminal
+
+        def is_set(self):
+            # First inject is the initial handoff, second is the RE_INJECT.
+            return len(self.terminal.injected) >= 2
+
+    terminal = MockTerminal([
+        "",  # initial inject
+        _admin_only_checkpoint("write_test", "attached and reviewed plan"),
+    ])
+
+    partial = loop.run_sidecar(
+        spec, state, terminal, poll_interval=0, read_lines=50,
+        stop_event=_StopAfterReInject(terminal),
+    )
+
+    assert partial.top_state == TopState.ATTACHED
+    # Retry budget untouched — RE_INJECT is not RETRY.
+    assert partial.current_attempt == 0
+    assert partial.retry_budget.used_global == 0
+    # No operator notification for an attach-boundary re-inject.
+    assert not any(e.event_type == "human_pause" for e in channel.events)
+    # Decision log must show a RE_INJECT.
+    decisions = [
+        json.loads(line) for line in store.decision_log_path.read_text().splitlines()
+    ]
+    assert any(d.get("decision", "").upper() == "RE_INJECT" for d in decisions)
+
+
+def test_attached_real_execution_advances_to_running(tmp_path):
+    """ATTACHED + concrete execution evidence → CONTINUE → RUNNING.
+
+    Stops after the first gate decision to capture the ATTACHED→RUNNING
+    transition explicitly, rather than letting the run complete and lose the
+    intermediate state.
+    """
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    class _StopAfterGate:
+        def __init__(self, store):
+            self.store = store
+
+        def is_set(self):
+            path = self.store.session_log_path
+            if not path.exists():
+                return False
+            for line in path.read_text().splitlines():
+                if '"event_type": "gate_decision"' in line:
+                    record = json.loads(line)
+                    if record.get("payload", {}).get("decision", "").upper() == "CONTINUE":
+                        return True
+            return False
+
+    terminal = MockTerminal([
+        "",
+        # _make_checkpoint uses "ran: echo ok" — real execution evidence.
+        _make_checkpoint("working", "write_test", "started writing the test"),
+        _make_checkpoint("step_done", "write_test", "wrote the test"),
+        _make_checkpoint("step_done", "implement_feature", "feature done"),
+        _make_checkpoint("step_done", "final_verify", "all done"),
+    ])
+    partial = loop.run_sidecar(
+        spec, state, terminal, poll_interval=0, read_lines=50,
+        stop_event=_StopAfterGate(store),
+    )
+    # After a CONTINUE on real execution evidence, we must be in RUNNING
+    # (or a post-RUNNING state like VERIFYING) — never back-sliding to ATTACHED.
+    assert partial.top_state in (
+        TopState.RUNNING, TopState.VERIFYING, TopState.COMPLETED,
+    )
+
+    # At least one CONTINUE was emitted out of ATTACHED.
+    decisions = [
+        json.loads(line)
+        for line in store.decision_log_path.read_text().splitlines()
+    ]
+    assert any(d.get("decision", "").upper() == "CONTINUE" for d in decisions)
+
+
+def test_non_fresh_resume_skips_attached(tmp_path):
+    """A state that already has a RUNNING checkpoint must not re-enter ATTACHED.
+
+    Covers the 'resume after PAUSED_FOR_HUMAN[business]' path: re-gating a run
+    that has already proved it can execute would be a regression for every
+    resume flow.
+    """
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    # Simulate a run that already advanced past the attach boundary.
+    state.top_state = TopState.RUNNING
+    store.save(state)
+
+    loop = SupervisorLoop(store)
+    terminal = MockTerminal([
+        _make_checkpoint("step_done", "write_test", "wrote the test"),
+        _make_checkpoint("step_done", "implement_feature", "feature done"),
+        _make_checkpoint("step_done", "final_verify", "all done"),
+    ])
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+
+    # Must complete without ever re-entering ATTACHED from RUNNING.
+    assert final.top_state == TopState.COMPLETED
+    session_log_lines = store.session_log_path.read_text().splitlines()
+    transitions = [
+        (json.loads(line)["payload"]["from"], json.loads(line)["payload"]["to"])
+        for line in session_log_lines
+        if '"top_state_change"' in line
+    ]
+    assert not any(src == "RUNNING" and dst == "ATTACHED" for src, dst in transitions)

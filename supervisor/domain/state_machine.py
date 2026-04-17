@@ -15,9 +15,19 @@ LEGACY_TOP_STATE_MAP = {
 
 ALLOWED_TOP_STATE_TRANSITIONS: dict[TopState, set[TopState]] = {
     TopState.READY: {
+        TopState.ATTACHED,
         TopState.RUNNING,
         TopState.GATING,
         TopState.VERIFYING,
+        TopState.PAUSED_FOR_HUMAN,
+        TopState.COMPLETED,
+        TopState.FAILED,
+        TopState.ABORTED,
+    },
+    TopState.ATTACHED: {
+        TopState.RUNNING,
+        TopState.VERIFYING,
+        TopState.RECOVERY_NEEDED,
         TopState.PAUSED_FOR_HUMAN,
         TopState.COMPLETED,
         TopState.FAILED,

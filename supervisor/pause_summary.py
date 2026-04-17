@@ -56,6 +56,8 @@ def status_reason(state: dict[str, Any]) -> str:
         if delivery == "TIMED_OUT":
             return "delivery_timed_out"
         return ""
+    if top_state == "ATTACHED":
+        return "attached_awaiting_first_execution"
     if top_state == "RECOVERY_NEEDED":
         return "supervisor_recovering"
     if top_state == "COMPLETED":
@@ -80,6 +82,14 @@ def next_action(state: dict[str, Any]) -> str:
     if top_state == "COMPLETED":
         if run_id:
             return f"thin-supervisor run summarize {run_id}"
+        return ""
+
+    # ATTACHED is transient — operator should just wait for the agent to emit
+    # real execution evidence on the current node. If the run is stuck here,
+    # inspecting the pane is the next step.
+    if top_state == "ATTACHED":
+        if run_id:
+            return f"thin-supervisor inspect {run_id} --if-persists"
         return ""
 
     # Supervisor is actively auto-recovering — operator shouldn't act yet, but

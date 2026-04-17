@@ -50,6 +50,59 @@ def classify_text(text: str) -> str | None:
             return "BLOCKED"
     return None
 
+# Markers of concrete execution work on the current node.  If ANY evidence
+# item carries one of these, the checkpoint is treated as real progress —
+# not an admin-only artifact.  Used by the ATTACHED-state gate to decide
+# whether to RE_INJECT a first-execution prompt.
+EXECUTION_EVIDENCE_PATTERNS = [
+    r"\bran\b",
+    r"\bexecuted\b",
+    r"\bcommand\b",
+    r"\bmodified\b",
+    r"\bedited\b",
+    r"\bwrote\b",
+    r"\bcreated\b",
+    r"\bdeleted\b",
+    r"\bchanged\b",
+    r"\bfile\b",
+    r"\bdiff\b",
+    r"\boutput\b",
+    r"\bstdout\b",
+    r"\bstderr\b",
+    r"\bverifier?\b",
+    r"\bverified\b",
+    r"\btest pass(ed|es)\b",
+]
+
+
+def is_admin_only_evidence(evidence) -> bool:
+    """Returns True if a checkpoint's `evidence` has no concrete execution signal.
+
+    "Admin-only" means the agent cited attachment / clarify / plan / spec /
+    baseline artifacts but has not yet produced work on the node's objective.
+    Enforced at the attach boundary so a CONTINUE on attach cannot advance a
+    run that hasn't actually started executing the current node.
+    """
+    if not evidence:
+        return True
+    for item in evidence:
+        text = ""
+        if isinstance(item, dict):
+            parts = []
+            for key, value in item.items():
+                key_text = " ".join(str(key).split())
+                value_text = " ".join(str(value).split())
+                parts.append(f"{key_text}: {value_text}")
+            text = " ".join(parts)
+        else:
+            text = str(item)
+        if not text.strip():
+            continue
+        if any(re.search(p, text, flags=re.I) for p in EXECUTION_EVIDENCE_PATTERNS):
+            return False
+    return True
+
+
 def classify_checkpoint(checkpoint: dict) -> str | None:
     status = checkpoint.get("status")
     summary = checkpoint.get("summary", "")
