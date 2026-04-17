@@ -543,6 +543,21 @@ class DaemonServer:
                             {"resumed_from": resumed_from},
                         )
                         store.save(state)
+                    elif state.top_state == TopState.RECOVERY_NEEDED:
+                        # Resume from a crash-stranded recovery state: a run
+                        # only persists RECOVERY_NEEDED if the sidecar died
+                        # between `_enter_recovery` and the follow-up
+                        # transition. Flip it to RUNNING so the resumed
+                        # sidecar can re-run the recovery path (or, if the
+                        # original fault has cleared, just continue).
+                        transition_top_state(state, TopState.RUNNING, reason="resume requested")
+                        state.delivery_state = DeliveryState.IDLE
+                        store.append_session_event(
+                            run_id,
+                            "resume_requested",
+                            {"resumed_from": resumed_from},
+                        )
+                        store.save(state)
                     thread = threading.Thread(
                         target=self._run_worker, args=(entry, target_spec, state),
                         name=f"run-{run_id}", daemon=True,

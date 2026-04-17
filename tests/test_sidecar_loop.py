@@ -818,6 +818,43 @@ def test_recovery_needed_auto_recovers_node_mismatch_without_human_pause(tmp_pat
     assert "recovery_needed" in session_types
 
 
+def test_recovery_needed_checkpoint_arrival_does_not_crash(tmp_path):
+    """Crash-resume scenario: if a state is persisted as RECOVERY_NEEDED
+    (sidecar died between `_enter_recovery` and the follow-up transition),
+    the next checkpoint must not crash on an illegal `RECOVERY_NEEDED → GATING`
+    transition. `handle_event` preserves the state instead of forcing a
+    transition, so the loop can re-run the recovery path cleanly.
+    """
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    # Stage the state directly into RECOVERY_NEEDED to simulate the post-
+    # crash persistence shape. RUNNING is the legal source state for
+    # `_enter_recovery`; call it through the legitimate entry point so the
+    # transition rules stay honest.
+    from supervisor.domain.state_machine import transition_top_state
+    transition_top_state(state, TopState.RUNNING, reason="simulate running")
+    loop._enter_recovery(state, {"reason": "simulated crash", "pause_class": "recovery"})
+    assert state.top_state == TopState.RECOVERY_NEEDED
+
+    event = {
+        "type": "agent_output",
+        "payload": {
+            "checkpoint": {
+                "status": "working",
+                "current_node": state.current_node_id,
+                "evidence": [{"verifier": "ok"}],
+            }
+        },
+    }
+    # No exception: the arriving checkpoint is absorbed without forcing a
+    # transition. State stays RECOVERY_NEEDED for the recovery path to handle.
+    loop.handle_event(state, event)
+    assert state.top_state == TopState.RECOVERY_NEEDED
+
+
 def test_recovery_needed_falls_through_to_pause_when_budget_exhausted(tmp_path):
     """If auto-intervention has no plan left, recovery must fall through to
     a `PAUSED_FOR_HUMAN` with `pause_class='recovery'`."""
