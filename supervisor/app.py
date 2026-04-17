@@ -758,33 +758,58 @@ def cmd_pane_owner(args):
 
 
 def cmd_observe(args):
-    """Read-only observation of a specific run."""
-    from supervisor.daemon.client import DaemonClient
+    """Read-only observation of a specific run.
 
-    client = DaemonClient()
-    if not client.is_running():
-        print("Daemon not running.")
+    Resolves the run against the global session index so observe works
+    from any cwd, across worktrees, and falls back to on-disk state +
+    session log when no live daemon owns the run.
+    """
+    from supervisor.operator.actions import ActionUnavailable, do_inspect
+    from supervisor.operator.run_context import RunContext
+    from supervisor.operator.session_index import find_session
+
+    rec = find_session(args.run_id)
+    if rec is None:
+        print(f"Error: run not found: {args.run_id}")
         return 1
 
-    result = client.observe(args.run_id)
-    if not result.get("ok"):
-        print(f"Error: {result.get('error', 'unknown')}")
+    ctx = RunContext.from_run_dict({
+        "run_id": rec.run_id,
+        "worktree": rec.worktree_root,
+        "tag": rec.tag or "local",
+        "top_state": rec.top_state,
+        "pane_target": rec.pane_target,
+        "socket": rec.daemon_socket,
+    })
+
+    try:
+        data = do_inspect(ctx)
+    except ActionUnavailable as e:
+        print(f"Error: observe unavailable: {e}")
         return 1
 
-    state = result.get("state", {})
-    print(f"Run:     {result['run_id']}")
-    print(f"Spec:    {state.get('spec_id', '?')}")
-    print(f"State:   {state.get('top_state', '?')}")
-    print(f"Node:    {state.get('current_node_id', '?')}")
-    print(f"Attempt: {state.get('current_attempt', 0)}")
-    done = state.get("done_node_ids", [])
+    snap = data.get("snapshot", {}) or {}
+    timeline = data.get("timeline", []) or []
+
+    print(f"Run:     {rec.run_id}")
+    print(f"Spec:    {snap.get('spec_id', '?')}")
+    print(f"State:   {snap.get('top_state', '?')}")
+    print(f"Node:    {snap.get('current_node', '?')}")
+    print(f"Attempt: {snap.get('current_attempt', 0)}")
+    done = snap.get("done_nodes") or []
     print(f"Done:    {', '.join(done) if done else '(none)'}")
+    if rec.worktree_root:
+        print(f"Worktree: {rec.worktree_root}")
+    if snap.get("pause_reason"):
+        print(f"Pause:   {snap['pause_reason']}")
+    if snap.get("next_action"):
+        print(f"Next:    {snap['next_action']}")
 
-    events = result.get("recent_events", [])
-    if events:
-        print(f"\nRecent events ({len(events)}):")
-        for e in events:
-            print(f"  [{e.get('event_type', '?')}] {e.get('timestamp', '')[:19]}")
+    if timeline:
+        print(f"\nRecent events ({len(timeline)}):")
+        for e in timeline:
+            ts = e.get("occurred_at") or e.get("timestamp", "")
+            print(f"  [{e.get('event_type', '?')}] {ts[:19]}")
     return 0
 
 

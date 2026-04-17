@@ -2247,3 +2247,97 @@ def test_status_default_includes_global_worktrees(
     out = capsys.readouterr().out
     assert "run_elsewhere" in out
     assert str(other.resolve()) in out
+
+
+# ─────────────────────────────────────────────────────────────────
+# Task 5: observe works for orphaned runs without a live daemon
+#
+# Per docs/plans/2026-04-16-global-observability-plane-for-per-worktree-runtime.md:
+#   - resolve run globally (find_session)
+#   - use daemon RPC if live
+#   - otherwise build response from local state + session log
+# ─────────────────────────────────────────────────────────────────
+
+
+def _write_observe_state_in(worktree: Path, *, run_id: str,
+                            top_state: str = "PAUSED_FOR_HUMAN") -> None:
+    run_dir = worktree / ".supervisor" / "runtime" / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(json.dumps({
+        "run_id": run_id,
+        "spec_id": "phase_x",
+        "top_state": top_state,
+        "current_node_id": "step_observed",
+        "current_attempt": 2,
+        "done_node_ids": ["step_1", "step_2"],
+        "pane_target": "%11",
+        "spec_path": "/tmp/spec.yaml",
+        "surface_type": "tmux",
+        "controller_mode": "daemon",
+        "workspace_root": str(worktree),
+        "human_escalations": [{"reason": "needs human review"}],
+    }))
+    # Session log with one event so timeline_from_session_log returns something
+    (run_dir / "session_log.jsonl").write_text(json.dumps({
+        "run_id": run_id,
+        "seq": 1,
+        "event_type": "checkpoint",
+        "timestamp": "2026-04-16T10:00:00Z",
+        "payload": {"note": "observed event"},
+    }) + "\n")
+
+
+def test_observe_works_for_orphaned_run_without_daemon(
+    tmp_path, monkeypatch, capsys,
+):
+    """observe must read state+events from disk when no daemon is running."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
+    _write_observe_state_in(tmp_path, run_id="run_orphan_observe")
+    _patch_session_index_registries(monkeypatch)
+
+    result = app.cmd_observe(argparse.Namespace(run_id="run_orphan_observe"))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "run_orphan_observe" in out
+    assert "PAUSED_FOR_HUMAN" in out
+    assert "step_observed" in out
+
+
+def test_observe_resolves_run_in_child_worktree(
+    tmp_path, monkeypatch, capsys,
+):
+    """observe must find a run by id across known_worktrees from root cwd."""
+    root = tmp_path / "root"
+    child = tmp_path / "child"
+    root.mkdir()
+    child.mkdir()
+    monkeypatch.chdir(root)
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
+    _write_observe_state_in(child, run_id="run_in_child_wt")
+    _patch_session_index_registries(
+        monkeypatch, known_worktrees=[str(child)],
+    )
+
+    result = app.cmd_observe(argparse.Namespace(run_id="run_in_child_wt"))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "run_in_child_wt" in out
+    assert "step_observed" in out
+
+
+def test_observe_returns_error_for_unknown_run(
+    tmp_path, monkeypatch, capsys,
+):
+    """observe must fail cleanly when the run id does not resolve."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
+    _patch_session_index_registries(monkeypatch)
+
+    result = app.cmd_observe(argparse.Namespace(run_id="run_does_not_exist"))
+
+    assert result == 1
+    out = capsys.readouterr().out
+    assert "run_does_not_exist" in out or "not found" in out.lower()
