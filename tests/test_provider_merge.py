@@ -126,6 +126,35 @@ class TestTelegramSameBotMultipleChats:
         assert ch.auth.is_authorized("111")
         assert ch.auth.is_authorized("222")
 
+    def test_explicit_empty_allowlist_does_not_promote(self):
+        """`allowed_chat_ids: []` is explicit narrowing, not legacy shape.
+
+        Distinguishing missing key from explicit empty list matters: an
+        operator who writes `allowed_chat_ids: []` has declared an
+        allowlist and set it to empty. That is NOT the same as omitting
+        the key, which is the legacy shape that triggers promotion.
+        Under PRD "Entries with explicit allowed_chat_ids keep their
+        narrowing intent", explicit empty must not auto-promote.
+        """
+        config = RuntimeConfig(notification_channels=[
+            # Explicit empty allowlist — narrow to nobody for this entry.
+            {"kind": "telegram", "mode": "command",
+             "bot_token": "tok_x", "chat_id": "111",
+             "allowed_chat_ids": []},
+            # Explicit allowlist on the sibling entry.
+            {"kind": "telegram", "mode": "command",
+             "bot_token": "tok_x", "chat_id": "222",
+             "allowed_chat_ids": ["222"]},
+        ])
+        host = OperatorChannelHost.from_config(config)
+        ch = host.channels[0]
+        assert set(ch.conversation_targets) == {"111", "222"}
+        # 111 declared an empty allowlist → not auto-promoted.
+        # Only 222 (from the sibling's explicit entry) is authorized.
+        assert set(ch.auth.allowed_chat_ids) == {"222"}
+        assert not ch.auth.is_authorized("111")
+        assert ch.auth.is_authorized("222")
+
     def test_explicit_narrow_allowlist_still_excludes_other_chats(self):
         """An entry with explicit allowed_chat_ids does NOT auto-promote its chat_id.
 

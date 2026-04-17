@@ -136,14 +136,17 @@ def _merge_additive_fields(
                 entry_targets.add(str(t))
         targets |= entry_targets
 
-        entry_allowed = [c for c in (e.get("allowed_chat_ids") or []) if c]
-        if entry_allowed:
-            for c in entry_allowed:
-                allow_chats.add(str(c))
+        if "allowed_chat_ids" in e:
+            # Explicit allowlist declared — honor the narrowing intent,
+            # even if the list is empty ("this entry authorizes nobody").
+            # Do NOT auto-promote this entry's chat_id/chat_ids.
+            for c in (e.get("allowed_chat_ids") or []):
+                if c:
+                    allow_chats.add(str(c))
         else:
-            # Legacy shape: no explicit allowlist in this entry → its
-            # chats are implicitly authorized (preserve single-entry
-            # semantics across the merge).
+            # Legacy shape: key absent → this entry's chats are
+            # implicitly authorized (preserve single-entry semantics
+            # across the merge).
             allow_chats |= entry_targets
 
         for u in e.get("allowed_user_ids", []) or []:

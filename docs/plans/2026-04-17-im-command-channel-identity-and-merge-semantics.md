@@ -265,10 +265,13 @@ intent is preserved across the merge:
   allowlist. This preserves the pre-merge single-entry default where
   `chat_id` alone means "this chat can both receive and issue
   commands".
-- If an entry specifies `allowed_chat_ids` explicitly, that narrowing
-  is honored: its `chat_id`/`chat_ids` are **not** auto-promoted. The
-  entry becomes "send alerts to X, only Y may command", even after
-  merging with other entries.
+- If an entry specifies `allowed_chat_ids` explicitly — **even as an
+  empty list** — that narrowing is honored: its `chat_id`/`chat_ids`
+  are **not** auto-promoted. The entry becomes "send alerts to X, only
+  Y may command", even after merging with other entries. Explicit
+  empty (`allowed_chat_ids: []`) means "this entry authorizes nobody",
+  which is distinct from omitting the key (the legacy shape that
+  triggers promotion).
 
 Without this rule, a legacy target-only entry merged with an
 explicit-allowlist entry would silently lose command authorization
