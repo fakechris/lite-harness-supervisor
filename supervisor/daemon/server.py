@@ -123,10 +123,12 @@ class DaemonServer:
             max_tokens=self.config.explainer_max_tokens,
         )
         self._job_tracker = JobTracker()
-        # Command channels are per-daemon singletons (one polling thread /
-        # one HTTP server), shared across all runs.
-        self._command_channels = NotificationManager.create_command_channels(self.config)
-        NotificationManager(self._command_channels).start_all()
+        # Command channels are per-credential-set singletons with
+        # cross-process advisory locks.  Built here but started only after
+        # the daemon is ready to accept IPC in start() — otherwise a
+        # command arriving during startup would hit an unbound socket.
+        from supervisor.operator.channel_host import OperatorChannelHost
+        self._channel_host = OperatorChannelHost.from_config(self.config)
 
     def start(self) -> None:
         """Start the daemon: bind socket, write PID, accept connections."""
@@ -144,6 +146,7 @@ class DaemonServer:
         Path(self.pid_path).write_text(str(os.getpid()))
         register_daemon(self._daemon_metadata())
         register_worktree(os.getcwd())
+        self._channel_host.start()
         recovered = self._recover_orphaned_runs()
         if recovered:
             logger.warning("recovered %d orphaned persisted run(s) into PAUSED_FOR_HUMAN", recovered)
@@ -387,7 +390,7 @@ class DaemonServer:
                 notification_manager=NotificationManager.from_config(
                     self.config,
                     runtime_root=entry.store.runtime_root,
-                    command_channels=self._command_channels,
+                    command_channels=self._channel_host.channels,
                 ),
                 auto_intervention_manager=AutoInterventionManager(
                     mode=self.config.pause_handling_mode,
@@ -993,7 +996,7 @@ class DaemonServer:
             t.join(timeout=5)
         for entry in entries:
             release_pane_lock(entry.pane_target, entry.run_id)
-        NotificationManager(self._command_channels).stop_all()
+        self._channel_host.stop()
         if self._sock:
             self._sock.close()
         Path(self.sock_path).unlink(missing_ok=True)

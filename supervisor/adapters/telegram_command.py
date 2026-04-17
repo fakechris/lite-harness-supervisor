@@ -72,6 +72,12 @@ class TelegramCommandChannel:
         self._thread: threading.Thread | None = None
         self._poller = AsyncJobPoller()
 
+    @property
+    def config_identity(self) -> str:
+        """Unique identity for cross-process singleton coordination."""
+        from supervisor.operator.channel_host import config_identity_from_token
+        return config_identity_from_token(self.bot_token)
+
     # ── NotificationChannel protocol ──────────────────────────────
 
     def notify(self, event: NotificationEvent) -> None:
