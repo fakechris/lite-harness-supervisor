@@ -27,7 +27,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from supervisor.global_registry import (
@@ -41,6 +42,12 @@ _RUNTIME_SUBPATH = Path(".supervisor") / "runtime" / "runs"
 
 _LIVE_STATES = {"RUNNING", "GATING", "VERIFYING"}
 _COMPLETED_STATES = {"COMPLETED", "FAILED", "ABORTED"}
+# States that are "actionable" — i.e., persisted state the operator can
+# still act on.  A run in one of these states without a live controller
+# counts as orphaned.  Paused runs are explicitly actionable: the plan's
+# incident shape (`run_89576d49897f` paused in a child worktree after
+# daemon idle shutdown) must appear as orphaned from root cwd.
+_ACTIONABLE_ORPHAN_STATES = _LIVE_STATES | {"PAUSED_FOR_HUMAN"}
 
 
 @dataclass(frozen=True)
@@ -164,7 +171,6 @@ def _iter_run_states(worktree: Path):
         run_id = state.get("run_id", "")
         if not run_id:
             continue
-        from datetime import datetime, timezone
         last_update_at = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
         yield run_id, state, last_update_at
 
@@ -174,12 +180,15 @@ def _iter_run_states(worktree: Path):
 
 def _derive_tag(*, is_live: bool, is_completed: bool, is_orphaned: bool,
                 top_state: str, controller_mode: str) -> str:
-    if is_live:
-        return "daemon" if controller_mode == "daemon" else "foreground"
+    # Paused trumps liveness: a paused run needs operator attention, so
+    # the tag must call that out even when a daemon is still supervising
+    # it.  Completed trumps everything else (terminal state is stable).
     if is_completed:
         return "completed"
     if top_state == "PAUSED_FOR_HUMAN":
         return "paused"
+    if is_live:
+        return "daemon" if controller_mode == "daemon" else "foreground"
     if is_orphaned:
         return "orphaned"
     return "local"
@@ -193,19 +202,32 @@ def _liveness(
     daemon_by_cwd: dict[Path, dict],
     fg_runs: dict[str, dict],
 ) -> tuple[bool, bool, bool, str]:
-    """Return (is_live, is_orphaned, is_completed, daemon_socket)."""
-    is_completed = top_state in _COMPLETED_STATES
+    """Return (is_live, is_orphaned, is_completed, daemon_socket).
+
+    A daemon that owns a worktree supervises every run in that worktree,
+    including paused ones — so paused runs must retain their
+    daemon_socket when a daemon is present.  Without this, operator
+    commands (inspect, resume, explain) cannot reach the daemon for a
+    paused run, which is exactly the most common command target.
+
+    A run is orphaned when it is in any actionable state (RUNNING,
+    GATING, VERIFYING, or PAUSED_FOR_HUMAN) but no controller owns it.
+    Paused runs without a live daemon still need operator attention;
+    they must surface as orphaned, not hidden.
+    """
+    if top_state in _COMPLETED_STATES:
+        return False, False, True, ""
 
     fg = fg_runs.get(run_id)
     if fg is not None and fg.get("controller_mode") == "foreground":
-        return True, False, is_completed, ""
+        return True, False, False, ""
 
     daemon = daemon_by_cwd.get(worktree)
-    if daemon is not None and top_state in _LIVE_STATES:
-        return True, False, is_completed, daemon.get("socket", "")
+    if daemon is not None:
+        return True, False, False, daemon.get("socket", "")
 
-    is_orphaned = (not is_completed) and top_state in _LIVE_STATES
-    return False, is_orphaned, is_completed, ""
+    is_orphaned = top_state in _ACTIONABLE_ORPHAN_STATES
+    return False, is_orphaned, False, ""
 
 
 # ── Public API ──────────────────────────────────────────────────
@@ -281,6 +303,11 @@ def collect_sessions(*, local_only: bool = False) -> list[SessionRecord]:
                     tag=tag,
                 )
             )
+    # Global recency sort: the operator asking "what's running?" cares
+    # about the most recently touched sessions first, regardless of
+    # which worktree they live in.  Without this, a stale run in cwd
+    # would mask a hot run in a child worktree.
+    records.sort(key=lambda r: r.last_update_at, reverse=True)
     return records
 
 

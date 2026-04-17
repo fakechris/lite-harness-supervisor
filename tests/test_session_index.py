@@ -223,6 +223,69 @@ class TestPausedSessionFields:
         assert rec.pause_reason == "need review"
         assert "resume" in rec.next_action
 
+    def test_paused_daemon_owned_retains_daemon_socket(
+        self, fake_worktrees, monkeypatch
+    ):
+        """Daemon-owned paused run keeps is_live and daemon_socket.
+
+        Operator commands (inspect, resume) need the socket to reach the
+        daemon. Losing the socket just because the top_state is
+        PAUSED_FOR_HUMAN breaks remote control of exactly the most
+        common command target.
+        """
+        root, child = fake_worktrees
+        _write_state(child, "run_paused_live", top_state="PAUSED_FOR_HUMAN")
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_daemons",
+            lambda: [
+                {
+                    "pid": 1,
+                    "cwd": str(child.resolve()),
+                    "socket": "/tmp/paused.sock",
+                    "active_runs": 1,
+                }
+            ],
+        )
+        records = collect_sessions()
+        assert len(records) == 1
+        rec = records[0]
+        assert rec.is_live is True
+        assert rec.is_orphaned is False
+        assert rec.daemon_socket == "/tmp/paused.sock"
+        # Tag should prioritise "paused" over "daemon" — paused needs
+        # operator attention regardless of controller.
+        assert rec.tag == "paused"
+
+    def test_paused_without_daemon_surfaces_as_orphaned(self, fake_worktrees):
+        """Paused runs without a live controller are actionable orphans.
+
+        This is the plan's incident shape: child-worktree paused run,
+        daemon idle-shutdown. Root cwd must see it as orphaned, not
+        hidden, or the operator has no path to resume.
+        """
+        root, child = fake_worktrees
+        _write_state(child, "run_paused_orphan", top_state="PAUSED_FOR_HUMAN")
+        records = collect_sessions()
+        assert len(records) == 1
+        rec = records[0]
+        assert rec.is_live is False
+        assert rec.is_orphaned is True
+        assert rec.is_completed is False
+
+
+class TestGlobalRecencySort:
+    def test_records_sorted_by_last_update_desc(self, fake_worktrees):
+        """Most recently touched run appears first, across worktrees."""
+        import time
+        root, child = fake_worktrees
+        # Older: in root
+        _write_state(root, "run_old", top_state="RUNNING")
+        time.sleep(0.02)
+        # Newer: in child (bumping its mtime after root)
+        _write_state(child, "run_new", top_state="RUNNING")
+        records = collect_sessions()
+        assert [r.run_id for r in records] == ["run_new", "run_old"]
+
 
 # ── Dedup across discovery sources ──────────────────────────────
 
