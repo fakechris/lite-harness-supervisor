@@ -15,6 +15,7 @@ Scenarios covered (from plan Task 1 Step 1):
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -345,3 +346,148 @@ class TestWorktreeOwnership:
         by_id = {r.run_id: r for r in records}
         assert Path(by_id["run_root"].worktree_root) == root.resolve()
         assert Path(by_id["run_child"].worktree_root) == child.resolve()
+
+
+# ── Task 2: worktree discovery union ───────────────────────────
+#
+# The collector must union all five discovery sources (cwd,
+# known_worktrees, daemon cwds, pane owner cwds, git worktree list)
+# and dedup by resolved path.  Each source alone is not sufficient;
+# together they cover every path the user might reasonably expect.
+
+
+class TestWorktreeDiscovery:
+    def test_known_worktree_visible_after_daemon_shutdown(
+        self, fake_worktrees
+    ):
+        """Plan Rule 4: daemon idle shutdown must not erase session visibility.
+
+        Discovery from known_worktrees.json alone (no live daemon, no
+        pane owner) must still surface the run.
+        """
+        root, child = fake_worktrees
+        _write_state(child, "run_after_shutdown", top_state="PAUSED_FOR_HUMAN")
+        # Default fixture: list_daemons=[], list_pane_owners=[], so the
+        # child worktree is reachable ONLY via list_known_worktrees.
+        records = collect_sessions()
+        assert {r.run_id for r in records} == {"run_after_shutdown"}
+
+    def test_git_worktree_list_discovers_missing_worktree(
+        self, tmp_path, monkeypatch
+    ):
+        """When the registry is incomplete, `git worktree list` fills gaps.
+
+        If a worktree was never registered (e.g., created outside the
+        supervisor lifecycle) but the repo itself knows about it,
+        discovery should still include it.
+        """
+        root = tmp_path / "root"
+        git_linked = tmp_path / "linked"
+        root.mkdir()
+        git_linked.mkdir()
+        _write_state(git_linked, "run_via_git", top_state="RUNNING")
+        monkeypatch.chdir(root)
+
+        # Registry is empty — known_worktrees does NOT list git_linked.
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_daemons", lambda: []
+        )
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_pane_owners", lambda: []
+        )
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_known_worktrees",
+            lambda: [],
+        )
+        # Only `git worktree list` knows about it.
+        monkeypatch.setattr(
+            "supervisor.operator.session_index._discover_git_worktrees",
+            lambda cwd: [str(git_linked)],
+        )
+
+        records = collect_sessions()
+        assert {r.run_id for r in records} == {"run_via_git"}
+
+    def test_duplicate_paths_deduped_by_resolved_path(
+        self, tmp_path, monkeypatch
+    ):
+        """Same worktree appearing in multiple sources scans once.
+
+        cwd, known_worktrees, daemon cwd, pane owner cwd, and git
+        worktree list can all report the same path in different string
+        shapes (relative, absolute, trailing slash, symlink). Path
+        resolution must dedupe so we don't double-scan or double-emit.
+        """
+        root = tmp_path / "root"
+        child = tmp_path / "child"
+        root.mkdir()
+        child.mkdir()
+        _write_state(child, "run_once", top_state="RUNNING")
+        monkeypatch.chdir(root)
+
+        child_abs = str(child.resolve())
+        child_with_slash = child_abs + "/"
+        child_as_dot = os.path.join(child_abs, ".")
+
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_daemons",
+            lambda: [
+                {"pid": 1, "cwd": child_abs, "socket": "/tmp/a.sock"},
+            ],
+        )
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_pane_owners",
+            lambda: [
+                {
+                    "pid": 2,
+                    "cwd": child_with_slash,
+                    "run_id": "other",
+                    "pane_target": "0:0",
+                    "controller_mode": "daemon",
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_known_worktrees",
+            lambda: [child_abs, child_with_slash],
+        )
+        monkeypatch.setattr(
+            "supervisor.operator.session_index._discover_git_worktrees",
+            lambda cwd: [child_as_dot],
+        )
+
+        records = collect_sessions()
+        # Only one record — dedup by resolved path, then by run_id.
+        assert len(records) == 1
+        assert records[0].run_id == "run_once"
+
+    def test_local_only_skips_all_non_cwd_sources(
+        self, fake_worktrees, monkeypatch
+    ):
+        """`local_only=True` must not touch known_worktrees / daemons /
+        pane owners / git worktrees — it restricts strictly to cwd."""
+        root, child = fake_worktrees
+        _write_state(child, "run_elsewhere", top_state="RUNNING")
+        # Even with rich registries, local_only should see nothing here.
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_daemons",
+            lambda: [{"pid": 1, "cwd": str(child), "socket": "/tmp/x.sock"}],
+        )
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_pane_owners",
+            lambda: [
+                {
+                    "pid": 2,
+                    "cwd": str(child),
+                    "run_id": "run_elsewhere",
+                    "pane_target": "0:0",
+                    "controller_mode": "foreground",
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            "supervisor.operator.session_index._discover_git_worktrees",
+            lambda cwd: [str(child)],
+        )
+        records = collect_sessions(local_only=True)
+        assert records == []
