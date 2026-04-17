@@ -210,6 +210,7 @@ class DaemonServer:
                 "reason": recovery_detail,
                 "orphaned_from": previous_top_state,
                 "delivery_state_at_crash": delivery,
+                "pause_class": "recovery",
             })
             store = StateStore(str(run_dir))
             store._session_seq = store._read_last_seq()

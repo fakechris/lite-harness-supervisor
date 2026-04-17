@@ -48,6 +48,60 @@ class AutoInterventionManager:
                 ),
             )
 
+        # Delivery ack timeout: send-keys completed but no checkpoint arrived
+        # within the ack window. Either the agent never saw the injection, or
+        # it is already working but not emitting. A focused re-inject that
+        # asks for a progress checkpoint is the cheapest recovery.
+        if "no checkpoint received within delivery timeout" in reason:
+            node = spec.get_node(state.current_node_id)
+            return AutoIntervention(
+                action_type="resume_with_instruction",
+                reason="delivery ack timeout auto-recovery",
+                instruction=(
+                    f"Supervisor has not seen a checkpoint since the last injection "
+                    f"for current_node: {state.current_node_id}. "
+                    f"Objective: {node.objective}. "
+                    "If you already received the instruction and are working, emit "
+                    "a short progress checkpoint NOW with concrete evidence of work "
+                    "on this node. "
+                    "If you never saw the instruction, start the node's objective "
+                    "now and emit a checkpoint after first meaningful progress."
+                ),
+            )
+
+        # Agent idle: no pane activity or checkpoints for the idle window. Same
+        # recipe as delivery timeout — prompt for a concrete progress signal.
+        if "idle timeout" in reason:
+            node = spec.get_node(state.current_node_id)
+            return AutoIntervention(
+                action_type="resume_with_instruction",
+                reason="idle timeout auto-recovery",
+                instruction=(
+                    f"Supervisor sees no agent activity for current_node: "
+                    f"{state.current_node_id}. Objective: {node.objective}. "
+                    "Emit a checkpoint now with either: (a) concrete evidence of "
+                    "work already in progress, or (b) the specific reason you are "
+                    "stuck (tool failing, unclear instruction, missing input). "
+                    "Do not stay silent."
+                ),
+            )
+
+        # Inject failure: send-keys itself errored. One retry of the inject
+        # (via the normal inject path) before falling through to a human.
+        if reason.startswith("injection failed") or "inject failed" in reason:
+            node = spec.get_node(state.current_node_id)
+            return AutoIntervention(
+                action_type="resume_with_instruction",
+                reason="inject failure auto-recovery",
+                instruction=(
+                    f"Resuming current_node: {state.current_node_id} after a "
+                    "transient injection error. "
+                    f"Objective: {node.objective}. "
+                    "Continue from wherever you were; if you had not yet started, "
+                    "start now and emit a checkpoint on first meaningful progress."
+                ),
+            )
+
         if "retry budget exhausted" in reason:
             node = spec.get_node(state.current_node_id)
             return AutoIntervention(

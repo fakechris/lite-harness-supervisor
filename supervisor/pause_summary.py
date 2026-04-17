@@ -56,6 +56,8 @@ def status_reason(state: dict[str, Any]) -> str:
         if delivery == "TIMED_OUT":
             return "delivery_timed_out"
         return ""
+    if top_state == "RECOVERY_NEEDED":
+        return "supervisor_recovering"
     if top_state == "COMPLETED":
         return "workflow_done"
     current_node = str(state.get("current_node_id", "")).strip()
@@ -78,6 +80,13 @@ def next_action(state: dict[str, Any]) -> str:
     if top_state == "COMPLETED":
         if run_id:
             return f"thin-supervisor run summarize {run_id}"
+        return ""
+
+    # Supervisor is actively auto-recovering — operator shouldn't act yet, but
+    # if they're watching, `inspect` is the right command if it persists.
+    if top_state == "RECOVERY_NEEDED":
+        if run_id:
+            return f"thin-supervisor inspect {run_id} --if-persists"
         return ""
 
     if top_state != "PAUSED_FOR_HUMAN":

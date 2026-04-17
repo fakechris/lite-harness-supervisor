@@ -327,6 +327,29 @@ class SupervisorLoop:
         ))
         return event_payload
 
+    def _enter_recovery(self, state, payload: dict | None = None) -> dict:
+        """Record a recovery-needed transition.
+
+        Mirrors `_pause_for_human` but targets `RECOVERY_NEEDED` — the
+        supervisor owns the run from here and a live auto-intervention recipe
+        will be attempted. If that recipe fails, the caller is responsible
+        for falling through to `_pause_for_human(pause_class='recovery')`.
+
+        Deliberately does NOT fire an operator notification. The whole point
+        of RECOVERY_NEEDED is "do not wake a human yet" — observability
+        surfaces read the session event log directly.
+        """
+        details = dict(payload or {})
+        pclass = str(details.get("pause_class", "")).strip().lower()
+        if pclass != "recovery":
+            raise ValueError(
+                f"_enter_recovery requires pause_class='recovery'; got {details.get('pause_class')!r}"
+            )
+        details["pause_class"] = pclass
+        transition_top_state(state, TopState.RECOVERY_NEEDED, reason="recovery needed")
+        self.store.append_session_event(state.run_id, "recovery_needed", details)
+        return details
+
     @staticmethod
     def _classify_gate_escalation(decision) -> str:
         """Derive pause_class for an ESCALATE_TO_HUMAN gate decision.
@@ -551,7 +574,7 @@ class SupervisorLoop:
                     state.last_injected_attempt = 0
                     state.last_injection_seq = state.checkpoint_seq
                     self.store.save(state)
-                    if not self._inject_or_pause(state, terminal, instruction):
+                    if not self._inject_or_pause(state, terminal, instruction, spec=spec):
                         return
                     delivery_ack_deadline = time.monotonic() + DELIVERY_ACK_TIMEOUT
                 pending_text = None
@@ -579,13 +602,15 @@ class SupervisorLoop:
                 }
                 self.store.append_session_event(state.run_id, "delivery_ack_timeout", payload)
                 logger.warning("delivery ack timeout: no checkpoint after injection for %ds", DELIVERY_ACK_TIMEOUT)
-                pause_payload = self._pause_for_human(state, payload)
-                if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
+                recovery_payload = self._enter_recovery(state, payload)
+                if self._attempt_auto_intervention(spec, state, terminal, recovery_payload):
                     # Auto-intervention injected a new instruction — reset tracking
                     state.last_injection_seq = state.checkpoint_seq
                     delivery_ack_deadline = now + DELIVERY_ACK_TIMEOUT
                     self.store.save(state)
                     continue
+                # Recipe exhausted — surface to a human with recovery class
+                self._pause_for_human(state, payload)
                 self.store.save(state)
                 return
 
@@ -615,12 +640,14 @@ class SupervisorLoop:
                         self.store.append_event({"type": "timeout", "payload": payload})
                         self.store.append_session_event(state.run_id, "agent_idle_timeout", payload)
                         self.handle_event(state, {"type": "timeout", "payload": payload})
-                        pause_payload = self._pause_for_human(state, payload)
-                        if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
+                        recovery_payload = self._enter_recovery(state, payload)
+                        if self._attempt_auto_intervention(spec, state, terminal, recovery_payload):
                             last_activity_at = now
                             self.store.save(state)
                             time.sleep(effective_poll_interval)
                             continue
+                        # Recipe exhausted — surface to a human with recovery class
+                        self._pause_for_human(state, payload)
                         self.store.save(state)
                         return
                 time.sleep(effective_poll_interval)
@@ -694,15 +721,18 @@ class SupervisorLoop:
                         )
                         self.store.save(state)
                         if state.node_mismatch_count >= max_node_mismatch:
-                            pause_payload = self._pause_for_human(state, {
+                            mismatch_payload = {
                                 "reason": f"node mismatch persisted for {state.node_mismatch_count} checkpoints",
                                 "checkpoint_node": checkpoint.current_node,
                                 "state_node": state.current_node_id,
                                 "pause_class": "recovery",
-                            })
-                            if self._attempt_auto_intervention(spec, state, terminal, pause_payload):
+                            }
+                            recovery_payload = self._enter_recovery(state, mismatch_payload)
+                            if self._attempt_auto_intervention(spec, state, terminal, recovery_payload):
                                 restart_loop = True
                                 break
+                            # Recipe exhausted — surface to a human with recovery class
+                            self._pause_for_human(state, mismatch_payload)
                             self.store.save(state)
                             return
                         preserve_checkpoint_buffer = True
@@ -805,7 +835,7 @@ class SupervisorLoop:
                         state.last_injected_attempt = state.current_attempt
                         state.last_injection_seq = state.checkpoint_seq
                         self.store.save(state)
-                        if not self._inject_or_pause(state, terminal, instruction):
+                        if not self._inject_or_pause(state, terminal, instruction, spec=spec):
                             return
                         delivery_ack_deadline = time.monotonic() + DELIVERY_ACK_TIMEOUT
                         logger.info("injected: %s (id=%s, trigger=%s)", node.id, instruction.instruction_id, trigger)
@@ -830,7 +860,7 @@ class SupervisorLoop:
                 state.last_injected_attempt = state.current_attempt
                 state.last_injection_seq = state.checkpoint_seq
                 self.store.save(state)
-                if not self._inject_or_pause(state, terminal, deferred_continue_instruction):
+                if not self._inject_or_pause(state, terminal, deferred_continue_instruction, spec=spec):
                     return
                 delivery_ack_deadline = time.monotonic() + DELIVERY_ACK_TIMEOUT
                 logger.info(
@@ -865,7 +895,7 @@ class SupervisorLoop:
             return state.workspace_root
         return None
 
-    def _inject_or_pause(self, state, terminal, instruction) -> bool:
+    def _inject_or_pause(self, state, terminal, instruction, *, spec=None) -> bool:
         # Observation-only surfaces (e.g., JSONL) — write instruction but don't
         # pretend delivery succeeded. Record the undelivered instruction and
         # pause so a human/operator can move the run onto a delivery-capable
@@ -903,13 +933,21 @@ class SupervisorLoop:
                 "error": str(exc),
             }
             self.store.append_session_event(state.run_id, "injection_failed", payload)
-            pause_payload = self._pause_for_human(state, {
-                "reason": str(exc),
+            inject_fail_payload = {
+                "reason": f"injection failed: {exc}",
                 "node_id": state.current_node_id,
                 "instruction_id": instruction.instruction_id,
                 "pause_class": "recovery",
-            })
-            self._attempt_auto_intervention(None, state, terminal, pause_payload)
+            }
+            # If caller threaded the spec through, try an auto-intervention
+            # re-inject; otherwise fall through to a recovery-flavored human
+            # pause (AutoInterventionManager short-circuits on spec=None).
+            if spec is not None:
+                recovery_payload = self._enter_recovery(state, inject_fail_payload)
+                if self._attempt_auto_intervention(spec, state, terminal, recovery_payload):
+                    self.store.save(state)
+                    return True
+            self._pause_for_human(state, inject_fail_payload)
             self.store.save(state)
             return False
 

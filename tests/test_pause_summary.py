@@ -97,3 +97,17 @@ def test_pause_class_helper_returns_empty_when_not_paused():
         "human_escalations": [{"reason": "old", "pause_class": "business"}],
     }
     assert pause_class(state) == ""
+
+
+def test_summarize_state_recovery_needed_suggests_inspect_if_persists():
+    """RECOVERY_NEEDED is transient — if the operator sees it, they can `inspect`
+    when it lingers, but should generally wait."""
+    summary = summarize_state({
+        "run_id": "run_rec_needed",
+        "top_state": "RECOVERY_NEEDED",
+        "human_escalations": [],
+    })
+
+    assert summary["status_reason"] == "supervisor_recovering"
+    assert summary["next_action"] == "thin-supervisor inspect run_rec_needed --if-persists"
+    assert summary["is_waiting_for_review"] is False

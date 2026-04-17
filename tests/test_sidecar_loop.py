@@ -746,3 +746,118 @@ def test_sidecar_notifies_on_verified_step_and_completion(tmp_path):
     ]
     assert "step_verified" in session_events
     assert "run_completed" in session_events
+
+
+# ---------------------------------------------------------------------------
+# Slice 3: RECOVERY_NEEDED + broader auto-intervention
+# ---------------------------------------------------------------------------
+
+
+def test_enter_recovery_requires_pause_class_recovery(tmp_path):
+    """_enter_recovery must reject payloads without pause_class='recovery'.
+
+    RECOVERY_NEEDED is reserved for auto-recoverable triggers. Allowing other
+    pause classes here would collapse the taxonomy we just introduced.
+    """
+    import pytest
+
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    with pytest.raises(ValueError, match="pause_class='recovery'"):
+        loop._enter_recovery(state, {"reason": "x", "pause_class": "business"})
+    with pytest.raises(ValueError, match="pause_class='recovery'"):
+        loop._enter_recovery(state, {"reason": "x"})
+
+
+def test_recovery_needed_auto_recovers_node_mismatch_without_human_pause(tmp_path):
+    """A node-mismatch storm with an active auto-intervention recipe should
+    recover silently — operator is never notified with `human_pause`."""
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(
+        spec,
+        spec_path="/tmp/plan.yaml",
+        pane_target="%0",
+        surface_type="tmux",
+    )
+    channel = RecordingChannel()
+    loop = SupervisorLoop(
+        store,
+        notification_manager=NotificationManager([channel]),
+        auto_intervention_manager=AutoInterventionManager(mode="notify_then_ai"),
+    )
+
+    terminal = MockTerminal([
+        _make_checkpoint("step_done", "write_test", "wrote the test"),
+        _make_checkpoint("working", "final_verify", "mismatch 1"),
+        _make_checkpoint("working", "final_verify", "mismatch 2"),
+        _make_checkpoint("working", "final_verify", "mismatch 3"),
+        _make_checkpoint("working", "final_verify", "mismatch 4"),
+        _make_checkpoint("working", "final_verify", "mismatch 5"),
+        _make_checkpoint("step_done", "implement_feature", "feature done"),
+        _make_checkpoint("step_done", "final_verify", "all done"),
+    ])
+
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+
+    assert final.top_state == TopState.COMPLETED
+    event_types = [event.event_type for event in channel.events]
+    assert "human_pause" not in event_types
+    assert "auto_intervention" in event_types
+    # Session log should contain the recovery_needed transition
+    session_types = [
+        json.loads(line)["event_type"]
+        for line in store.session_log_path.read_text().splitlines()
+    ]
+    assert "recovery_needed" in session_types
+
+
+def test_recovery_needed_falls_through_to_pause_when_budget_exhausted(tmp_path):
+    """If auto-intervention has no plan left, recovery must fall through to
+    a `PAUSED_FOR_HUMAN` with `pause_class='recovery'`."""
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(
+        spec,
+        spec_path="/tmp/plan.yaml",
+        pane_target="%0",
+        surface_type="tmux",
+    )
+    # max=0 means every recipe request is refused — same shape as budget
+    # exhaustion.
+    channel = RecordingChannel()
+    loop = SupervisorLoop(
+        store,
+        notification_manager=NotificationManager([channel]),
+        auto_intervention_manager=AutoInterventionManager(
+            mode="notify_then_ai",
+            max_auto_interventions=0,
+        ),
+    )
+
+    terminal = MockTerminal([
+        _make_checkpoint("step_done", "write_test", "wrote the test"),
+        _make_checkpoint("working", "final_verify", "mismatch 1"),
+        _make_checkpoint("working", "final_verify", "mismatch 2"),
+        _make_checkpoint("working", "final_verify", "mismatch 3"),
+        _make_checkpoint("working", "final_verify", "mismatch 4"),
+        _make_checkpoint("working", "final_verify", "mismatch 5"),
+    ])
+
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+
+    assert final.top_state == TopState.PAUSED_FOR_HUMAN
+    assert final.human_escalations[-1]["pause_class"] == "recovery"
+    # Both events should fire: first recovery_needed, then human_pause
+    session_types = [
+        json.loads(line)["event_type"]
+        for line in store.session_log_path.read_text().splitlines()
+    ]
+    assert session_types.count("recovery_needed") >= 1
+    assert "human_pause" in session_types
+    # Operator notification must carry the recovery-class routing
+    assert channel.events[-1].event_type == "human_pause"
+    assert channel.events[-1].pause_class == "recovery"
