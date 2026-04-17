@@ -232,20 +232,31 @@ class TestFormatClarification:
 
 
 class TestCollectRunsLocal:
-    @patch("supervisor.operator.tui.list_known_worktrees", return_value=[])
-    @patch("supervisor.operator.tui.list_pane_owners", return_value=[])
-    @patch("supervisor.operator.tui.list_daemons", return_value=[])
-    def test_collect_with_disk_runs(self, _mock_d, _mock_o, _mock_w, tmp_path):
-        """Verify collect_runs picks up on-disk state files."""
+    def _patch(self, monkeypatch, *, known=(), daemons=(), panes=()):
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_known_worktrees",
+            lambda: list(known),
+        )
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_daemons",
+            lambda: list(daemons),
+        )
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_pane_owners",
+            lambda: list(panes),
+        )
+        monkeypatch.setattr(
+            "supervisor.operator.session_index._discover_git_worktrees",
+            lambda cwd: [],
+        )
+
+    def test_collect_with_disk_runs(self, tmp_path, monkeypatch):
+        """collect_runs surfaces a paused on-disk run (via session_index)."""
         import json
-        import supervisor.operator.tui as tui_mod
 
-        # Temporarily override runtime dir
-        orig = tui_mod._RUNTIME_DIR
-        tui_mod._RUNTIME_DIR = tmp_path
-
-        runs_dir = tmp_path / "runs" / "run_test123"
-        runs_dir.mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_test123"
+        run_dir.mkdir(parents=True)
         state = {
             "run_id": "run_test123",
             "top_state": "PAUSED_FOR_HUMAN",
@@ -253,56 +264,44 @@ class TestCollectRunsLocal:
             "pane_target": "%5",
             "workspace_root": "/tmp/ws",
         }
-        (runs_dir / "state.json").write_text(json.dumps(state))
+        (run_dir / "state.json").write_text(json.dumps(state))
 
-        try:
-            items = collect_runs(daemons=[])
-            assert len(items) == 1
-            assert items[0]["run_id"] == "run_test123"
-            assert items[0]["tag"] == "paused"
-            assert items[0]["top_state"] == "PAUSED_FOR_HUMAN"
-        finally:
-            tui_mod._RUNTIME_DIR = orig
+        self._patch(monkeypatch)
 
-    @patch("supervisor.operator.tui.list_known_worktrees", return_value=[])
-    @patch("supervisor.operator.tui.list_pane_owners", return_value=[])
-    @patch("supervisor.operator.tui.list_daemons", return_value=[])
-    def test_collect_completed_run(self, _mock_d, _mock_o, _mock_w, tmp_path):
+        items = collect_runs()
+        assert len(items) == 1
+        assert items[0]["run_id"] == "run_test123"
+        assert items[0]["tag"] == "paused"
+        assert items[0]["top_state"] == "PAUSED_FOR_HUMAN"
+
+    def test_collect_completed_run(self, tmp_path, monkeypatch):
         import json
-        import supervisor.operator.tui as tui_mod
 
-        orig = tui_mod._RUNTIME_DIR
-        tui_mod._RUNTIME_DIR = tmp_path
-
-        runs_dir = tmp_path / "runs" / "run_done999"
-        runs_dir.mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_done999"
+        run_dir.mkdir(parents=True)
         state = {
             "run_id": "run_done999",
             "top_state": "COMPLETED",
             "current_node_id": "",
             "done_node_ids": ["step_1", "step_2"],
         }
-        (runs_dir / "state.json").write_text(json.dumps(state))
+        (run_dir / "state.json").write_text(json.dumps(state))
 
-        try:
-            items = collect_runs(daemons=[])
-            assert len(items) == 1
-            assert items[0]["tag"] == "completed"
-        finally:
-            tui_mod._RUNTIME_DIR = orig
+        self._patch(monkeypatch)
 
-    @patch("supervisor.operator.tui.list_known_worktrees")
-    @patch("supervisor.operator.tui.list_pane_owners", return_value=[])
-    @patch("supervisor.operator.tui.list_daemons", return_value=[])
-    def test_collect_from_known_worktree(self, _mock_d, _mock_o, mock_wts, tmp_path):
-        """Verify collect_runs discovers runs from known_worktrees registry."""
+        items = collect_runs()
+        assert len(items) == 1
+        assert items[0]["tag"] == "completed"
+
+    def test_collect_from_known_worktree(self, tmp_path, monkeypatch):
+        """collect_runs discovers runs from known_worktrees registry."""
         import json
-        import supervisor.operator.tui as tui_mod
 
-        orig = tui_mod._RUNTIME_DIR
-        tui_mod._RUNTIME_DIR = tmp_path / "empty_rt"
+        empty_cwd = tmp_path / "empty"
+        empty_cwd.mkdir()
+        monkeypatch.chdir(empty_cwd)
 
-        # Create state in an external worktree
         other_wt = tmp_path / "other_worktree"
         run_dir = other_wt / ".supervisor" / "runtime" / "runs" / "run_wt_only"
         run_dir.mkdir(parents=True)
@@ -313,60 +312,10 @@ class TestCollectRunsLocal:
         }
         (run_dir / "state.json").write_text(json.dumps(state))
 
-        mock_wts.return_value = [str(other_wt)]
+        self._patch(monkeypatch, known=[str(other_wt)])
 
-        try:
-            items = collect_runs(daemons=[])
-            assert any(i["run_id"] == "run_wt_only" for i in items)
-        finally:
-            tui_mod._RUNTIME_DIR = orig
-
-
-class TestScanRunsDirSort:
-    def test_sorts_by_state_mtime_not_dir_mtime(self, tmp_path):
-        """Verify runs are sorted by state.json mtime, not directory mtime."""
-        import json
-        import os
-        from supervisor.operator.tui import _scan_runs_dir
-
-        # Create two runs: old_run created first, new_run created second
-        old_dir = tmp_path / "run_old"
-        old_dir.mkdir()
-        old_state = old_dir / "state.json"
-        old_state.write_text(json.dumps({
-            "run_id": "run_old",
-            "top_state": "COMPLETED",
-            "current_node_id": "",
-        }))
-
-        new_dir = tmp_path / "run_new"
-        new_dir.mkdir()
-        new_state = new_dir / "state.json"
-        new_state.write_text(json.dumps({
-            "run_id": "run_new",
-            "top_state": "RUNNING",
-            "current_node_id": "step_1",
-        }))
-
-        # Make old_run's state.json *newer* than new_run's
-        # (simulates: old dir, but recent activity)
-        old_state.write_text(json.dumps({
-            "run_id": "run_old",
-            "top_state": "COMPLETED",
-            "current_node_id": "",
-            "updated": True,
-        }))
-        # Explicitly set mtime to guarantee ordering (avoid fragile sleep)
-        new_mtime = new_state.stat().st_mtime
-        os.utime(old_state, (new_mtime + 10, new_mtime + 10))
-
-        items: list[dict] = []
-        seen: set[str] = set()
-        _scan_runs_dir(tmp_path, "", items, seen)
-
-        # run_old should be first because its state.json is newer
-        assert len(items) == 2
-        assert items[0]["run_id"] == "run_old"
+        items = collect_runs()
+        assert any(i["run_id"] == "run_wt_only" for i in items)
 
 
 class TestGlobalRegistry:
@@ -390,3 +339,117 @@ class TestGlobalRegistry:
                 os.environ["THIN_SUPERVISOR_GLOBAL_DIR"] = orig_env
             else:
                 os.environ.pop("THIN_SUPERVISOR_GLOBAL_DIR", None)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Task 4: tui.collect_runs must be backed by the canonical session index
+#
+# Per docs/plans/2026-04-16-global-observability-plane-for-per-worktree-runtime.md:
+#   - tui, dashboard, and status all see the same universe
+#   - daemon shutdown does not hide persisted runs
+#   - root cwd can drill into a child worktree orphaned run
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestTuiCollectRunsParity:
+    def _write_state(self, worktree, run_id, **fields):
+        import json
+
+        run_dir = worktree / ".supervisor" / "runtime" / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        state = {
+            "run_id": run_id,
+            "top_state": fields.pop("top_state", "RUNNING"),
+            "current_node_id": fields.pop("current_node_id", "step_x"),
+            "pane_target": fields.pop("pane_target", "%0"),
+            "controller_mode": fields.pop("controller_mode", "daemon"),
+            "spec_path": fields.pop("spec_path", ""),
+            "surface_type": "tmux",
+        }
+        state.update(fields)
+        (run_dir / "state.json").write_text(json.dumps(state))
+
+    def _patch_session_index(self, monkeypatch, *, known=(), daemons=(), panes=()):
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_known_worktrees",
+            lambda: list(known),
+        )
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_daemons",
+            lambda: list(daemons),
+        )
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_pane_owners",
+            lambda: list(panes),
+        )
+        monkeypatch.setattr(
+            "supervisor.operator.session_index._discover_git_worktrees",
+            lambda cwd: [],
+        )
+
+    def test_collect_runs_matches_collect_sessions_universe(
+        self, tmp_path, monkeypatch
+    ):
+        """tui.collect_runs() must cover the exact same run IDs as
+        collect_sessions() — one canonical discovery source, one answer.
+        """
+        from supervisor.operator.session_index import collect_sessions
+        from supervisor.operator.tui import collect_runs
+
+        root = tmp_path / "root"
+        child = tmp_path / "child"
+        root.mkdir()
+        child.mkdir()
+        monkeypatch.chdir(root)
+
+        self._write_state(root, "run_here", top_state="RUNNING")
+        self._write_state(child, "run_there", top_state="PAUSED_FOR_HUMAN",
+                          human_escalations=[{"reason": "test"}])
+
+        self._patch_session_index(monkeypatch, known=[str(child)])
+
+        tui_ids = {r["run_id"] for r in collect_runs()}
+        sess_ids = {s.run_id for s in collect_sessions()}
+        assert tui_ids == sess_ids
+        assert {"run_here", "run_there"} <= tui_ids
+
+    def test_collect_runs_surfaces_orphaned_child_worktree_from_root(
+        self, tmp_path, monkeypatch
+    ):
+        """Root cwd must see the child worktree's orphaned run through tui."""
+        from supervisor.operator.tui import collect_runs
+
+        root = tmp_path / "root"
+        child = tmp_path / "child"
+        root.mkdir()
+        child.mkdir()
+        monkeypatch.chdir(root)
+
+        self._write_state(child, "run_orphan", top_state="RUNNING")
+        self._patch_session_index(monkeypatch, known=[str(child)])
+
+        items = collect_runs()
+        orphan = next((r for r in items if r["run_id"] == "run_orphan"), None)
+        assert orphan is not None
+        assert orphan["tag"] == "orphaned"
+        assert str(child.resolve()) in orphan.get("worktree", "")
+
+    def test_collect_runs_daemon_shutdown_keeps_persisted_run_visible(
+        self, tmp_path, monkeypatch
+    ):
+        """Daemon process gone → persisted run must still surface in tui."""
+        from supervisor.operator.tui import collect_runs
+
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        monkeypatch.chdir(wt)
+
+        self._write_state(wt, "run_persist", top_state="PAUSED_FOR_HUMAN",
+                          human_escalations=[{"reason": "test"}])
+        # No daemon registered → persisted run becomes orphaned-but-visible
+        self._patch_session_index(monkeypatch)
+
+        items = collect_runs()
+        persist = next((r for r in items if r["run_id"] == "run_persist"), None)
+        assert persist is not None
+        assert persist["tag"] in {"paused", "orphaned"}

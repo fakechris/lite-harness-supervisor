@@ -285,12 +285,21 @@ Machine-level daemon summary:
 
 #### `thin-supervisor status`
 
-Current worktree summary:
+Global-first summary across all known worktrees. Buckets:
 
 - active daemon-owned runs
 - active foreground-debug runs
-- orphaned local state
+- orphaned local state (persisted runs with no live worker)
 - completed local state
+
+Pass `--local` to restrict to the current worktree (skip other known worktrees).
+Daemon shutdown does not erase session visibility — persisted runs remain observable
+as orphaned until cleaned up.
+
+See the follow-up plan
+[`2026-04-16-global-observability-plane-for-per-worktree-runtime.md`](./2026-04-16-global-observability-plane-for-per-worktree-runtime.md)
+for the canonical session collector that unifies `status`, `dashboard`, and `tui`
+under one discovery source.
 
 #### `thin-supervisor pane-owner <pane>`
 
@@ -304,11 +313,13 @@ Pane-level ownership:
 
 #### `thin-supervisor observe <run_id>`
 
-Run-level event view:
+Run-level event view, resolved globally via the canonical session collector.
+Works for orphaned runs without a live daemon by falling back to local state read:
 
 - last checkpoints
 - last verification
 - current reason / pause summary
+- worktree root when the run lives outside the current cwd
 
 ### Product requirement
 
