@@ -40,13 +40,16 @@ from supervisor.pause_summary import summarize_state
 
 _RUNTIME_SUBPATH = Path(".supervisor") / "runtime" / "runs"
 
-_LIVE_STATES = {"RUNNING", "GATING", "VERIFYING"}
+_LIVE_STATES = {"RUNNING", "GATING", "VERIFYING", "ATTACHED", "RECOVERY_NEEDED"}
 _COMPLETED_STATES = {"COMPLETED", "FAILED", "ABORTED"}
 # States that are "actionable" — i.e., persisted state the operator can
 # still act on.  A run in one of these states without a live controller
 # counts as orphaned.  Paused runs are explicitly actionable: the plan's
 # incident shape (`run_89576d49897f` paused in a child worktree after
-# daemon idle shutdown) must appear as orphaned from root cwd.
+# daemon idle shutdown) must appear as orphaned from root cwd.  ATTACHED
+# and RECOVERY_NEEDED are actionable too: a daemon crash mid-attach or
+# mid-recovery leaves the run in a state the operator must resume or
+# inspect, not hide.
 _ACTIONABLE_ORPHAN_STATES = _LIVE_STATES | {"PAUSED_FOR_HUMAN"}
 
 
@@ -71,6 +74,7 @@ class SessionRecord:
     last_update_at: str
     surface_type: str = ""  # persisted surface ("tmux", "jsonl", "open_relay", …)
     tag: str = ""  # derived display tag; see _derive_tag
+    pause_class: str = ""  # business|safety|review|recovery when top_state==PAUSED_FOR_HUMAN
 
     def as_dict(self) -> dict:
         from dataclasses import asdict
@@ -205,14 +209,26 @@ def _iter_run_states(worktree: Path):
 
 
 def _derive_tag(*, is_live: bool, is_completed: bool, is_orphaned: bool,
-                top_state: str, controller_mode: str) -> str:
+                top_state: str, controller_mode: str,
+                pause_class: str = "") -> str:
     # Paused trumps liveness: a paused run needs operator attention, so
     # the tag must call that out even when a daemon is still supervising
     # it.  Completed trumps everything else (terminal state is stable).
     if is_completed:
         return "completed"
     if top_state == "PAUSED_FOR_HUMAN":
-        return "paused"
+        # Split by pause_class so operators can distinguish business
+        # blockers from recovery exhaustion at a glance.  `paused` alone
+        # remains the fallback when no class is recorded (legacy runs).
+        return f"paused-{pause_class}" if pause_class else "paused"
+    # Attach-boundary and recovery states take precedence over the
+    # live-controller label: operators watching `status` need to see
+    # "attached; awaiting first execution" / "supervisor recovering" even
+    # when the daemon owns the run.
+    if top_state == "ATTACHED":
+        return "attached"
+    if top_state == "RECOVERY_NEEDED":
+        return "recovery"
     if is_live:
         return "daemon" if controller_mode == "daemon" else "foreground"
     if is_orphaned:
@@ -321,12 +337,14 @@ def collect_sessions(*, local_only: bool = False) -> list[SessionRecord]:
             else:
                 controller_mode = persisted_mode
             summary = summarize_state(state)
+            pclass = summary.get("pause_class", "") or ""
             tag = _derive_tag(
                 is_live=is_live,
                 is_completed=is_completed,
                 is_orphaned=is_orphaned,
                 top_state=top_state,
                 controller_mode=controller_mode,
+                pause_class=pclass,
             )
             records.append(
                 SessionRecord(
@@ -347,6 +365,7 @@ def collect_sessions(*, local_only: bool = False) -> list[SessionRecord]:
                     last_update_at=last_update_at,
                     surface_type=state.get("surface_type", "") or "",
                     tag=tag,
+                    pause_class=pclass,
                 )
             )
     # Global recency sort: the operator asking "what's running?" cares

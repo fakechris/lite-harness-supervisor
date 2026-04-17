@@ -604,3 +604,99 @@ class TestWorktreeDiscovery:
         )
         records = collect_sessions(local_only=True)
         assert records == []
+
+
+# ── Slice 5: ATTACHED / RECOVERY_NEEDED / pause_class visibility ────
+
+
+class TestAttachedAndRecoveryTags:
+    def test_attached_orphan_is_actionable(self, fake_worktrees):
+        """A daemon crash mid-attach leaves the run in ATTACHED. Operators
+        must still see it — hiding ATTACHED would strand the run."""
+        root, child = fake_worktrees
+        _write_state(child, "run_attached", top_state="ATTACHED")
+        rec = collect_sessions()[0]
+        assert rec.is_orphaned is True
+        assert rec.tag == "attached"
+
+    def test_recovery_needed_orphan_is_actionable(self, fake_worktrees):
+        """Same shape for RECOVERY_NEEDED: supervisor was mid-recovery when
+        the daemon died. The run is not paused, not running, but still
+        actionable from the operator's view."""
+        root, child = fake_worktrees
+        _write_state(child, "run_recovering", top_state="RECOVERY_NEEDED")
+        rec = collect_sessions()[0]
+        assert rec.is_orphaned is True
+        assert rec.tag == "recovery"
+
+    def test_attached_tag_wins_over_daemon(self, fake_worktrees, monkeypatch):
+        """A live daemon owning an ATTACHED run must still surface the
+        attach-boundary state, not just 'daemon'."""
+        root, child = fake_worktrees
+        _write_state(child, "run_attached_live", top_state="ATTACHED")
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_daemons",
+            lambda: [{
+                "pid": 1, "cwd": str(child.resolve()),
+                "socket": "/tmp/d.sock", "active_runs": 1,
+            }],
+        )
+        rec = collect_sessions()[0]
+        assert rec.is_live is True
+        assert rec.tag == "attached"
+
+    def test_recovery_tag_wins_over_daemon(self, fake_worktrees, monkeypatch):
+        root, child = fake_worktrees
+        _write_state(child, "run_rec_live", top_state="RECOVERY_NEEDED")
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_daemons",
+            lambda: [{
+                "pid": 1, "cwd": str(child.resolve()),
+                "socket": "/tmp/d.sock", "active_runs": 1,
+            }],
+        )
+        rec = collect_sessions()[0]
+        assert rec.is_live is True
+        assert rec.tag == "recovery"
+
+
+class TestPauseClassTag:
+    def test_business_pause_tag(self, fake_worktrees):
+        root, child = fake_worktrees
+        _write_state(
+            child, "run_business",
+            top_state="PAUSED_FOR_HUMAN",
+            human_escalations=[
+                {"reason": "need external input", "pause_class": "business"},
+            ],
+        )
+        rec = collect_sessions()[0]
+        assert rec.pause_class == "business"
+        assert rec.tag == "paused-business"
+
+    def test_recovery_pause_tag(self, fake_worktrees):
+        root, child = fake_worktrees
+        _write_state(
+            child, "run_rec_paused",
+            top_state="PAUSED_FOR_HUMAN",
+            human_escalations=[
+                {"reason": "delivery timed out", "pause_class": "recovery"},
+            ],
+        )
+        rec = collect_sessions()[0]
+        assert rec.pause_class == "recovery"
+        assert rec.tag == "paused-recovery"
+
+    def test_legacy_pause_without_class_falls_back_to_paused(self, fake_worktrees):
+        """Runs from before Slice 2 have no pause_class — tag must not
+        mangle to 'paused-' (empty class) and must stay the plain 'paused'
+        label so dashboards don't render a trailing dash."""
+        root, child = fake_worktrees
+        _write_state(
+            child, "run_legacy",
+            top_state="PAUSED_FOR_HUMAN",
+            human_escalations=[{"reason": "old pause reason"}],
+        )
+        rec = collect_sessions()[0]
+        assert rec.pause_class == ""
+        assert rec.tag == "paused"
