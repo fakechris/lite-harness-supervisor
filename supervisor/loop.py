@@ -474,6 +474,12 @@ class SupervisorLoop:
         plan = self.auto_intervention_manager.maybe_plan(spec, state, payload or {}, terminal)
         if not plan:
             return False
+        ready, reason = self._wait_for_injection_window(
+            state, terminal, instruction_id="auto-intervention"
+        )
+        if not ready:
+            self._set_delivery_state(state, DeliveryState.FAILED, reason=reason)
+            return False
         self._set_delivery_state(state, DeliveryState.INJECTED, reason="auto intervention")
         try:
             terminal.inject(plan.instruction)
@@ -1008,6 +1014,33 @@ class SupervisorLoop:
             return state.workspace_root
         return None
 
+    def _wait_for_injection_window(self, state, terminal, *, instruction_id: str) -> tuple[bool, str]:
+        readiness_fn = getattr(terminal, "injection_readiness", None)
+        if not callable(readiness_fn):
+            return True, ""
+
+        max_defers = 3
+        for attempt in range(1, max_defers + 1):
+            outcome, reason = readiness_fn()
+            if outcome == "inject":
+                return True, reason
+
+            payload = {
+                "instruction_id": instruction_id,
+                "node_id": state.current_node_id,
+                "attempt": attempt,
+                "reason": reason,
+                "outcome": outcome,
+            }
+            self.store.append_session_event(state.run_id, "injection_deferred", payload)
+            if outcome != "defer":
+                return False, f"terminal unavailable before injection: {reason}"
+            if attempt >= max_defers:
+                return False, f"terminal stayed busy before injection: {reason}"
+            time.sleep(MIN_POLL_SLEEP_SEC)
+
+        return True, ""
+
     def _inject_or_pause(self, state, terminal, instruction, *, spec=None) -> bool:
         # Observation-only surfaces (e.g., JSONL) — write instruction but don't
         # pretend delivery succeeded. Record the undelivered instruction and
@@ -1032,6 +1065,32 @@ class SupervisorLoop:
                 "instruction_id": instruction.instruction_id,
                 "pause_class": "recovery",
             })
+            self.store.save(state)
+            return False
+
+        ready, readiness_reason = self._wait_for_injection_window(
+            state, terminal, instruction_id=instruction.instruction_id
+        )
+        if not ready:
+            self._set_delivery_state(state, DeliveryState.FAILED, reason=readiness_reason)
+            payload = {
+                "instruction_id": instruction.instruction_id,
+                "node_id": state.current_node_id,
+                "error": readiness_reason,
+            }
+            self.store.append_session_event(state.run_id, "injection_failed", payload)
+            inject_fail_payload = {
+                "reason": readiness_reason,
+                "node_id": state.current_node_id,
+                "instruction_id": instruction.instruction_id,
+                "pause_class": "recovery",
+            }
+            if spec is not None:
+                recovery_payload = self._enter_recovery(state, inject_fail_payload)
+                if self._attempt_auto_intervention(spec, state, terminal, recovery_payload):
+                    self.store.save(state)
+                    return True
+            self._pause_for_human(state, inject_fail_payload)
             self.store.save(state)
             return False
 

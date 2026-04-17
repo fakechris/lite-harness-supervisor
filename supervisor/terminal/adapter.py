@@ -158,6 +158,33 @@ class TerminalAdapter:
             "ok": len(issues) == 0,
         }
 
+    def injection_readiness(self, *, sample_delay_sec: float = 0.15) -> tuple[str, str]:
+        """Return whether it is safe to inject into the pane right now.
+
+        Outcomes:
+        - ("inject", reason): pane looks idle enough to send keys
+        - ("defer", reason): pane is alive but likely busy / being typed into
+        - ("offline", reason): pane is gone or dead
+        """
+        target = self._resolve_target()
+        pane_state = self._pane_state(target)
+        if pane_state is None:
+            return ("offline", "pane_unavailable")
+        if pane_state["dead"]:
+            return ("offline", "pane_dead")
+
+        first = self._capture_tail(target, lines=30)
+        time.sleep(sample_delay_sec)
+        second = self._capture_tail(target, lines=30)
+        if first != second:
+            return ("defer", "buffer_changed")
+        if self._has_active_buffer_markers(second):
+            return ("defer", "active_buffer_marker")
+        cursor_hint = self._cursor_typing_status(second, pane_state)
+        if cursor_hint == "busy":
+            return ("defer", "typing_prompt")
+        return ("inject", "idle")
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -232,6 +259,31 @@ class TerminalAdapter:
         )
         return result.stdout
 
+    def _pane_state(self, target: str) -> dict[str, int | bool] | None:
+        try:
+            result = self._tmux(
+                "display-message",
+                "-p",
+                "-t",
+                target,
+                "#{pane_active} #{pane_dead} #{cursor_x} #{cursor_y} #{pane_height}",
+            )
+        except TerminalAdapterError:
+            return None
+        parts = result.stdout.strip().split()
+        if len(parts) < 5:
+            return None
+        try:
+            return {
+                "active": parts[0] == "1",
+                "dead": parts[1] == "1",
+                "cursor_x": int(parts[2]),
+                "cursor_y": int(parts[3]),
+                "height": int(parts[4]),
+            }
+        except ValueError:
+            return None
+
     @staticmethod
     def _stuck_markers(text: str) -> tuple[str, ...]:
         normalized = " ".join(text.split())
@@ -275,30 +327,62 @@ class TerminalAdapter:
         if not cls._tail_looks_stuck(snapshot, markers):
             return True
         normalized = " ".join(snapshot.split())
-        progress_markers = (
-            "• Working",
-            "• Planning",
-            "• Explored",
-            "• Implementing",
-            "esc to interrupt",
-        )
-        return any(marker in normalized for marker in progress_markers)
+        return any(marker in normalized for marker in cls._progress_markers())
 
     @classmethod
     def _submission_snapshot_status(cls, snapshot: str, markers: tuple[str, ...]) -> str:
         normalized = " ".join(snapshot.split())
-        progress_markers = (
+        if any(marker in normalized for marker in cls._progress_markers()):
+            return "progress"
+        if cls._tail_looks_stuck(snapshot, markers):
+            return "stuck"
+        return "clear"
+
+    @staticmethod
+    def _progress_markers() -> tuple[str, ...]:
+        return (
             "• Working",
             "• Planning",
             "• Explored",
             "• Implementing",
             "esc to interrupt",
         )
-        if any(marker in normalized for marker in progress_markers):
-            return "progress"
-        if cls._tail_looks_stuck(snapshot, markers):
-            return "stuck"
-        return "clear"
+
+    @classmethod
+    def _has_active_buffer_markers(cls, snapshot: str) -> bool:
+        normalized = " ".join(snapshot.split())
+        return any(marker in normalized for marker in cls._progress_markers())
+
+    @staticmethod
+    def _runtime_prompt_prefix(snapshot: str) -> str | None:
+        lines = [line.rstrip() for line in snapshot.replace("\r", "").splitlines()]
+        for line in reversed(lines):
+            stripped = line.strip()
+            if stripped.startswith("›"):
+                return "›"
+            if stripped.startswith("❯"):
+                return "❯"
+        return None
+
+    @classmethod
+    def _cursor_typing_status(cls, snapshot: str, pane_state: dict[str, int | bool]) -> str:
+        prefix = cls._runtime_prompt_prefix(snapshot)
+        if not prefix:
+            return "unknown"
+        cursor_x = int(pane_state["cursor_x"])
+        cursor_y = int(pane_state["cursor_y"])
+        height = int(pane_state["height"])
+        lines = snapshot.replace("\r", "").splitlines()
+        if not lines:
+            return "unknown"
+        capture_start_row = max(0, height - len(lines))
+        line_index = cursor_y - capture_start_row
+        if line_index < 0 or line_index >= len(lines):
+            return "unknown"
+        line = lines[line_index].rstrip()
+        if not line.startswith(prefix):
+            return "not_busy"
+        return "busy" if cursor_x > len(prefix) else "not_busy"
 
     def _detect_socket(self) -> str | None:
         """Auto-detect the tmux socket (4-level priority like smux)."""
