@@ -124,10 +124,11 @@ class DaemonServer:
         )
         self._job_tracker = JobTracker()
         # Command channels are per-credential-set singletons with
-        # cross-process advisory locks.
+        # cross-process advisory locks.  Built here but started only after
+        # the daemon is ready to accept IPC in start() — otherwise a
+        # command arriving during startup would hit an unbound socket.
         from supervisor.operator.channel_host import OperatorChannelHost
         self._channel_host = OperatorChannelHost.from_config(self.config)
-        self._channel_host.start()
 
     def start(self) -> None:
         """Start the daemon: bind socket, write PID, accept connections."""
@@ -145,6 +146,7 @@ class DaemonServer:
         Path(self.pid_path).write_text(str(os.getpid()))
         register_daemon(self._daemon_metadata())
         register_worktree(os.getcwd())
+        self._channel_host.start()
         recovered = self._recover_orphaned_runs()
         if recovered:
             logger.warning("recovered %d orphaned persisted run(s) into PAUSED_FOR_HUMAN", recovered)

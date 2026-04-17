@@ -63,23 +63,28 @@ def _try_acquire_lock(config_identity: str) -> IO | None:
     Uses fcntl.flock (LOCK_EX | LOCK_NB) — the OS releases the lock
     automatically if the process crashes.  Opens with O_RDWR|O_CREAT
     to avoid truncating the file before the lock is held.
+
+    Filesystem errors (permission, ENOSPC, bad HOME) are logged so they
+    can be distinguished from legitimate lock contention during on-call
+    debugging, instead of masquerading as "another process owns it".
     """
     path = _lock_path(config_identity)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
         fh = os.fdopen(fd, "r+")
-        try:
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fh.seek(0)
-            fh.truncate()
-            fh.write(f"{os.getpid()}\n")
-            fh.flush()
-            return fh
-        except (OSError, IOError):
-            fh.close()
-            return None
+    except (OSError, IOError) as exc:
+        logger.warning("could not prepare lock file %s: %s", path, exc)
+        return None
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fh.seek(0)
+        fh.truncate()
+        fh.write(f"{os.getpid()}\n")
+        fh.flush()
+        return fh
     except (OSError, IOError):
+        fh.close()
         return None
 
 
@@ -194,7 +199,7 @@ class OperatorChannelHost:
             except Exception:
                 logger.exception("failed to stop %s", channel.__class__.__name__)
         self._started.clear()
-        for identity, lock in self._locks.items():
+        for lock in self._locks.values():
             _release_lock(lock)
         self._locks.clear()
 
