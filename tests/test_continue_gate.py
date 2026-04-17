@@ -66,6 +66,19 @@ def test_is_admin_only_evidence_reviewer_edge_case():
     ]) is True
 
 
+def test_is_admin_only_evidence_reviewer_three_field_case():
+    """Extends the reviewer case with a third `result:` field to cover the
+    exact shape the reviewer reproduced.  Must still be admin-only — none of
+    `modified`, `ran: git status`, or `result: worktree clean` carry an
+    execution signal on their own.
+    """
+    assert is_admin_only_evidence([
+        {"modified": ".supervisor/specs/foo.yaml"},
+        {"ran": "git status --short"},
+        {"result": "worktree clean"},
+    ]) is True
+
+
 def test_is_admin_only_evidence_diff_counts():
     """A real git-diff output snippet counts as execution."""
     assert is_admin_only_evidence([
@@ -145,3 +158,35 @@ def test_attached_blocked_still_escalates():
     })
     assert decision.decision == DecisionType.ESCALATE_TO_HUMAN.value
     assert decision.needs_human is True
+
+
+def test_attached_admin_only_with_missing_input_text_escalates_not_reinject():
+    """Reviewer P2-3: escalation classification must beat the ATTACHED
+    admin-only guard.  A first-checkpoint that cites only admin artifacts
+    AND carries MISSING_EXTERNAL_INPUT text in `needs` / `question_for_supervisor`
+    is a legitimate business pause, not a re-inject candidate — waking the
+    human is the correct move.
+
+    Critically, `status` stays at `working` here (not `blocked`): the block
+    signal comes from the needs/question text, not the status field, so this
+    probes the escalation classifier path, not the status-based shortcut.
+    """
+    gate = ContinueGate(JudgeClient())
+    decision = gate.decide({
+        "top_state": TopState.ATTACHED.value,
+        "last_agent_question": "",
+        "last_agent_checkpoint": {
+            "status": "working",
+            "summary": "attached and reviewed plan",
+            "evidence": [
+                {"attach": "tmux://alpha"},
+                {"plan": "drafted step order"},
+            ],
+            "needs": ["need credentials for upstream API"],
+            "question_for_supervisor": ["need access token to proceed"],
+        },
+    })
+    assert decision.decision == DecisionType.ESCALATE_TO_HUMAN.value
+    assert decision.needs_human is True
+    # Must NOT have been routed through the RE_INJECT attach-boundary guard.
+    assert decision.reason != "attached: first checkpoint has no execution evidence on current_node"

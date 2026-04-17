@@ -1096,6 +1096,89 @@ def test_re_inject_loop_caps_and_pauses_recovery(tmp_path):
     assert pause_events and pause_events[-1].pause_class == "recovery"
 
 
+def test_attached_step_done_admin_only_reinjects_not_verify(tmp_path):
+    """Reviewer P1-2: `status: step_done` on the first checkpoint must NOT
+    short-circuit into VERIFY_STEP when evidence is admin-only.  That would
+    bypass the attach boundary entirely — an agent claiming "step done" with
+    no execution evidence on the current node should be RE_INJECTed, not
+    verified.
+    """
+    from supervisor.domain.enums import DecisionType
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    state.top_state = TopState.ATTACHED
+    state.last_agent_checkpoint = {
+        "status": "step_done",
+        "current_node": state.current_node_id,
+        "summary": "claimed done without doing work",
+        "evidence": [
+            {"attach": "tmux://alpha"},
+            {"plan": "drafted step order"},
+        ],
+    }
+
+    decision = loop.gate(spec, state)
+    assert decision.decision == DecisionType.RE_INJECT.value
+    assert "step_done" in decision.reason
+
+
+def test_attached_workflow_done_admin_only_reinjects_not_verify(tmp_path):
+    """Reviewer P1-2: same guard must cover `status: workflow_done`. A
+    first-checkpoint workflow_done with admin-only evidence is exactly the
+    Phase 17 shape at the terminal of the plan instead of the head — still
+    must RE_INJECT, not VERIFY_STEP.
+    """
+    from supervisor.domain.enums import DecisionType
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    state.top_state = TopState.ATTACHED
+    state.last_agent_checkpoint = {
+        "status": "workflow_done",
+        "current_node": state.current_node_id,
+        "summary": "claimed workflow done without doing any nodes",
+        "evidence": [
+            {"clarify": "confirmed spec scope"},
+            {"plan": "drafted step order"},
+        ],
+    }
+
+    decision = loop.gate(spec, state)
+    assert decision.decision == DecisionType.RE_INJECT.value
+    assert "workflow_done" in decision.reason
+
+
+def test_attached_step_done_real_evidence_verifies(tmp_path):
+    """Counter-example for P1-2: `step_done` with real execution evidence on
+    the current node is the legitimate shape — must route to VERIFY_STEP so
+    the verifier can confirm (and then ATTACHED → RUNNING).
+    """
+    from supervisor.domain.enums import DecisionType
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    state.top_state = TopState.ATTACHED
+    state.last_agent_checkpoint = {
+        "status": "step_done",
+        "current_node": state.current_node_id,
+        "summary": "wrote the test and it passed",
+        "evidence": [
+            {"command": "pytest tests/test_foo.py"},
+            {"output": "3 passed"},
+        ],
+    }
+
+    decision = loop.gate(spec, state)
+    assert decision.decision == DecisionType.VERIFY_STEP.value
+
+
 def test_non_fresh_resume_skips_attached(tmp_path):
     """A state that already has a RUNNING checkpoint must not re-enter ATTACHED.
 
