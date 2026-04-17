@@ -21,7 +21,17 @@ class BranchOption:
 
 @dataclass
 class Checkpoint:
-    """Structured checkpoint parsed from agent output."""
+    """Structured checkpoint parsed from agent output.
+
+    The six trailing fields (``checkpoint_schema_version`` plus the five
+    v2 semantic fields) are optional additions introduced in Slice 2 of
+    the fat-skill / thin-harness repartitioning — a worker that has not
+    opted into v2 simply leaves ``checkpoint_schema_version=0`` and the
+    semantic fields unset. Downstream routing still reads these via the
+    canonical `supervisor.protocol.normalizer.normalize_checkpoint`;
+    these fields are kept here only so that the serialised checkpoint
+    dict preserves them for the normalizer to see.
+    """
     status: str
     current_node: str
     summary: str
@@ -34,6 +44,16 @@ class Checkpoint:
     candidate_next_actions: list[str] = field(default_factory=list)
     needs: list[str] = field(default_factory=list)
     question_for_supervisor: list[str] = field(default_factory=list)
+
+    # Slice 2 — v2 wire fields. Zero / None / empty means "worker did not
+    # declare this on the current checkpoint".
+    checkpoint_schema_version: int = 0
+    progress_class: str | None = None
+    evidence_scope: str | None = None
+    escalation_class: str | None = None
+    requires_authorization: bool | None = None
+    blocking_inputs: list[str] = field(default_factory=list)
+    reason_code: str | None = None
 
     def __post_init__(self):
         if not self.checkpoint_id:
@@ -251,6 +271,7 @@ class SupervisorDecision:
     next_instruction: str | None = None
     selected_branch: str | None = None
     next_node_id: str | None = None
+    reason_code: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -4,9 +4,17 @@ in exactly this format:
 <checkpoint>
 run_id: <run_id>
 checkpoint_seq: <incrementing integer>
+checkpoint_schema_version: 2
 status: <working | blocked | step_done | workflow_done>
 current_node: <step_id>
 summary: <one-line description>
+progress_class: <execution | verification | admin>
+evidence_scope: <current_node | prior_phase | unknown>
+escalation_class: <none | business | safety | review>
+requires_authorization: <true | false>
+blocking_inputs:
+  - <missing input, or leave empty>
+reason_code: <esc.* | rec.* | ver.* | sem.* | empty>
 evidence:
   - modified: <file path>
   - ran: <command>
@@ -30,6 +38,40 @@ Notes:
 - When the supervisor injects a new node objective, switch to that node
   and emit checkpoints for the new current_node.
 
+Structured (v2) semantic fields — how to fill them honestly:
+- Always set `checkpoint_schema_version: 2` if you are filling any of the
+  structured fields below. Otherwise omit it and the harness will treat
+  the checkpoint as v1 (legacy).
+- `progress_class`:
+    - "execution" — you produced concrete work on the current node
+      (ran a command, modified a file, executed a test)
+    - "verification" — you are running a test / acceptance check
+    - "admin" — attach / clarify / plan / spec / review artifacts only;
+      no execution yet on the current node
+- `evidence_scope`:
+    - "current_node" — the evidence listed below is from work on the
+      currently-injected node
+    - "prior_phase" — the evidence is from earlier phases (clarify,
+      plan, attach, baseline)
+    - "unknown" — you cannot attribute the evidence yet
+- `escalation_class`:
+    - "none" — continue normally
+    - "business" — you legitimately need external input (credentials,
+      human decision, missing artifact) to proceed
+    - "safety" — you are about to perform a dangerous / irreversible
+      action and want explicit authorization
+    - "review" — completion proof is ready and a human must sign off
+- `requires_authorization: true` only when a safety-class action is
+  pending; the supervisor will pause for human sign-off.
+- `blocking_inputs`: list the concrete missing items when
+  `escalation_class=business` (e.g. "GITHUB_TOKEN", "staging DB URL").
+  Leave empty otherwise.
+- `reason_code` (optional): one of the frozen codes below. Use the code
+  whose prefix matches your escalation_class / failure type:
+    - `esc.missing_external_input`, `esc.authorization_required`,
+      `esc.review_required`, `esc.blocked_genuine`
+    - `ver.test_failed`
+
 First checkpoint for a newly-injected current_node:
 - The first `working` checkpoint after a node is injected MUST cite evidence
   of concrete work on that node's objective. Valid evidence includes:
@@ -41,3 +83,7 @@ First checkpoint for a newly-injected current_node:
   Do not list them under `evidence:` for the first checkpoint of that node.
 - If you have not yet produced any work on the new node, do not emit a
   checkpoint yet — start the work first.
+- If the truthful answer is "I only have admin artifacts so far", emit
+  `progress_class: admin` and `evidence_scope: prior_phase` rather than
+  inflating `progress_class` to "execution". The supervisor will re-inject
+  the node objective rather than treat the admin evidence as progress.

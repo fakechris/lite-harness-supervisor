@@ -16,15 +16,29 @@ CHECKPOINT_LIST_MAX = 20
 CHECKPOINT_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 CHECKPOINT_NODE_ID_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,160}$")
 
+# v2 wire format — frozen in Slice 1 / populated by workers in Slice 2.
+# Kept here so both the legacy sanitize path and the canonical normalizer
+# can pass values through untouched; validation lives in the normalizer.
+CHECKPOINT_STRUCTURED_VERSION = 2
+CHECKPOINT_SCHEMA_VERSIONS = {0, 1, CHECKPOINT_STRUCTURED_VERSION}
+
 
 def checkpoint_example_block(node_id: str) -> str:
     return (
         "<checkpoint>\n"
         "run_id: <run_id>\n"
         "checkpoint_seq: <incrementing integer>\n"
+        "checkpoint_schema_version: 2\n"
         "status: <working | blocked | step_done | workflow_done>\n"
         f"current_node: {node_id}\n"
         "summary: <one-line description>\n"
+        "progress_class: <execution | verification | admin>\n"
+        "evidence_scope: <current_node | prior_phase | unknown>\n"
+        "escalation_class: <none | business | safety | review>\n"
+        "requires_authorization: <true | false>\n"
+        "blocking_inputs:\n"
+        "  - <missing input, or leave empty>\n"
+        "reason_code: <esc.* | rec.* | ver.* | sem.* | empty>\n"
         "evidence:\n"
         "  - modified: <file path>\n"
         "  - ran: <command>\n"
@@ -69,7 +83,15 @@ def sanitize_checkpoint_payload(raw: dict, *, fallback_run_id: str = "", fallbac
     summary = _sanitize_text(raw.get("summary", ""), max_len=CHECKPOINT_STRING_MAX)
     checkpoint_seq = _sanitize_int(raw.get("checkpoint_seq", 0))
     surface_id = _sanitize_text(raw.get("surface_id", ""), max_len=128) or fallback_surface_id
+    schema_version = _sanitize_int(raw.get("checkpoint_schema_version", 0))
+    if schema_version not in CHECKPOINT_SCHEMA_VERSIONS:
+        schema_version = 0
 
+    # v2 semantic fields are preserved verbatim here — the normalizer
+    # (supervisor/protocol/normalizer.py) is the only component that
+    # decodes them into typed internal semantics. We just keep them on
+    # the wire so `state.last_agent_checkpoint` carries them through to
+    # the gate layers.
     return {
         "status": status,
         "current_node": current_node,
@@ -81,6 +103,13 @@ def sanitize_checkpoint_payload(raw: dict, *, fallback_run_id: str = "", fallbac
         "candidate_next_actions": _sanitize_list(raw.get("candidate_next_actions", [])),
         "needs": _sanitize_list(raw.get("needs", [])),
         "question_for_supervisor": _sanitize_list(raw.get("question_for_supervisor", [])),
+        "checkpoint_schema_version": schema_version,
+        "progress_class": _preserve_raw_scalar(raw.get("progress_class")),
+        "evidence_scope": _preserve_raw_scalar(raw.get("evidence_scope")),
+        "escalation_class": _preserve_raw_scalar(raw.get("escalation_class")),
+        "requires_authorization": _preserve_raw_scalar(raw.get("requires_authorization")),
+        "blocking_inputs": _sanitize_list(raw.get("blocking_inputs", [])),
+        "reason_code": _preserve_raw_scalar(raw.get("reason_code")),
     }
 
 
@@ -110,6 +139,25 @@ def _sanitize_list(values) -> list[str]:
         if len(items) >= CHECKPOINT_LIST_MAX:
             break
     return items
+
+
+def _preserve_raw_scalar(value):
+    """Pass-through for v2 scalar fields.
+
+    The canonical normalizer handles typed validation; the sanitizer
+    only needs to preserve whatever the worker wrote (minus obvious
+    injection vectors that a scalar can't carry). Strings are trimmed;
+    booleans and numbers fall through unchanged.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        return value.strip() or None
+    return None
 
 
 def _normalize_list_item(value) -> str:

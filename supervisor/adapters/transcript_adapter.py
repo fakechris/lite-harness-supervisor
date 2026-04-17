@@ -59,11 +59,33 @@ class TranscriptAdapter:
             candidate_next_actions=sanitized.get("candidate_next_actions", []),
             needs=sanitized.get("needs", []),
             question_for_supervisor=sanitized.get("question_for_supervisor", []),
+            checkpoint_schema_version=sanitized.get("checkpoint_schema_version", 0),
+            progress_class=sanitized.get("progress_class"),
+            evidence_scope=sanitized.get("evidence_scope"),
+            escalation_class=sanitized.get("escalation_class"),
+            requires_authorization=sanitized.get("requires_authorization"),
+            blocking_inputs=sanitized.get("blocking_inputs", []),
+            reason_code=sanitized.get("reason_code"),
         )
+
+    _V2_SCALAR_KEYS = (
+        "checkpoint_schema_version",
+        "progress_class",
+        "evidence_scope",
+        "escalation_class",
+        "requires_authorization",
+        "reason_code",
+    )
 
     def _parse_lines(self, block: str) -> dict:
         lines = [x.strip() for x in block.splitlines() if x.strip()]
-        result: dict = {"evidence": [], "candidate_next_actions": [], "needs": [], "question_for_supervisor": []}
+        result: dict = {
+            "evidence": [],
+            "candidate_next_actions": [],
+            "needs": [],
+            "question_for_supervisor": [],
+            "blocking_inputs": [],
+        }
         current_list = None
         for line in lines:
             if line.startswith("status:"):
@@ -76,6 +98,9 @@ class TranscriptAdapter:
                 result["run_id"] = line.split(":", 1)[1].strip()
             elif line.startswith("checkpoint_seq:"):
                 result["checkpoint_seq"] = line.split(":", 1)[1].strip()
+            elif any(line.startswith(f"{key}:") for key in self._V2_SCALAR_KEYS):
+                key, _, value = line.partition(":")
+                result[key.strip()] = value.strip()
             elif line.startswith("evidence:"):
                 current_list = "evidence"
             elif line.startswith("candidate_next_actions:"):
@@ -84,6 +109,8 @@ class TranscriptAdapter:
                 current_list = "needs"
             elif line.startswith("question_for_supervisor:"):
                 current_list = "question_for_supervisor"
+            elif line.startswith("blocking_inputs:"):
+                current_list = "blocking_inputs"
             elif line.startswith("- "):
                 if current_list:
                     result[current_list].append(line[2:].strip())

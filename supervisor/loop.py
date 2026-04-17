@@ -13,8 +13,10 @@ from supervisor.domain.state_machine import FINAL_STATES, transition_top_state
 from supervisor.gates.continue_gate import ContinueGate
 from supervisor.gates.branch_gate import BranchGate
 from supervisor.gates.finish_gate import FinishGate
+from supervisor.gates.contradictions import detect_contradiction
 from supervisor.gates.escalation import classify_for_escalation, escalation_decision
 from supervisor.gates.rules import is_admin_only_evidence
+from supervisor.protocol.normalizer import normalize_checkpoint
 from supervisor.llm.judge_client import JudgeClient
 from supervisor.verifiers.suite import VerifierSuite
 from supervisor.adapters.transcript_adapter import TranscriptAdapter
@@ -25,6 +27,19 @@ from supervisor.interventions import AutoInterventionManager
 from supervisor.notifications import NotificationEvent, NotificationManager
 from supervisor.pause_summary import PAUSE_CLASSES, latest_human_escalation, summarize_state
 from supervisor.progress import write_progress
+from supervisor.protocol.reason_code import (
+    ESC_AUTHORIZATION_REQUIRED,
+    ESC_BLOCKED_GENUINE,
+    ESC_MISSING_EXTERNAL_INPUT,
+    ESC_REVIEW_REQUIRED,
+    REC_DELIVERY_TIMEOUT,
+    REC_IDLE_TIMEOUT,
+    REC_INJECT_FAILED,
+    REC_NODE_MISMATCH_PERSISTED,
+    REC_REINJECTION_EXHAUSTED,
+    REC_RETRY_BUDGET_EXHAUSTED,
+    REC_VERIFICATION_RETRY_EXHAUSTED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +135,91 @@ class SupervisorLoop:
 
         cp = state.last_agent_checkpoint or {}
         cp_status = cp.get("status", "")
+        question = (state.last_event or {}).get("payload", {}).get("question", "") or ""
+
+        # Canonical normalization — per Section C of the repartitioning
+        # doc, raw payloads are normalized exactly once at the gate entry
+        # so every downstream decision is reasoning about typed fields,
+        # not raw dict keys. `normalized is None` for malformed payloads
+        # (e.g. missing status); v1 payloads come back with schema_version=1
+        # and the v2 semantic fields left as None / ().
+        normalized = normalize_checkpoint(cp) if cp else None
+
+        # Structured fast-paths — all three branches below require a
+        # normalized v2-aware payload. Kept inside one guard block so the
+        # precondition is stated once.
+        if normalized is not None:
+            # 1. Worker declared requires_authorization=true. Per Section D
+            #    of the repartitioning doc, this is a worker-declared
+            #    authorization request and maps to
+            #    esc.authorization_required — distinct from
+            #    esc.dangerous_irreversible which the harness emits when
+            #    the dangerous-action classifier fires on its own.
+            if normalized.requires_authorization is True:
+                return SupervisorDecision.make(
+                    decision=DecisionType.ESCALATE_TO_HUMAN.value,
+                    reason="worker declared requires_authorization=true",
+                    gate_type="checkpoint_status",
+                    confidence=1.0,
+                    needs_human=True,
+                    triggered_by_seq=triggered_by_seq,
+                    triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+                    reason_code=ESC_AUTHORIZATION_REQUIRED,
+                )
+
+            # 2. Section E contradiction routing runs before the heuristic
+            #    ATTACHED guard. A payload with contradicting v2 semantics
+            #    is inherently unsafe to trust via the fast path.
+            if normalized.schema_version == 2:
+                contradiction = detect_contradiction(normalized, question=question)
+                if contradiction is not None:
+                    structured = self._route_contradiction(
+                        contradiction,
+                        state=state,
+                        cp_status=cp_status,
+                        triggered_by_seq=triggered_by_seq,
+                        triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+                    )
+                    if structured is not None:
+                        return structured
+
+            # 3. Worker declared business escalation with blocking_inputs
+            #    listed. Route straight to ESCALATE_TO_HUMAN, carrying
+            #    esc.missing_external_input so the escalation reason code
+            #    matches a classifier-driven hit.
+            if (
+                normalized.escalation_class == "business"
+                and normalized.blocking_inputs
+            ):
+                return SupervisorDecision.make(
+                    decision=DecisionType.ESCALATE_TO_HUMAN.value,
+                    reason=(
+                        "worker declared business escalation with blocking_inputs="
+                        f"{list(normalized.blocking_inputs)}"
+                    ),
+                    gate_type="checkpoint_status",
+                    confidence=1.0,
+                    needs_human=True,
+                    triggered_by_seq=triggered_by_seq,
+                    triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+                    reason_code=ESC_MISSING_EXTERNAL_INPUT,
+                )
+
+            # 4. Worker declared escalation_class=review. Per the protocol
+            #    prompt ("completion proof is ready and a human must sign
+            #    off"), this is a legitimate request for human review —
+            #    route to ESCALATE_TO_HUMAN with esc.review_required.
+            if normalized.escalation_class == "review":
+                return SupervisorDecision.make(
+                    decision=DecisionType.ESCALATE_TO_HUMAN.value,
+                    reason="worker declared escalation_class=review",
+                    gate_type="checkpoint_status",
+                    confidence=1.0,
+                    needs_human=True,
+                    triggered_by_seq=triggered_by_seq,
+                    triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+                    reason_code=ESC_REVIEW_REQUIRED,
+                )
 
         # `blocked` always wins: an agent asking for external input is a
         # legitimate human pause regardless of attach state.
@@ -132,6 +232,7 @@ class SupervisorLoop:
                 needs_human=True,
                 triggered_by_seq=triggered_by_seq,
                 triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+                reason_code=ESC_BLOCKED_GENUINE,
             )
 
         # ATTACHED-boundary guard runs BEFORE the step_done / workflow_done
@@ -162,7 +263,6 @@ class SupervisorLoop:
             and cp_status in ("working", "step_done", "workflow_done")
             and is_admin_only_evidence(cp.get("evidence"))
         ):
-            question = (state.last_event or {}).get("payload", {}).get("question", "") or ""
             esc_hit = classify_for_escalation(cp, question)
             if esc_hit is not None:
                 return escalation_decision(
@@ -203,6 +303,78 @@ class SupervisorLoop:
                 triggered_by_checkpoint_id=triggered_by_checkpoint_id,
             )
         return self.continue_gate.decide(build_context(spec, state), triggered_by_seq=triggered_by_seq)
+
+    def _route_contradiction(
+        self,
+        contradiction,
+        *,
+        state,
+        cp_status: str,
+        triggered_by_seq: int,
+        triggered_by_checkpoint_id: str,
+    ) -> SupervisorDecision | None:
+        """Section E — map a detected contradiction to a gate decision.
+
+        Returns None for the "runtime-owned field conflict" route: runtime
+        state wins but the caller falls through to its non-contradicted
+        routing. The tag is preserved as a session event so operators /
+        eval can observe the drift without changing the decision.
+        """
+        route = contradiction.route
+        if route == "runtime_owned_conflict":
+            self.store.append_session_event(
+                state.run_id,
+                "contradiction_demoted",
+                {
+                    "route": route,
+                    "reason_code": contradiction.reason_code,
+                    "detail": contradiction.detail,
+                },
+            )
+            return None
+
+        if route == "safety_contradiction":
+            return SupervisorDecision.make(
+                decision=DecisionType.ESCALATE_TO_HUMAN.value,
+                reason=f"safety contradiction: {contradiction.detail}",
+                gate_type="checkpoint_status",
+                confidence=1.0,
+                needs_human=True,
+                triggered_by_seq=triggered_by_seq,
+                triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+                reason_code=contradiction.reason_code,
+            )
+
+        if route == "business_contradiction":
+            return SupervisorDecision.make(
+                decision=DecisionType.ESCALATE_TO_HUMAN.value,
+                reason=f"business contradiction: {contradiction.detail}",
+                gate_type="checkpoint_status",
+                confidence=0.98,
+                needs_human=True,
+                triggered_by_seq=triggered_by_seq,
+                triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+                reason_code=contradiction.reason_code,
+            )
+
+        if route == "execution_semantic_contradiction":
+            # Attach-boundary re-inject does NOT charge the retry budget.
+            # The cap on MAX_RE_INJECTS still applies in `apply_decision`.
+            return SupervisorDecision.make(
+                decision=DecisionType.RE_INJECT.value,
+                reason=(
+                    f"execution-semantic contradiction ({cp_status!r}): "
+                    f"{contradiction.detail}"
+                ),
+                gate_type="checkpoint_status",
+                confidence=0.95,
+                needs_human=False,
+                triggered_by_seq=triggered_by_seq,
+                triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+                reason_code=contradiction.reason_code,
+            )
+
+        raise ValueError(f"unknown contradiction route: {route!r}")
 
     def verify_current_node(self, spec, state, *, cwd: str | None = None) -> dict:
         node = spec.get_node(state.current_node_id)
@@ -253,6 +425,7 @@ class SupervisorLoop:
                     "node_id": state.current_node_id,
                     "re_inject_count": state.re_inject_count,
                     "pause_class": "recovery",
+                    "reason_code": REC_REINJECTION_EXHAUSTED,
                 })
             return
         if kind == DecisionType.RETRY.value:
@@ -270,6 +443,7 @@ class SupervisorLoop:
                     "node_id": state.current_node_id,
                     "current_attempt": state.current_attempt,
                     "pause_class": "recovery",
+                    "reason_code": REC_RETRY_BUDGET_EXHAUSTED,
                 })
             else:
                 transition_top_state(state, TopState.RUNNING, reason="retry decision")
@@ -374,6 +548,7 @@ class SupervisorLoop:
                 "node_id": state.current_node_id,
                 "verification": verification,
                 "pause_class": "recovery",
+                "reason_code": REC_VERIFICATION_RETRY_EXHAUSTED,
             })
         else:
             transition_top_state(state, TopState.RUNNING, reason="verification failed but retry budget remains")
@@ -707,6 +882,7 @@ class SupervisorLoop:
                     "injection_seq": state.last_injection_seq,
                     "delivery_state": state.delivery_state,
                     "pause_class": "recovery",
+                    "reason_code": REC_DELIVERY_TIMEOUT,
                 }
                 self.store.append_session_event(state.run_id, "delivery_ack_timeout", payload)
                 logger.warning("delivery ack timeout: no checkpoint after injection for %ds", DELIVERY_ACK_TIMEOUT)
@@ -744,6 +920,7 @@ class SupervisorLoop:
                             "idle_timeout_sec": effective_idle_timeout_sec,
                             "node_id": state.current_node_id,
                             "pause_class": "recovery",
+                            "reason_code": REC_IDLE_TIMEOUT,
                         }
                         self.store.append_event({"type": "timeout", "payload": payload})
                         self.store.append_session_event(state.run_id, "agent_idle_timeout", payload)
@@ -803,6 +980,7 @@ class SupervisorLoop:
                                 "checkpoint_node": checkpoint.current_node,
                                 "state_node": state.current_node_id,
                                 "pause_class": "recovery",
+                                "reason_code": REC_DELIVERY_TIMEOUT,
                             }
                             self.store.append_session_event(
                                 state.run_id, "observation_delivery_stalled", payload
@@ -834,6 +1012,7 @@ class SupervisorLoop:
                                 "checkpoint_node": checkpoint.current_node,
                                 "state_node": state.current_node_id,
                                 "pause_class": "recovery",
+                                "reason_code": REC_NODE_MISMATCH_PERSISTED,
                             }
                             recovery_payload = self._enter_recovery(state, mismatch_payload)
                             if self._attempt_auto_intervention(spec, state, terminal, recovery_payload):
@@ -1089,6 +1268,7 @@ class SupervisorLoop:
                 "node_id": state.current_node_id,
                 "instruction_id": instruction.instruction_id,
                 "pause_class": "recovery",
+                "reason_code": REC_INJECT_FAILED,
             })
             self.store.save(state)
             return False
@@ -1135,6 +1315,7 @@ class SupervisorLoop:
                 "node_id": state.current_node_id,
                 "instruction_id": instruction.instruction_id,
                 "pause_class": "recovery",
+                "reason_code": REC_INJECT_FAILED,
             }
             # If caller threaded the spec through, try an auto-intervention
             # re-inject; otherwise fall through to a recovery-flavored human

@@ -15,6 +15,11 @@ from __future__ import annotations
 from supervisor.domain.enums import DecisionType
 from supervisor.domain.models import SupervisorDecision
 from supervisor.gates.rules import classify_checkpoint, classify_text
+from supervisor.protocol.reason_code import (
+    ESC_BLOCKED_GENUINE,
+    ESC_DANGEROUS_IRREVERSIBLE,
+    ESC_MISSING_EXTERNAL_INPUT,
+)
 
 ESCALATION_CLASSES: tuple[str, ...] = (
     "MISSING_EXTERNAL_INPUT",
@@ -22,12 +27,28 @@ ESCALATION_CLASSES: tuple[str, ...] = (
     "BLOCKED",
 )
 
-# (class) → (reason, confidence).  Keep in sync with the patterns in
-# `supervisor/gates/rules.py`; adding a new class means adding a row here.
-_ESCALATION_REASON: dict[str, tuple[str, float]] = {
-    "MISSING_EXTERNAL_INPUT": ("missing external input", 0.98),
-    "DANGEROUS_ACTION": ("dangerous irreversible action", 0.99),
-    "BLOCKED": ("agent reported blocked", 0.95),
+# (class) → (reason, confidence, reason_code).  Keep in sync with the
+# patterns in `supervisor/gates/rules.py`; adding a new class means adding
+# a row here.  `reason_code` is the frozen wire name from
+# `supervisor/protocol/reason_code.py` (see Decision B in the
+# fat-skill / thin-harness repartitioning doc).  Emitting it here is
+# additive in Slice 1 — no consumer routes on reason_code yet.
+_ESCALATION_REASON: dict[str, tuple[str, float, str]] = {
+    "MISSING_EXTERNAL_INPUT": (
+        "missing external input",
+        0.98,
+        ESC_MISSING_EXTERNAL_INPUT,
+    ),
+    "DANGEROUS_ACTION": (
+        "dangerous irreversible action",
+        0.99,
+        ESC_DANGEROUS_IRREVERSIBLE,
+    ),
+    "BLOCKED": (
+        "agent reported blocked",
+        0.95,
+        ESC_BLOCKED_GENUINE,
+    ),
 }
 
 
@@ -61,7 +82,7 @@ def escalation_decision(
     pre-check with `classify_for_escalation` or membership in
     `ESCALATION_CLASSES`.
     """
-    reason, confidence = _ESCALATION_REASON[hit]
+    reason, confidence, reason_code = _ESCALATION_REASON[hit]
     return SupervisorDecision.make(
         decision=DecisionType.ESCALATE_TO_HUMAN.value,
         reason=reason,
@@ -70,4 +91,5 @@ def escalation_decision(
         needs_human=True,
         triggered_by_seq=triggered_by_seq,
         triggered_by_checkpoint_id=triggered_by_checkpoint_id,
+        reason_code=reason_code,
     )
