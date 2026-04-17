@@ -1213,6 +1213,42 @@ def test_attached_admin_only_with_missing_input_text_escalates_at_loop_level(tmp
     }
     d = loop.gate(spec, state)
     assert d.decision == DecisionType.ESCALATE_TO_HUMAN.value
+    assert d.reason == "missing external input"
+
+    # status: working + admin-only + DANGEROUS_ACTION signal → ESCALATE.
+    # Locks loop-level coverage for every escalation class ContinueGate sees;
+    # a new class added to `classify_text` must not slip through one layer.
+    loop, state = _mk_state()
+    state.last_agent_checkpoint = {
+        "status": "working",
+        "current_node": state.current_node_id,
+        "summary": "attached and reviewed plan",
+        "evidence": [
+            {"attach": "tmux://alpha"},
+            {"plan": "drafted step order"},
+        ],
+        "needs": ["force push to main"],
+    }
+    d = loop.gate(spec, state)
+    assert d.decision == DecisionType.ESCALATE_TO_HUMAN.value
+    assert d.reason == "dangerous irreversible action"
+
+    # status: working + admin-only + BLOCKED signal (via summary, not the
+    # status field) → ESCALATE.  The cp_status == "blocked" branch at the
+    # top of gate() covers the explicit-status shape; this covers
+    # classifier-matched BLOCKED on a non-blocked status.
+    loop, state = _mk_state()
+    state.last_agent_checkpoint = {
+        "status": "working",
+        "current_node": state.current_node_id,
+        "summary": "blocked: cannot proceed",
+        "evidence": [
+            {"attach": "tmux://alpha"},
+        ],
+    }
+    d = loop.gate(spec, state)
+    assert d.decision == DecisionType.ESCALATE_TO_HUMAN.value
+    assert d.reason == "agent reported blocked"
 
     # Negative control: ATTACHED + admin-only + NO escalation signal → still
     # RE_INJECT.  The fix must not over-escalate on plain admin-only output.
