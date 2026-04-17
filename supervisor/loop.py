@@ -584,7 +584,14 @@ class SupervisorLoop:
         # (e.g. re-inject cap exhausted). Without this, a PAUSED_FOR_HUMAN
         # → RUNNING resume would skip the first-execution-evidence gate
         # and let the agent slip through with admin-only evidence.
-        state.pre_pause_top_state = state.top_state.value
+        #
+        # Only capture when empty: if the run reached pause via
+        # `_enter_recovery` (ATTACHED → RECOVERY_NEEDED → auto-intervention
+        # exhausted → _pause_for_human), that path already recorded the
+        # pre-recovery state. Overwriting here would clobber "ATTACHED"
+        # with "RECOVERY_NEEDED" and let resume silently default to RUNNING.
+        if not state.pre_pause_top_state:
+            state.pre_pause_top_state = state.top_state.value
         transition_top_state(state, TopState.PAUSED_FOR_HUMAN, reason="paused for human")
         state.human_escalations.append(details)
         summary = summarize_state(state.to_dict())
@@ -627,6 +634,13 @@ class SupervisorLoop:
                 f"_enter_recovery requires pause_class='recovery'; got {details.get('pause_class')!r}"
             )
         details["pause_class"] = pclass
+        # Capture the pre-recovery state before transitioning. If the
+        # recovery recipe later fails and falls through to
+        # `_pause_for_human`, this preserves the original source state
+        # (e.g. ATTACHED) so resume can restore the attach boundary
+        # instead of defaulting to RUNNING.
+        if not state.pre_pause_top_state:
+            state.pre_pause_top_state = state.top_state.value
         transition_top_state(state, TopState.RECOVERY_NEEDED, reason="recovery needed")
         self.store.append_session_event(state.run_id, "recovery_needed", details)
         return details
@@ -699,6 +713,10 @@ class SupervisorLoop:
         self._set_delivery_state(state, adapter_state, reason="auto intervention confirmed")
         state.auto_intervention_count += 1
         transition_top_state(state, TopState.RUNNING, reason="auto intervention requested")
+        # Recovery succeeded. Clear any pre-recovery state snapshot — a
+        # subsequent natural pause from RUNNING should capture RUNNING,
+        # not inherit the stale pre-recovery (e.g. ATTACHED) value.
+        state.pre_pause_top_state = ""
         record = {
             "reason": plan.reason,
             "instruction": plan.instruction,

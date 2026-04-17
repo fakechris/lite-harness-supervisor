@@ -259,10 +259,13 @@ def evaluate_sunset_trigger(
     # observations do not count toward the trigger" — including for the
     # surface-coverage check. A v2 emission 30 days ago does NOT satisfy
     # the trigger if the surface has only emitted v1 inside the window.
+    # Symmetrically, future-dated observations (skewed clocks, stale
+    # replay jobs tagged with a future timestamp) must not be allowed
+    # to satisfy surface coverage either — cap at reference_day.
     windowed = [
         obs
         for obs in observation_list
-        if obs.observed_at.astimezone(timezone.utc).date() >= window_start
+        if window_start <= obs.observed_at.astimezone(timezone.utc).date() <= reference_day
     ]
 
     trend = compute_fallback_rate_trend(

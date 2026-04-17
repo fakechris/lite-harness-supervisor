@@ -1376,3 +1376,71 @@ def test_sidecar_boots_in_recovery_needed_pauses_for_human(tmp_path):
     assert last["reason_code"] == REC_CRASH_DURING_RECOVERY
     # Must not have attempted any inject — no recipe to replay.
     assert terminal.injected == []
+
+
+def test_pre_pause_top_state_preserves_attached_across_recovery(tmp_path):
+    """Attach-boundary preservation across a failed recovery recipe.
+
+    Flow: run is ATTACHED → `_enter_recovery` transitions to
+    RECOVERY_NEEDED → recipe exhausts → `_pause_for_human` is invoked
+    from RECOVERY_NEEDED. On resume, the daemon inspects
+    `pre_pause_top_state`; if it read "RECOVERY_NEEDED" it would
+    default to RUNNING and skip the first-execution-evidence gate.
+    The fix: `_enter_recovery` captures the pre-recovery state before
+    transitioning, and `_pause_for_human` preserves (does not
+    overwrite) that capture.
+    """
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    loop = SupervisorLoop(store)
+
+    state.top_state = TopState.ATTACHED
+    loop._enter_recovery(state, {"reason": "delivery timeout", "pause_class": "recovery"})
+    assert state.top_state == TopState.RECOVERY_NEEDED
+    assert state.pre_pause_top_state == TopState.ATTACHED.value
+
+    loop._pause_for_human(state, {
+        "reason": "auto-intervention budget exhausted",
+        "pause_class": "recovery",
+    })
+    assert state.top_state == TopState.PAUSED_FOR_HUMAN
+    # Must still reflect the pre-recovery source, not RECOVERY_NEEDED.
+    assert state.pre_pause_top_state == TopState.ATTACHED.value
+
+
+def test_pre_pause_top_state_cleared_after_successful_recovery(tmp_path):
+    """Successful recovery (RECOVERY_NEEDED → RUNNING via auto-intervention)
+    must clear `pre_pause_top_state`, otherwise a later natural pause from
+    RUNNING would inherit the stale pre-recovery value (e.g. "ATTACHED")
+    and route resume to ATTACHED instead of RUNNING.
+    """
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(
+        spec,
+        spec_path="/tmp/plan.yaml",
+        pane_target="%0",
+        surface_type="tmux",
+    )
+    loop = SupervisorLoop(
+        store,
+        auto_intervention_manager=AutoInterventionManager(mode="notify_then_ai"),
+    )
+
+    state.top_state = TopState.ATTACHED
+    payload = {
+        "reason": "no checkpoint received within delivery timeout after injection",
+        "pause_class": "recovery",
+    }
+    loop._enter_recovery(state, payload)
+    assert state.pre_pause_top_state == TopState.ATTACHED.value
+
+    terminal = MockTerminal([""])
+    terminal.read()  # Prime the read guard so inject() is allowed.
+    ok = loop._attempt_auto_intervention(spec, state, terminal, payload)
+    assert ok is True
+    assert state.top_state == TopState.RUNNING
+    # Pre-pause snapshot must be cleared so a later pause captures the
+    # current (RUNNING) state, not the stale ATTACHED capture.
+    assert state.pre_pause_top_state == ""
