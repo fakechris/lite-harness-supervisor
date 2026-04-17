@@ -10,6 +10,23 @@
 
 ---
 
+## Status Snapshot (updated 2026-04-17 / release 0.3.2)
+
+This roadmap is no longer a purely forward-looking plan. Most of the original slices have now landed on `main`.
+
+| Track | Status | What is live now |
+|------|--------|------------------|
+| PR1: Control plane correctness | **Shipped** | attach/resume hardening, `ATTACHED` / `RECOVERY_NEEDED`, global observability plane, stronger tmux injection gating |
+| PR2: Eval surface expansion | **Shipped** | approval, clarify, routing, escalation, finish-gate, and pause-UX suites all exist under `thin-supervisor-dev eval` |
+| PR3: Weighted replay + friction compare | **Partial** | replay, compare, friction memory, canary aggregation, and rollout ledgers are live; richer typed weighting and less heuristic semantics are still open |
+| PR4: Contract / strategy split | **Shipped** | frozen contract docs and strategy fragments are separated in the skill layout |
+| PR5: Candidate generation with lineage | **Shipped** | propose, review-candidate, candidate-status, gate-candidate, promote-candidate, and `eval improve` are all live |
+| PR6: Shadow canary runner | **Shipped** | rollout recording, gate/promotion workflow, and saved eval reports are implemented |
+
+The next milestone is no longer “build the optimizer substrate.” It is **reduce semantic fragility**: move meaning out of harness regexes and into structured skill/protocol outputs without turning every gate into a slow inference call.
+
+---
+
 ## Why This Plan Exists
 
 The current repository already has the right substrate:
@@ -20,11 +37,11 @@ The current repository already has the right substrate:
 
 What it does not yet have is a mature optimizer loop. Today the eval layer is still narrow:
 - golden coverage is mostly approval-centric
-- replay scoring is exact-match and shallow
+- replay scoring is still too shallow in places
 - proposal generation is constrained to a tiny built-in candidate pool
-- runtime correctness issues can still contaminate learning signals
+- semantic classification still relies on too many harness-side heuristics
 
-The next phase should optimize **supervision policy**, not just approval wording.
+The next phase should optimize **supervision policy semantics**, not just approval wording or more regex branches.
 
 ## External Reference Systems
 
@@ -51,12 +68,17 @@ Do **not** treat any external framework as a drop-in dependency for the first im
 
 ## Target End State
 
-By the end of this roadmap, the repo should support:
+The repository now supports:
 - correct pause/resume/attach behavior under realistic daemon and tmux flows
 - eval suites that cover approval, routing, escalation, finish gates, and UX observability
-- weighted replay scoring that distinguishes harmless divergence from risky regressions
 - strategy-fragment candidate generation with lineage and auditability
 - shadow canary and limited rollout promotion workflow implemented as commands, not prose
+
+The remaining target end state is:
+- less regex-heavy semantic classification in harness gates
+- more structured checkpoint / escalation payloads
+- weighted replay scoring that distinguishes harmless divergence from risky regressions without overfitting to a tiny golden set
+- cleaner separation between mechanism rules (harness) and semantic intent (skill / protocol)
 
 ## Layer Model
 
@@ -91,6 +113,8 @@ Optimization inputs:
 
 ## PR1: Control Plane Correctness
 
+**Status:** Shipped on `main`
+
 **Objective:** Ensure runtime behavior is trustworthy enough to produce valid learning signals.
 
 ### Scope
@@ -118,6 +142,8 @@ Optimization inputs:
 - at least one realistic integration lane runs in CI or a documented gated workflow
 
 ## PR2: Expand Eval Surface From Approval To Supervision Policy
+
+**Status:** Shipped on `main`
 
 **Objective:** Broaden offline gate coverage so improvements are evaluated against real supervisor behavior classes.
 
@@ -156,6 +182,8 @@ Optimization inputs:
 
 ## PR3: Weighted Replay And Friction-Aware Comparison
 
+**Status:** Partially shipped; remaining work is semantic weighting, not baseline replay/canary plumbing
+
 **Objective:** Stop treating all mismatches as equal and connect real traces to promotion decisions.
 
 ### Scope
@@ -188,6 +216,8 @@ Optimization inputs:
 
 ## PR4: Contract/Strategy Split For Skill Optimization
 
+**Status:** Shipped on `main`
+
 **Objective:** Make future optimization safe by separating frozen rules from mutable strategy fragments.
 
 ### Scope
@@ -216,6 +246,8 @@ Optimization inputs:
 - docs explain which files are safe to optimize
 
 ## PR5: Candidate Generation With Lineage
+
+**Status:** Shipped on `main`
 
 **Objective:** Replace today’s fixed candidate pool with auditable strategy-fragment candidates.
 
@@ -246,6 +278,8 @@ Optimization inputs:
 - proposal reports cite source failures and replay evidence
 
 ## PR6: Shadow Canary Runner
+
+**Status:** Shipped on `main`
 
 **Objective:** Turn README rollout advice into executable promotion workflow.
 
@@ -308,20 +342,20 @@ Reject a candidate if it:
 - no direct runtime control by oracle/advisory models
 - no heavy external dependency adoption before local evaluator maturity
 
-## Recommended Execution Order
+## Next Execution Order
 
-1. **PR1**
-   Fix control-plane correctness and integration confidence.
-2. **PR2**
-   Expand eval coverage to supervision policy classes.
-3. **PR3**
-   Introduce weighted replay and friction-aware compare.
-4. **PR4**
-   Split contract layer from strategy layer.
-5. **PR5**
-   Add lineage-aware candidate generation.
-6. **PR6**
-   Ship shadow canary runner and promotion workflow.
+The original PR1-PR6 sequence is mostly complete. The next execution order should be:
+
+1. **Rule inventory**
+   Enumerate every harness-side semantic rule and classify it as mechanism vs semantics.
+2. **Structured protocol bridge**
+   Add explicit checkpoint/escalation fields such as progress class, evidence scope, escalation class, and reason codes.
+3. **Harness simplification**
+   Replace low-confidence regex branches with structured fields, while keeping a small fail-safe ruleset for deterministic hazards.
+4. **Replay/eval deepening**
+   Make replay weighting and synthesized eval expansion reflect the new structured protocol instead of today’s textual heuristics.
+5. **Promotion hardening**
+   Keep canary/promotion commands, but shift their scoring away from brittle text matching and toward typed signals.
 
 ## Verification Strategy Per PR
 
