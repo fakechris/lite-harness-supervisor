@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.3.2 (2026-04-17)
+
+### Observability
+
+- Added a canonical global session collector so `status`, `dashboard`, `tui`, and `observe` can see live, orphaned, and completed runs across worktrees from any directory.
+- Made global session tags explicit for `attached`, `recovery`, and pause classes so operator surfaces stop collapsing distinct runtime states into one generic view.
+
+### Runtime State Machine
+
+- Split recovery-oriented runtime flow from business pauses with `RECOVERY_NEEDED`, `pause_class`, and attach-boundary handling for first-checkpoint enforcement.
+- Tightened escalation precedence so missing external input, blocked states, and destructive authorization requests are escalated before attach-boundary re-injection logic.
+
+### Delivery Robustness
+
+- Hardened tmux injection with a readiness gate that defers send-keys while the pane buffer is still changing or the runtime is actively typing.
+- Fixed idle prompt detection so an empty `› ` / `❯ ` prompt is treated as ready, while real user typing still defers injection.
+
 ## 0.3.1 (2026-04-15)
 
 - Standardized the PyPI release flow so publishing only happens from `v*` tags.
