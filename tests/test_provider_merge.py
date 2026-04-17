@@ -92,6 +92,96 @@ class TestTelegramSameBotMultipleChats:
         assert auth.is_authorized("chat_A", "bob")
         assert auth.is_authorized("chat_B", "alice")
 
+    def test_legacy_chat_id_entry_keeps_command_auth_when_merged(self):
+        """Mixed legacy + explicit-allowlist entries: legacy chat still commands.
+
+        An entry that specifies only `chat_id` (no `allowed_chat_ids`)
+        preserves single-entry legacy semantics — its chat is both a
+        notification target AND authorized to issue commands.  When
+        merged with another entry under the same bot_token that does
+        specify allowed_chat_ids, the legacy chat must NOT silently
+        lose command authorization just because the aggregate allowlist
+        became non-empty.
+
+        Per PRD: merged chats have one authorization surface and can
+        issue commands if authorized.
+        """
+        config = RuntimeConfig(notification_channels=[
+            # Legacy target-only entry (no allowed_chat_ids).
+            {"kind": "telegram", "mode": "command",
+             "bot_token": "tok_x", "chat_id": "111"},
+            # Explicit-allowlist entry.
+            {"kind": "telegram", "mode": "command",
+             "bot_token": "tok_x", "chat_id": "222",
+             "allowed_chat_ids": ["222"]},
+        ])
+        host = OperatorChannelHost.from_config(config)
+        assert len(host.channels) == 1
+        ch = host.channels[0]
+        assert set(ch.conversation_targets) == {"111", "222"}
+        # Both chats must be authorized — the legacy entry's chat_id
+        # is promoted into the merged allowlist because that entry did
+        # not narrow its own auth.
+        assert set(ch.auth.allowed_chat_ids) == {"111", "222"}
+        assert ch.auth.is_authorized("111")
+        assert ch.auth.is_authorized("222")
+
+    def test_explicit_empty_allowlist_does_not_promote(self):
+        """`allowed_chat_ids: []` is explicit narrowing, not legacy shape.
+
+        Distinguishing missing key from explicit empty list matters: an
+        operator who writes `allowed_chat_ids: []` has declared an
+        allowlist and set it to empty. That is NOT the same as omitting
+        the key, which is the legacy shape that triggers promotion.
+        Under PRD "Entries with explicit allowed_chat_ids keep their
+        narrowing intent", explicit empty must not auto-promote.
+        """
+        config = RuntimeConfig(notification_channels=[
+            # Explicit empty allowlist — narrow to nobody for this entry.
+            {"kind": "telegram", "mode": "command",
+             "bot_token": "tok_x", "chat_id": "111",
+             "allowed_chat_ids": []},
+            # Explicit allowlist on the sibling entry.
+            {"kind": "telegram", "mode": "command",
+             "bot_token": "tok_x", "chat_id": "222",
+             "allowed_chat_ids": ["222"]},
+        ])
+        host = OperatorChannelHost.from_config(config)
+        ch = host.channels[0]
+        assert set(ch.conversation_targets) == {"111", "222"}
+        # 111 declared an empty allowlist → not auto-promoted.
+        # Only 222 (from the sibling's explicit entry) is authorized.
+        assert set(ch.auth.allowed_chat_ids) == {"222"}
+        assert not ch.auth.is_authorized("111")
+        assert ch.auth.is_authorized("222")
+
+    def test_explicit_narrow_allowlist_still_excludes_other_chats(self):
+        """An entry with explicit allowed_chat_ids does NOT auto-promote its chat_id.
+
+        If an entry specifies `chat_id: X` AND `allowed_chat_ids: [Y]`,
+        the operator's intent is "send alerts to X, but only Y may
+        command".  Per-entry explicit allowlist overrides per-entry
+        promotion.  Merging with other entries must preserve that
+        narrowing: X must not silently become authorized.
+        """
+        config = RuntimeConfig(notification_channels=[
+            # Explicit narrowing: chat 111 receives but only chat 999 commands.
+            {"kind": "telegram", "mode": "command",
+             "bot_token": "tok_x", "chat_id": "111",
+             "allowed_chat_ids": ["999"]},
+            # Second entry unrelated to the narrowing.
+            {"kind": "telegram", "mode": "command",
+             "bot_token": "tok_x", "chat_id": "222",
+             "allowed_chat_ids": ["222"]},
+        ])
+        host = OperatorChannelHost.from_config(config)
+        ch = host.channels[0]
+        assert set(ch.conversation_targets) == {"111", "222"}
+        # 111 is a target but NOT authorized (explicitly narrowed to 999).
+        # 222 and 999 are authorized (unioned).
+        assert set(ch.auth.allowed_chat_ids) == {"222", "999"}
+        assert not ch.auth.is_authorized("111")
+
 
 # ── Lark: same app, multiple chats ──────────────────────────────
 

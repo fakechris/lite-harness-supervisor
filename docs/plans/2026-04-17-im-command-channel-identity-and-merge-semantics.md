@@ -257,6 +257,28 @@ specifies only `allowed_chat_ids` (no `chat_id`), those same values
 also become notification targets — there is exactly one set of
 conversation targets per Provider Instance.
 
+**Per-entry allowlist promotion.** An entry's *own* authorization
+intent is preserved across the merge:
+
+- If an entry specifies `chat_id`/`chat_ids` **without** its own
+  `allowed_chat_ids`, those chats are promoted into the merged auth
+  allowlist. This preserves the pre-merge single-entry default where
+  `chat_id` alone means "this chat can both receive and issue
+  commands".
+- If an entry specifies `allowed_chat_ids` explicitly — **even as an
+  empty list** — that narrowing is honored: its `chat_id`/`chat_ids`
+  are **not** auto-promoted. The entry becomes "send alerts to X, only
+  Y may command", even after merging with other entries. Explicit
+  empty (`allowed_chat_ids: []`) means "this entry authorizes nobody",
+  which is distinct from omitting the key (the legacy shape that
+  triggers promotion).
+
+Without this rule, a legacy target-only entry merged with an
+explicit-allowlist entry would silently lose command authorization
+(still receive alerts, but `/pause`, `/ask`, etc. would be rejected),
+which contradicts "merged chats have one authorization surface and can
+issue commands if authorized".
+
 ### Fields That Must Match Exactly
 
 These fields define transport behavior and must not silently diverge.
