@@ -1018,6 +1018,47 @@ def test_attached_real_execution_advances_to_running(tmp_path):
     assert any(d.get("decision", "").upper() == "CONTINUE" for d in decisions)
 
 
+def test_re_inject_loop_caps_and_pauses_recovery(tmp_path):
+    """If the agent keeps emitting admin-only checkpoints after attach, the
+    supervisor must not RE_INJECT forever. After MAX_RE_INJECTS attempts it
+    pauses with pause_class='recovery' so an operator can intervene.
+
+    Without this cap, a responsive-but-off-task agent would loop gate →
+    RE_INJECT → inject → admin-only cp → gate → … indefinitely; the
+    delivery-ack timeout is the only other bound and it only fires when the
+    agent goes silent.
+    """
+    from supervisor.loop import MAX_RE_INJECTS
+
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    channel = RecordingChannel()
+    loop = SupervisorLoop(store, notification_manager=NotificationManager([channel]))
+
+    # Feed MAX_RE_INJECTS + 2 admin-only checkpoints so the cap is definitely
+    # tripped. Initial inject reads "" then each subsequent admin-only cp
+    # triggers another RE_INJECT until the cap fires.
+    outputs: list[str] = [""]  # initial handoff reads empty
+    for _ in range(MAX_RE_INJECTS + 2):
+        outputs.append(_admin_only_checkpoint("write_test", "still reviewing plan"))
+    terminal = MockTerminal(outputs)
+
+    final = loop.run_sidecar(spec, state, terminal, poll_interval=0, read_lines=50)
+
+    assert final.top_state == TopState.PAUSED_FOR_HUMAN
+    # Recovery pause — not business/safety/review.
+    assert final.human_escalations
+    assert final.human_escalations[-1].get("pause_class") == "recovery"
+    # Retry budget still untouched — RE_INJECT must not bleed into RETRY
+    # semantics even when the cap trips.
+    assert final.current_attempt == 0
+    assert final.retry_budget.used_global == 0
+    # Operator notification fired with the recovery class.
+    pause_events = [e for e in channel.events if e.event_type == "human_pause"]
+    assert pause_events and pause_events[-1].pause_class == "recovery"
+
+
 def test_non_fresh_resume_skips_attached(tmp_path):
     """A state that already has a RUNNING checkpoint must not re-enter ATTACHED.
 

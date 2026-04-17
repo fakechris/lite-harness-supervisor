@@ -47,6 +47,13 @@ def build_context(spec, state) -> dict:
     }
 
 
+# Upper bound on attach-boundary re-injections before falling through to a
+# recovery pause. If the agent keeps emitting admin-only checkpoints after
+# this many re-injects, the supervisor stops retrying and surfaces a recovery
+# pause so an operator can look at the pane.
+MAX_RE_INJECTS = 3
+
+
 class SupervisorLoop:
     def __init__(self, store, judge_model: str | None = None,
                  judge_temperature: float = 0.1, judge_max_tokens: int = 512,
@@ -121,8 +128,15 @@ class SupervisorLoop:
         # short-circuits.  A first checkpoint claiming step_done/workflow_done
         # with admin-only evidence would otherwise skip straight to
         # VERIFY_STEP, bypassing the first-execution gate entirely — exactly
-        # the escape hatch the gate is meant to close.
-        if state.top_state == TopState.ATTACHED and is_admin_only_evidence(cp.get("evidence")):
+        # the escape hatch the gate is meant to close. Limited to statuses
+        # that make affirmative progress claims; empty/partial statuses fall
+        # through to ContinueGate so their missing-status problem isn't
+        # hidden behind a RE_INJECT reason string.
+        if (
+            state.top_state == TopState.ATTACHED
+            and cp_status in ("working", "step_done", "workflow_done")
+            and is_admin_only_evidence(cp.get("evidence"))
+        ):
             return SupervisorDecision.make(
                 decision=DecisionType.RE_INJECT.value,
                 reason=(
@@ -177,9 +191,11 @@ class SupervisorLoop:
             kind = decision.decision.upper()
 
         if kind == DecisionType.CONTINUE.value:
+            state.re_inject_count = 0
             transition_top_state(state, TopState.RUNNING, reason="continue decision")
             return
         if kind == DecisionType.VERIFY_STEP.value:
+            state.re_inject_count = 0
             transition_top_state(state, TopState.VERIFYING, reason="verify_step decision")
             return
         if kind == DecisionType.RE_INJECT.value:
@@ -187,8 +203,26 @@ class SupervisorLoop:
             # retry budget — this is the whole point of having RE_INJECT as a
             # separate decision from RETRY.  The run stays in ATTACHED so the
             # next checkpoint also gets first-execution-evidence scrutiny.
+            state.re_inject_count += 1
+            # Cap unbounded loops: if the agent keeps emitting admin-only
+            # checkpoints after MAX_RE_INJECTS re-injections, stop trying and
+            # surface a recovery pause so an operator can intervene. Without
+            # this cap, RE_INJECT can loop forever (the agent is responsive,
+            # so the delivery-ack timeout never fires).
+            if state.re_inject_count > MAX_RE_INJECTS:
+                self._pause_for_human(state, {
+                    "reason": (
+                        f"re-inject exhausted after {MAX_RE_INJECTS} attempts: "
+                        f"agent keeps returning admin-only checkpoints for "
+                        f"node {state.current_node_id}"
+                    ),
+                    "node_id": state.current_node_id,
+                    "re_inject_count": state.re_inject_count,
+                    "pause_class": "recovery",
+                })
             return
         if kind == DecisionType.RETRY.value:
+            state.re_inject_count = 0
             state.current_attempt += 1
             state.retry_budget.used_global += 1
             if (state.current_attempt >= state.retry_budget.per_node
@@ -817,8 +851,15 @@ class SupervisorLoop:
 
                 # 4b. RE_INJECT — attach-boundary re-inject of a focused
                 # first-execution prompt.  Dedicated branch so retry-counter
-                # semantics can never leak into this path.
-                if decision and decision.decision.upper() == DecisionType.RE_INJECT.value:
+                # semantics can never leak into this path. Skipped when
+                # apply_decision already paused the run (re-inject cap
+                # exhausted) — we do not want to inject again after the
+                # recovery pause fires.
+                if (
+                    decision
+                    and decision.decision.upper() == DecisionType.RE_INJECT.value
+                    and state.top_state == TopState.ATTACHED
+                ):
                     node = spec.get_node(state.current_node_id)
                     re_instruction = self.composer.build(
                         node, state,
