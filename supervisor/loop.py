@@ -78,9 +78,18 @@ class SupervisorLoop:
 
     def handle_event(self, state, event):
         state.last_event = event
+        # States where an arriving checkpoint must NOT force a transition to
+        # GATING. RECOVERY_NEEDED belongs here: its allowed transitions are
+        # only RUNNING / PAUSED_FOR_HUMAN / terminals (see
+        # `supervisor/domain/state_machine.py`), so re-entering GATING would
+        # raise InvalidTopStateTransition. In practice a run only lands in
+        # RECOVERY_NEEDED persistently if the sidecar crashed between
+        # `_enter_recovery()` and its follow-up transition — without this
+        # guard a resume in that condition becomes a permanent crash loop.
         preserve_state = {
             TopState.ATTACHED,
             TopState.VERIFYING,
+            TopState.RECOVERY_NEEDED,
             TopState.PAUSED_FOR_HUMAN,
             TopState.COMPLETED,
             TopState.FAILED,
