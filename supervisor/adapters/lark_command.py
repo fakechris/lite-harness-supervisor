@@ -154,16 +154,11 @@ class LarkBotClient:
 class LarkCommandChannel:
     """Full operator command channel over Lark/Feishu Bot API.
 
-    Config::
-
-        notification_channels:
-          - kind: lark
-            mode: command
-            app_id: "cli_xxx"
-            app_secret: "secret"
-            allowed_chat_ids: ["oc_xxx"]
-            language: "zh"
-            callback_port: 9876
+    One instance represents one Provider Instance (a single app_id)
+    serving a merged set of conversation_targets.  Multiple config
+    entries sharing the same app_id are merged upstream in
+    OperatorChannelHost.from_config() before this constructor runs.
+    Merged targets receive notify() fanout.
     """
 
     def __init__(
@@ -171,20 +166,25 @@ class LarkCommandChannel:
         *,
         app_id: str,
         app_secret: str,
-        allowed_chat_ids: list[str] | None = None,
-        allowed_user_ids: list[str] | None = None,
+        conversation_targets=None,
+        allowed_chat_ids=None,
+        allowed_user_ids=None,
         language: str = "zh",
         callback_port: int = 9876,
         verification_token: str = "",
         encrypt_key: str = "",
     ):
         self.bot = LarkBotClient(app_id, app_secret)
+        allow_chats = {str(c) for c in (allowed_chat_ids or []) if c}
+        targets = {str(t) for t in (conversation_targets or []) if t} or set(allow_chats)
+        if not targets:
+            raise ValueError("lark conversation_targets must be non-empty")
+        self.conversation_targets = targets
         self.auth = CommandAuth(
-            allowed_chat_ids=allowed_chat_ids,
-            allowed_user_ids=allowed_user_ids,
+            allowed_chat_ids=sorted(allow_chats) or sorted(targets),
+            allowed_user_ids=sorted({str(u) for u in (allowed_user_ids or []) if u}) or None,
         )
         self.language = language
-        self.allowed_chat_ids = allowed_chat_ids or []
         self._callback_port = callback_port
         self.verification_token = verification_token
         self.encrypt_key = encrypt_key
@@ -222,10 +222,19 @@ class LarkCommandChannel:
     # ── NotificationChannel protocol ──────────────────────────────
 
     def notify(self, event: NotificationEvent) -> None:
-        """Send interactive card with action buttons to all allowed chats."""
+        """Fan out interactive alert card to every merged conversation target."""
+        for chat_id in sorted(self.conversation_targets):
+            self._send_alert_card(chat_id, event)
+
+    def _send_alert_card(self, chat_id: str, event: NotificationEvent) -> None:
+        """Build and send one alert card for a single target.
+
+        Extracted so tests can intercept per-target delivery and so
+        future per-target policy (severity filters, quiet hours) has a
+        natural seam.
+        """
         card = self._build_alert_card(event)
-        for chat_id in self.allowed_chat_ids:
-            self.bot.send_message(chat_id, "interactive", card)
+        self.bot.send_message(chat_id, "interactive", card)
 
     # ── Lifecycle ─────────────────────────────────────────────────
 

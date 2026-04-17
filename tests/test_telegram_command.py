@@ -15,7 +15,7 @@ from supervisor.operator.command_dispatch import CommandResult
 def _make_channel(**overrides) -> TelegramCommandChannel:
     defaults = {
         "bot_token": "123:ABC",
-        "chat_id": "-100",
+        "conversation_targets": ["-100"],
         "allowed_chat_ids": ["-100"],
         "language": "zh",
     }
@@ -30,15 +30,15 @@ class TestConstruction:
     def test_basic(self):
         ch = _make_channel()
         assert ch.bot_token == "123:ABC"
-        assert ch.chat_id == "-100"
+        assert ch.conversation_targets == {"-100"}
 
     def test_missing_bot_token(self):
         with pytest.raises(ValueError, match="bot_token"):
-            TelegramCommandChannel(bot_token="", chat_id="-100")
+            TelegramCommandChannel(bot_token="", conversation_targets=["-100"])
 
-    def test_missing_chat_id(self):
-        with pytest.raises(ValueError, match="chat_id"):
-            TelegramCommandChannel(bot_token="123:ABC", chat_id="")
+    def test_missing_conversation_targets(self):
+        with pytest.raises(ValueError, match="conversation_targets"):
+            TelegramCommandChannel(bot_token="123:ABC", conversation_targets=[])
 
     def test_default_language(self):
         ch = _make_channel()
