@@ -34,6 +34,11 @@ def _hermetic_session_index(monkeypatch):
         "supervisor.operator.session_index._discover_git_worktrees",
         lambda cwd: [],
     )
+    # `cmd_status` also calls `app._list_global_daemons()` directly for
+    # the empty-state branch.  Without this stub, a developer with live
+    # daemon registry entries would flip the empty-state message into
+    # the wrong branch during tests.
+    monkeypatch.setattr("supervisor.app._list_global_daemons", lambda: [])
 
 
 class _DaemonWithNoRuns:
@@ -2433,3 +2438,54 @@ def test_observe_returns_error_for_unknown_run(
     assert result == 1
     out = capsys.readouterr().out
     assert "run_does_not_exist" in out or "not found" in out.lower()
+
+
+def test_observe_handles_dead_daemon_socket_cleanly(
+    tmp_path, monkeypatch, capsys,
+):
+    """If a daemon registry entry passes the PID check but the socket
+    connection fails (narrow race where the daemon dies between
+    list_daemons() and get_snapshot()), observe must print a clean
+    error — not dump a traceback."""
+    monkeypatch.chdir(tmp_path)
+    _write_observe_state_in(tmp_path, run_id="run_dead_daemon",
+                            top_state="RUNNING")
+    # Register a live daemon in session_index so the run is tagged
+    # "daemon" and routed through SYNC_DAEMON.
+    _patch_session_index_registries(
+        monkeypatch,
+        daemons=[{
+            "pid": 1, "cwd": str(tmp_path.resolve()),
+            "socket": "/tmp/dead.sock", "active_runs": 1,
+        }],
+    )
+    monkeypatch.setattr(
+        app, "_list_global_daemons",
+        lambda: [{
+            "pid": 1, "cwd": str(tmp_path.resolve()),
+            "socket": "/tmp/dead.sock",
+        }],
+    )
+
+    # Narrow race: is_running() ping succeeds, then the daemon exits,
+    # then get_snapshot() trips a ConnectionRefusedError.
+    class _DeadClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def is_running(self):
+            return True
+
+        def get_snapshot(self, run_id):
+            raise ConnectionRefusedError("connection refused")
+
+    monkeypatch.setattr(
+        "supervisor.daemon.client.DaemonClient", _DeadClient
+    )
+
+    result = app.cmd_observe(argparse.Namespace(run_id="run_dead_daemon"))
+
+    assert result == 1
+    out = capsys.readouterr().out
+    assert "daemon unreachable" in out
+    assert "run_dead_daemon" in out

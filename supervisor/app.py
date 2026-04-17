@@ -787,6 +787,12 @@ def cmd_observe(args):
     except ActionUnavailable as e:
         print(f"Error: observe unavailable: {e}")
         return 1
+    except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
+        # Narrow race: list_daemons() reaps dead PIDs, but a daemon can
+        # die between registry read and socket connect.  Fail cleanly
+        # with the run_id and error rather than dumping a traceback.
+        print(f"Error: daemon unreachable for {rec.run_id}: {e}")
+        return 1
 
     snap = data.get("snapshot", {}) or {}
     timeline = data.get("timeline", []) or []
