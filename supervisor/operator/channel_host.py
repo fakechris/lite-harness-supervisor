@@ -109,20 +109,43 @@ def _merge_additive_fields(
     When a group lists only `allowed_chat_ids` (no `chat_id`/`chat_ids`),
     the allowlist values serve as conversation targets too — that matches
     how single-entry configs behaved before the merge contract.
+
+    **Per-entry allowlist promotion.** A single-entry legacy shape
+    (e.g. `{chat_id: X}` with no `allowed_chat_ids`) means "X receives
+    alerts AND may issue commands" — that was the pre-merge default.
+    When such a legacy entry is merged with another entry that *does*
+    set `allowed_chat_ids`, the aggregate allowlist becomes non-empty,
+    which would silently drop the legacy chat's command authorization
+    (it'd still get alerts but `/pause`, `/ask`, etc. would be rejected).
+    To preserve intent, an entry that contributes chat_id/chat_ids but
+    does not specify its own `allowed_chat_ids` promotes those chats
+    into the merged allowlist.  Conversely, an entry that explicitly
+    lists `allowed_chat_ids` keeps its narrowing intent — its targets
+    are NOT auto-promoted.
     """
     targets: set[str] = set()
     allow_chats: set[str] = set()
     allow_users: set[str] = set()
     for e in entries:
+        entry_targets: set[str] = set()
         chat_id = e.get("chat_id")
         if chat_id:
-            targets.add(str(chat_id))
+            entry_targets.add(str(chat_id))
         for t in e.get("chat_ids", []) or []:
             if t:
-                targets.add(str(t))
-        for c in e.get("allowed_chat_ids", []) or []:
-            if c:
+                entry_targets.add(str(t))
+        targets |= entry_targets
+
+        entry_allowed = [c for c in (e.get("allowed_chat_ids") or []) if c]
+        if entry_allowed:
+            for c in entry_allowed:
                 allow_chats.add(str(c))
+        else:
+            # Legacy shape: no explicit allowlist in this entry → its
+            # chats are implicitly authorized (preserve single-entry
+            # semantics across the merge).
+            allow_chats |= entry_targets
+
         for u in e.get("allowed_user_ids", []) or []:
             if u:
                 allow_users.add(str(u))
