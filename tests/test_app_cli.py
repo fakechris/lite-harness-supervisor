@@ -1174,6 +1174,306 @@ def test_eval_propose_saves_candidate_manifest_when_report_persisted(tmp_path, m
     assert Path(payload["candidate_manifest_path"]).exists()
 
 
+def test_eval_improve_dry_run_stops_after_proposal(tmp_path, monkeypatch, capsys):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
+    manifest_path = tmp_path / ".supervisor" / "evals" / "candidates" / "candidate_demo.json"
+
+    monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: cfg)
+    monkeypatch.setattr("supervisor.eval.load_eval_suite", lambda ref: object())
+    monkeypatch.setattr("supervisor.eval.propose_candidate_policy", lambda *args, **kwargs: {
+        "suite": "approval-core",
+        "objective": "reduce_false_approval",
+        "baseline_policy": "builtin-approval-v1",
+        "recommended_candidate_policy": "builtin-approval-strict-v1",
+        "candidate": {
+            "candidate_id": "candidate_demo",
+            "candidate_policy": "builtin-approval-strict-v1",
+            "parent_id": "builtin-approval-v1",
+        },
+    })
+    monkeypatch.setattr("supervisor.eval.save_candidate_manifest", lambda *args, **kwargs: manifest_path)
+    monkeypatch.setattr("supervisor.eval.review_candidate_manifest", lambda manifest: {
+        "candidate_id": "candidate_demo",
+        "candidate_policy": "builtin-approval-strict-v1",
+        "review_status": "needs_human_review",
+        "next_action": "thin-supervisor-dev eval compare --suite approval-core --candidate-policy builtin-approval-strict-v1",
+        "suite": "approval-core",
+    })
+    monkeypatch.setattr("supervisor.eval.build_candidate_dossier", lambda **kwargs: {
+        "candidate": {"candidate_id": "candidate_demo", "candidate_policy": "builtin-approval-strict-v1"},
+        "proposal": {"objective": "reduce_false_approval"},
+        "review": {"review_status": "needs_human_review"},
+        "next_action": "thin-supervisor-dev eval compare --suite approval-core --candidate-policy builtin-approval-strict-v1",
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="improve",
+        suite="approval-core",
+        suite_file=None,
+        baseline_policy="builtin-approval-v1",
+        objective="reduce_false_approval",
+        run_id=[],
+        approved_by="",
+        force=False,
+        dry_run=True,
+        output="",
+        save_report=False,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stage"] == "proposed"
+    assert payload["candidate_id"] == "candidate_demo"
+    assert payload["candidate_manifest_path"] == str(manifest_path)
+    assert "gate" not in payload
+    assert "promotion" not in payload
+
+
+def test_eval_improve_stops_before_promote_without_approval(tmp_path, monkeypatch, capsys):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
+    manifest_path = tmp_path / ".supervisor" / "evals" / "candidates" / "candidate_demo.json"
+
+    monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: cfg)
+    monkeypatch.setattr("supervisor.eval.load_eval_suite", lambda ref: object())
+    monkeypatch.setattr("supervisor.eval.propose_candidate_policy", lambda *args, **kwargs: {
+        "suite": "approval-core",
+        "objective": "reduce_false_approval",
+        "baseline_policy": "builtin-approval-v1",
+        "recommended_candidate_policy": "builtin-approval-strict-v1",
+        "candidate": {
+            "candidate_id": "candidate_demo",
+            "candidate_policy": "builtin-approval-strict-v1",
+            "parent_id": "builtin-approval-v1",
+        },
+    })
+    monkeypatch.setattr("supervisor.eval.save_candidate_manifest", lambda *args, **kwargs: manifest_path)
+    monkeypatch.setattr("supervisor.eval.review_candidate_manifest", lambda manifest: {
+        "candidate_id": "candidate_demo",
+        "candidate_policy": "builtin-approval-strict-v1",
+        "review_status": "needs_human_review",
+        "next_action": "thin-supervisor-dev eval compare --suite approval-core --candidate-policy builtin-approval-strict-v1",
+        "suite": "approval-core",
+        "objective": "reduce_false_approval",
+        "touched_fragments": ["approval-boundary"],
+    })
+    monkeypatch.setattr("supervisor.eval.build_candidate_dossier", lambda **kwargs: {
+        "candidate": {"candidate_id": "candidate_demo", "candidate_policy": "builtin-approval-strict-v1"},
+        "proposal": {"objective": "reduce_false_approval"},
+        "review": {"review_status": "needs_human_review"},
+        "next_action": "thin-supervisor-dev eval canary --run-id <recent_run>",
+    })
+    monkeypatch.setattr("supervisor.eval.evaluate_candidate_gate", lambda review, suite, canary_report=None: {
+        "candidate_id": "candidate_demo",
+        "candidate_policy": "builtin-approval-strict-v1",
+        "baseline_policy": "builtin-approval-v1",
+        "suite": "approval-core",
+        "review_status": "needs_human_review",
+        "decision": "needs_canary",
+        "compare": {},
+        "canary": None,
+        "next_action": "thin-supervisor-dev eval canary --run-id <recent_run>",
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="improve",
+        suite="approval-core",
+        suite_file=None,
+        baseline_policy="builtin-approval-v1",
+        objective="reduce_false_approval",
+        run_id=[],
+        approved_by="",
+        force=False,
+        dry_run=False,
+        output="",
+        save_report=False,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stage"] == "gated"
+    assert payload["gate"]["decision"] == "needs_canary"
+    assert payload["next_action"] == "thin-supervisor-dev eval canary --run-id <recent_run>"
+    assert "promotion" not in payload
+
+
+def test_eval_improve_passes_canary_threshold_overrides(tmp_path, monkeypatch, capsys):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
+    manifest_path = tmp_path / ".supervisor" / "evals" / "candidates" / "candidate_demo.json"
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: cfg)
+    monkeypatch.setattr("supervisor.eval.load_eval_suite", lambda ref: object())
+    monkeypatch.setattr("supervisor.eval.propose_candidate_policy", lambda *args, **kwargs: {
+        "suite": "approval-core",
+        "objective": "reduce_false_approval",
+        "baseline_policy": "builtin-approval-v1",
+        "recommended_candidate_policy": "builtin-approval-strict-v1",
+        "candidate": {
+            "candidate_id": "candidate_demo",
+            "candidate_policy": "builtin-approval-strict-v1",
+            "parent_id": "builtin-approval-v1",
+        },
+    })
+    monkeypatch.setattr("supervisor.eval.save_candidate_manifest", lambda *args, **kwargs: manifest_path)
+    monkeypatch.setattr("supervisor.eval.review_candidate_manifest", lambda manifest: {
+        "candidate_id": "candidate_demo",
+        "candidate_policy": "builtin-approval-strict-v1",
+        "review_status": "needs_human_review",
+        "next_action": "thin-supervisor-dev eval canary --run-id <recent_run>",
+        "suite": "approval-core",
+        "objective": "reduce_false_approval",
+        "touched_fragments": ["approval-boundary"],
+    })
+    monkeypatch.setattr("supervisor.eval.build_candidate_dossier", lambda **kwargs: {
+        "candidate": {"candidate_id": "candidate_demo", "candidate_policy": "builtin-approval-strict-v1"},
+        "proposal": {"objective": "reduce_false_approval"},
+        "review": {"review_status": "needs_human_review"},
+        "next_action": "thin-supervisor-dev eval canary --run-id <recent_run>",
+    })
+
+    def _fake_canary(run_ids, *, runtime_dir, max_mismatch_rate, max_friction_events):
+        captured["run_ids"] = list(run_ids)
+        captured["runtime_dir"] = runtime_dir
+        captured["max_mismatch_rate"] = max_mismatch_rate
+        captured["max_friction_events"] = max_friction_events
+        return {"decision": "needs_canary", "run_ids": list(run_ids)}
+
+    monkeypatch.setattr("supervisor.eval.run_canary_eval", _fake_canary)
+    monkeypatch.setattr("supervisor.eval.evaluate_candidate_gate", lambda review, suite, canary_report=None: {
+        "candidate_id": "candidate_demo",
+        "candidate_policy": "builtin-approval-strict-v1",
+        "baseline_policy": "builtin-approval-v1",
+        "suite": "approval-core",
+        "review_status": "needs_human_review",
+        "decision": "needs_canary",
+        "compare": {},
+        "canary": canary_report,
+        "next_action": "thin-supervisor-dev eval canary --run-id <recent_run>",
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="improve",
+        suite="approval-core",
+        suite_file=None,
+        baseline_policy="builtin-approval-v1",
+        objective="reduce_false_approval",
+        run_id=["run_1", "run_2"],
+        max_mismatch_rate=0.1,
+        max_friction_events=2,
+        approved_by="",
+        force=False,
+        dry_run=False,
+        output="",
+        save_report=False,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    assert captured == {
+        "run_ids": ["run_1", "run_2"],
+        "runtime_dir": str(runtime_dir),
+        "max_mismatch_rate": 0.1,
+        "max_friction_events": 2,
+    }
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["gate"]["canary"]["run_ids"] == ["run_1", "run_2"]
+
+
+def test_eval_improve_promotes_when_approved_and_gate_allows(tmp_path, monkeypatch, capsys):
+    runtime_dir = tmp_path / ".supervisor" / "runtime"
+    cfg = type("Cfg", (), {"runtime_dir": str(runtime_dir)})()
+    manifest_path = tmp_path / ".supervisor" / "evals" / "candidates" / "candidate_demo.json"
+
+    monkeypatch.setattr("supervisor.app.RuntimeConfig.load", lambda path=None: cfg)
+    monkeypatch.setattr("supervisor.eval.load_eval_suite", lambda ref: object())
+    monkeypatch.setattr("supervisor.eval.propose_candidate_policy", lambda *args, **kwargs: {
+        "suite": "approval-core",
+        "objective": "reduce_false_approval",
+        "baseline_policy": "builtin-approval-v1",
+        "recommended_candidate_policy": "builtin-approval-strict-v1",
+        "candidate": {
+            "candidate_id": "candidate_demo",
+            "candidate_policy": "builtin-approval-strict-v1",
+            "parent_id": "builtin-approval-v1",
+        },
+    })
+    monkeypatch.setattr("supervisor.eval.save_candidate_manifest", lambda *args, **kwargs: manifest_path)
+    monkeypatch.setattr("supervisor.eval.review_candidate_manifest", lambda manifest: {
+        "candidate_id": "candidate_demo",
+        "candidate_policy": "builtin-approval-strict-v1",
+        "review_status": "needs_human_review",
+        "next_action": "thin-supervisor-dev eval compare --suite approval-core --candidate-policy builtin-approval-strict-v1",
+        "suite": "approval-core",
+        "objective": "reduce_false_approval",
+        "touched_fragments": ["approval-boundary"],
+    })
+    monkeypatch.setattr("supervisor.eval.build_candidate_dossier", lambda **kwargs: {
+        "candidate": {"candidate_id": "candidate_demo", "candidate_policy": "builtin-approval-strict-v1"},
+        "proposal": {"objective": "reduce_false_approval"},
+        "review": {"review_status": "needs_human_review"},
+        "next_action": "thin-supervisor-dev eval promote-candidate --candidate-id candidate_demo --approved-by human",
+    })
+    monkeypatch.setattr("supervisor.eval.run_canary_eval", lambda *args, **kwargs: {
+        "decision": "promote",
+        "summary": {
+            "run_count": 1,
+            "decision_count": 2,
+            "mismatch_count": 0,
+            "mismatch_rate": 0.0,
+            "avg_pass_rate": 1.0,
+            "mismatch_kinds": {},
+            "friction": {"total_events": 0, "by_kind": {}, "by_signal": {}},
+        },
+        "runs": [{"run_id": "run_a"}],
+    })
+    monkeypatch.setattr("supervisor.eval.evaluate_candidate_gate", lambda review, suite, canary_report=None: {
+        "candidate_id": "candidate_demo",
+        "candidate_policy": "builtin-approval-strict-v1",
+        "baseline_policy": "builtin-approval-v1",
+        "suite": "approval-core",
+        "review_status": "needs_human_review",
+        "decision": "promote",
+        "compare": {},
+        "canary": canary_report,
+        "next_action": "thin-supervisor-dev eval promote-candidate --candidate-id candidate_demo --approved-by human",
+    })
+    monkeypatch.setattr("supervisor.eval.promote_candidate", lambda gate, **kwargs: {
+        "candidate_id": gate["candidate_id"],
+        "status": "promoted",
+        "approved_by": kwargs["approved_by"],
+    })
+
+    result = app.cmd_eval(argparse.Namespace(
+        eval_action="improve",
+        suite="approval-core",
+        suite_file=None,
+        baseline_policy="builtin-approval-v1",
+        objective="reduce_false_approval",
+        run_id=["run_a"],
+        approved_by="human",
+        force=False,
+        dry_run=False,
+        output="",
+        save_report=False,
+        config=None,
+        json=True,
+    ))
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stage"] == "promoted"
+    assert payload["promotion"]["status"] == "promoted"
+    assert payload["promotion"]["approved_by"] == "human"
+
+
 def test_eval_review_candidate_json_output(tmp_path, monkeypatch, capsys):
     runtime_dir = tmp_path / ".supervisor" / "runtime"
     candidates_dir = tmp_path / ".supervisor" / "evals" / "candidates"
@@ -1692,3 +1992,43 @@ def test_oracle_consult_returns_controlled_error_when_note_persist_raises(tmp_pa
     assert result == 1
     out = capsys.readouterr().out
     assert "failed to persist oracle note" in out.lower()
+
+
+def test_skill_install_dedupes_shared_skill_root_and_removes_legacy_alias(
+    tmp_path, monkeypatch, capsys,
+):
+    home = tmp_path / "home"
+    shared_skills = home / ".skills"
+    shared_skills.mkdir(parents=True)
+
+    codex_home = home / ".codex"
+    codex_home.mkdir()
+    (codex_home / "skills").symlink_to(shared_skills, target_is_directory=True)
+
+    claude_home = home / ".claude"
+    claude_home.mkdir()
+    (claude_home / "skills").symlink_to(shared_skills, target_is_directory=True)
+
+    legacy = shared_skills / "lh-supervisor"
+    legacy.mkdir()
+    (legacy / "SKILL.md").write_text(
+        "---\nname: thin-supervisor\nuser-invocable: true\n---\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(app.Path, "home", staticmethod(lambda: home))
+
+    result = app.cmd_skill_install(argparse.Namespace())
+
+    assert result == 0
+    assert (shared_skills / "thin-supervisor" / "SKILL.md").exists()
+    assert not legacy.exists()
+
+    visible_names = []
+    for skill_file in shared_skills.glob("*/SKILL.md"):
+        text = skill_file.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if line.startswith("name:"):
+                visible_names.append(line.split(":", 1)[1].strip())
+                break
+    assert visible_names.count("thin-supervisor") == 1
