@@ -274,6 +274,102 @@ class TestPausedSessionFields:
         assert rec.is_completed is False
 
 
+class TestControllerModeLiveDerivation:
+    def test_stale_persisted_mode_overridden_by_live_daemon(
+        self, fake_worktrees, monkeypatch
+    ):
+        """state.json says 'foreground' but a daemon now owns the worktree.
+
+        The collector must derive controller_mode from the live snapshot
+        or status/dashboard/tui mis-tag the run as foreground and bucket
+        it wrong.
+        """
+        root, child = fake_worktrees
+        _write_state(
+            child, "run_was_fg_now_daemon",
+            top_state="RUNNING", controller_mode="foreground",
+        )
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_daemons",
+            lambda: [
+                {
+                    "pid": 7, "cwd": str(child.resolve()),
+                    "socket": "/tmp/d.sock", "active_runs": 1,
+                }
+            ],
+        )
+        rec = collect_sessions()[0]
+        assert rec.is_live is True
+        assert rec.controller_mode == "daemon"
+        assert rec.tag == "daemon"
+
+    def test_foreground_pane_owner_wins_over_persisted_daemon(
+        self, fake_worktrees, monkeypatch
+    ):
+        """Live pane-owner registration trumps persisted 'daemon' mode."""
+        root, child = fake_worktrees
+        _write_state(
+            child, "run_fg_live",
+            top_state="RUNNING", controller_mode="daemon",
+        )
+        monkeypatch.setattr(
+            "supervisor.operator.session_index.list_pane_owners",
+            lambda: [{
+                "pid": 9, "cwd": str(child.resolve()),
+                "run_id": "run_fg_live", "pane_target": "%1",
+                "controller_mode": "foreground",
+            }],
+        )
+        rec = collect_sessions()[0]
+        assert rec.controller_mode == "foreground"
+        assert rec.tag == "foreground"
+
+    def test_no_live_owner_falls_back_to_persisted_mode(self, fake_worktrees):
+        """Without a live owner, use whatever state.json recorded."""
+        root, child = fake_worktrees
+        _write_state(
+            child, "run_orphan_fg",
+            top_state="RUNNING", controller_mode="foreground",
+        )
+        rec = collect_sessions()[0]
+        assert rec.is_live is False
+        assert rec.controller_mode == "foreground"
+
+
+class TestSurfaceType:
+    def test_surface_type_propagated_from_state(self, fake_worktrees):
+        """SessionRecord must carry the persisted surface so resume hints
+        render the right `--surface …` suffix for non-tmux runs."""
+        root, child = fake_worktrees
+        child_dir = child / ".supervisor" / "runtime" / "runs" / "run_jsonl"
+        child_dir.mkdir(parents=True)
+        (child_dir / "state.json").write_text(json.dumps({
+            "run_id": "run_jsonl",
+            "top_state": "RUNNING",
+            "current_node_id": "step_1",
+            "controller_mode": "daemon",
+            "surface_type": "jsonl",
+        }))
+        rec = collect_sessions()[0]
+        assert rec.surface_type == "jsonl"
+
+    def test_surface_type_empty_when_missing(self, fake_worktrees):
+        """Absent surface_type → empty string, never a silent default."""
+        root, child = fake_worktrees
+        _write_state(child, "run_no_surface", top_state="RUNNING")
+        # _write_state hardcodes surface_type="tmux", so write directly here.
+        run_dir = child / ".supervisor" / "runtime" / "runs" / "run_bare"
+        run_dir.mkdir(parents=True)
+        (run_dir / "state.json").write_text(json.dumps({
+            "run_id": "run_bare",
+            "top_state": "RUNNING",
+            "current_node_id": "step_1",
+            "controller_mode": "daemon",
+        }))
+        rec = next(r for r in collect_sessions() if r.run_id == "run_bare")
+        assert rec.surface_type == ""
+
+
 class TestGlobalRecencySort:
     def test_records_sorted_by_last_update_desc(self, fake_worktrees):
         """Most recently touched run appears first, across worktrees."""

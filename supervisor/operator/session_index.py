@@ -69,6 +69,7 @@ class SessionRecord:
     next_action: str
     last_checkpoint_summary: str
     last_update_at: str
+    surface_type: str = ""  # persisted surface ("tmux", "jsonl", "open_relay", …)
     tag: str = ""  # derived display tag; see _derive_tag
 
     def as_dict(self) -> dict:
@@ -301,7 +302,7 @@ def collect_sessions(*, local_only: bool = False) -> list[SessionRecord]:
                 continue
             seen.add(run_id)
             top_state = state.get("top_state", "UNKNOWN")
-            controller_mode = state.get("controller_mode", "") or "local"
+            persisted_mode = state.get("controller_mode", "") or "local"
             is_live, is_orphaned, is_completed, socket = _liveness(
                 run_id,
                 worktree,
@@ -309,6 +310,16 @@ def collect_sessions(*, local_only: bool = False) -> list[SessionRecord]:
                 daemon_by_cwd=daemon_by_cwd,
                 fg_runs=fg_runs,
             )
+            # Prefer the live snapshot over persisted state: a stale
+            # controller_mode in state.json must not override who actually
+            # owns the run right now, or status/dashboard/tui would
+            # mis-bucket live runs.
+            if run_id in fg_runs and fg_runs[run_id].get("controller_mode") == "foreground":
+                controller_mode = "foreground"
+            elif worktree in daemon_by_cwd:
+                controller_mode = "daemon"
+            else:
+                controller_mode = persisted_mode
             summary = summarize_state(state)
             tag = _derive_tag(
                 is_live=is_live,
@@ -334,6 +345,7 @@ def collect_sessions(*, local_only: bool = False) -> list[SessionRecord]:
                     next_action=summary.get("next_action", ""),
                     last_checkpoint_summary=summary.get("status_reason", ""),
                     last_update_at=last_update_at,
+                    surface_type=state.get("surface_type", "") or "",
                     tag=tag,
                 )
             )

@@ -1821,7 +1821,11 @@ def _display_view(record) -> dict:
             "current_node_id": record.current_node,
             "pane_target": record.pane_target,
             "spec_path": record.spec_path,
-            "surface_type": "tmux",
+            # Preserve the persisted surface so the resume hint renders
+            # the correct `--surface …` suffix for non-tmux runs (jsonl,
+            # open_relay).  Empty means summarize_state omits the flag,
+            # matching the old dict(state) passthrough.
+            "surface_type": record.surface_type,
             "human_escalations": [{"reason": reason}],
         }
         rewritten = summarize_state(synthetic)

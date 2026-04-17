@@ -2198,6 +2198,36 @@ def test_status_empty_with_no_daemons_anywhere_says_no_daemons(
     assert "No daemons running" in out
 
 
+def test_status_orphaned_jsonl_run_emits_jsonl_resume_hint(
+    tmp_path, monkeypatch, capsys,
+):
+    """Orphaned RUNNING run with surface_type=jsonl must not get a tmux
+    resume command.  `_display_view` used to hardcode --surface tmux,
+    which produced a wrong resume hint for non-tmux surfaces."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
+    run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_jsonl_orphan"
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(json.dumps({
+        "run_id": "run_jsonl_orphan",
+        "top_state": "RUNNING",
+        "current_node_id": "step_1",
+        "pane_target": "%9",
+        "spec_path": "/tmp/spec.yaml",
+        "surface_type": "jsonl",
+        "controller_mode": "daemon",
+    }))
+    _patch_session_index_registries(monkeypatch)
+
+    result = app.cmd_status(argparse.Namespace(config=None, local=False))
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "run_jsonl_orphan" in out
+    assert "--surface jsonl" in out
+    assert "--surface tmux" not in out
+
+
 def test_status_shows_orphaned_run_from_child_worktree(
     tmp_path, monkeypatch, capsys,
 ):
