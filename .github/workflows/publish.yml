@@ -16,7 +16,7 @@ jobs:
           python-version: "3.10"
       - name: Validate tag points to current main HEAD
         run: |
-          git fetch origin main --tags
+          git fetch origin main
           TAG_SHA="$(git rev-parse "$GITHUB_SHA")"
           MAIN_SHA="$(git rev-parse origin/main)"
           if [ "$TAG_SHA" != "$MAIN_SHA" ]; then
