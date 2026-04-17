@@ -26,6 +26,7 @@ def test_publish_workflow_requires_tag_on_main_head_and_only_publishes_to_pypi()
     ]
     assert len(validate_steps) == 1
     assert "origin/main" in validate_steps[0]["run"]
+    assert "--tags" not in validate_steps[0]["run"]
     assert any(step.get("run") == "python -m build" for step in build_steps)
     assert any("actions/upload-artifact" in step.get("uses", "") for step in build_steps)
 
