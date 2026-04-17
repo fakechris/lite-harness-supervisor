@@ -12,13 +12,10 @@ if terminal is too small.
 from __future__ import annotations
 
 import curses
-import json
 import time
-from pathlib import Path
 from typing import Any
 
-from supervisor.daemon.client import DaemonClient
-from supervisor.global_registry import list_daemons, list_known_worktrees, list_pane_owners
+from supervisor.operator.session_index import collect_sessions
 from supervisor.operator.actions import (
     ActionUnavailable,
     OperatorJob,
@@ -35,151 +32,38 @@ from supervisor.operator.actions import (
     submit_explain_exchange,
 )
 from supervisor.operator.run_context import ActionMode, RunContext
-from supervisor.pause_summary import summarize_state
-
-# Default runtime dir — same as app.py
-_RUNTIME_DIR = Path(".supervisor/runtime")
 
 
 # ── Data collection ────────────────────────────────────────────────
 
 def collect_runs(daemons: list[dict] | None = None) -> list[dict]:
-    """Collect all runs from daemons, foreground owners, and local disk state.
+    """Return all runs in the canonical global session universe.
 
-    Includes orphaned and completed runs from disk so the TUI covers
-    the same scope as the existing CLI status/dashboard commands.
+    Thin adapter over ``collect_sessions()``: every read surface (status,
+    dashboard, tui, command_dispatch) consumes the same normalized record
+    set, so they can never disagree on whether a run exists.
+
+    The ``daemons`` argument is retained for backward compatibility with
+    existing callers but is no longer consulted — discovery is driven by
+    ``session_index`` registries.
     """
+    del daemons  # unused; session_index owns discovery
+    records = collect_sessions()
     items: list[dict] = []
-    seen: set[str] = set()
-
-    if daemons is None:
-        daemons = list_daemons()
-
-    for daemon in daemons:
-        sock = daemon.get("socket", "")
-        if not sock:
-            continue
-        try:
-            client = DaemonClient(sock_path=sock)
-            result = client.status()
-            if result.get("ok"):
-                for r in result.get("runs", []):
-                    rid = r["run_id"]
-                    if rid in seen:
-                        continue
-                    seen.add(rid)
-                    items.append({
-                        "run_id": rid,
-                        "tag": "daemon",
-                        "top_state": r.get("top_state", "?"),
-                        "current_node": r.get("current_node", ""),
-                        "pane_target": r.get("pane_target", "?"),
-                        "worktree": daemon.get("cwd", ""),
-                        "socket": sock,
-                    })
-        except (ConnectionRefusedError, FileNotFoundError, OSError):
-            pass
-
-    for owner in list_pane_owners():
-        if owner.get("controller_mode") != "foreground":
-            continue
-        rid = owner.get("run_id", "?")
-        if rid in seen:
-            continue
-        seen.add(rid)
+    for rec in records:
         items.append({
-            "run_id": rid,
-            "tag": "foreground",
-            "top_state": "RUNNING",
-            "current_node": "",
-            "pane_target": owner.get("pane_target", "?"),
-            "worktree": owner.get("cwd", ""),
-            "socket": "",
+            "run_id": rec.run_id,
+            "tag": rec.tag or "local",
+            "top_state": rec.top_state,
+            "current_node": rec.current_node,
+            "pane_target": rec.pane_target or "?",
+            "worktree": rec.worktree_root,
+            "socket": rec.daemon_socket,
+            "status_reason": rec.last_checkpoint_summary,
         })
-
-    # Scan local disk state for orphaned/completed runs not in daemon registry
-    _collect_local_runs(items, seen)
-
     return items
 
 
-def _collect_local_runs(items: list[dict], seen: set[str]) -> None:
-    """Scan on-disk run directories for orphaned/completed runs.
-
-    Scans the current cwd's runtime dir plus any worktree dirs from
-    the global registry (daemons + pane owners).
-    """
-    runtime_dirs: list[tuple[Path, str]] = [(_RUNTIME_DIR / "runs", "")]
-    # Also scan worktrees known from registry
-    for daemon in list_daemons():
-        wt = daemon.get("cwd", "")
-        if wt:
-            d = Path(wt) / ".supervisor" / "runtime" / "runs"
-            if d.is_dir() and d.resolve() != runtime_dirs[0][0].resolve():
-                runtime_dirs.append((d, wt))
-    for owner in list_pane_owners():
-        wt = owner.get("cwd", "")
-        if wt:
-            d = Path(wt) / ".supervisor" / "runtime" / "runs"
-            if d.is_dir() and not any(d.resolve() == rd.resolve() for rd, _ in runtime_dirs):
-                runtime_dirs.append((d, wt))
-    # Also scan worktrees from persistent registry (covers dead daemon/pane cases)
-    for wt in list_known_worktrees():
-        d = Path(wt) / ".supervisor" / "runtime" / "runs"
-        if d.is_dir() and not any(d.resolve() == rd.resolve() for rd, _ in runtime_dirs):
-            runtime_dirs.append((d, wt))
-
-    for runs_dir, worktree in runtime_dirs:
-        if not runs_dir.is_dir():
-            continue
-        _scan_runs_dir(runs_dir, worktree, items, seen)
-
-
-def _scan_runs_dir(runs_dir: Path, worktree: str, items: list[dict], seen: set[str]) -> None:
-    """Scan a single runs directory for on-disk state files."""
-    # Collect run dirs with their state.json mtime for accurate recency sort.
-    # Directory mtime doesn't update when state.json content changes.
-    run_dirs: list[tuple[Path, float]] = []
-    for run_dir in runs_dir.iterdir():
-        state_path = run_dir / "state.json"
-        if state_path.exists():
-            try:
-                run_dirs.append((run_dir, state_path.stat().st_mtime))
-            except OSError:
-                pass
-    run_dirs.sort(key=lambda t: t[1], reverse=True)
-
-    for run_dir, _ in run_dirs:
-        state_path = run_dir / "state.json"
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        rid = state.get("run_id", "")
-        if not rid or rid in seen:
-            continue
-        seen.add(rid)
-        top = state.get("top_state", "UNKNOWN")
-        summary = summarize_state(state)
-        # Determine tag
-        if top in ("COMPLETED", "FAILED", "ABORTED"):
-            tag = "completed"
-        elif top in ("RUNNING", "GATING", "VERIFYING"):
-            tag = "orphaned"
-        elif top == "PAUSED_FOR_HUMAN":
-            tag = "paused"
-        else:
-            tag = "local"
-        items.append({
-            "run_id": rid,
-            "tag": tag,
-            "top_state": top,
-            "current_node": state.get("current_node_id", ""),
-            "pane_target": state.get("pane_target", "?"),
-            "worktree": worktree or state.get("workspace_root", ""),
-            "socket": "",
-            "status_reason": summary.get("status_reason", ""),
-        })
 
 
 # ── Formatting helpers ─────────────────────────────────────────────

@@ -1924,77 +1924,26 @@ def cmd_status(args):
 
 
 def cmd_dashboard(args):
-    """Interactive dashboard: numbered list of all runs, press a key to inspect."""
-    from supervisor.daemon.client import DaemonClient
+    """Interactive dashboard: numbered list of all runs, press a key to inspect.
+
+    Uses the canonical session_index so `dashboard` sees exactly the same
+    run universe as `status` and `tui`. No direct daemon fan-out or local
+    scan — collect_sessions() is the single source of truth.
+    """
+    from supervisor.operator.session_index import collect_sessions
 
     items: list[dict] = []
-    seen_run_ids: set[str] = set()
+    for rec in collect_sessions():
+        items.append({
+            "run_id": rec.run_id,
+            "tag": rec.tag or "local",
+            "state": rec.top_state,
+            "node": rec.current_node,
+            "pane": rec.pane_target or "?",
+            "worktree": rec.worktree_root,
+        })
 
-    # Collect runs from ALL daemons across worktrees
     daemons = _list_global_daemons()
-    for daemon in daemons:
-        sock = daemon.get("socket", "")
-        if not sock:
-            continue
-        try:
-            remote = DaemonClient(sock_path=sock)
-            result = remote.status()
-            if result.get("ok"):
-                for r in result.get("runs", []):
-                    rid = r["run_id"]
-                    if rid in seen_run_ids:
-                        continue
-                    seen_run_ids.add(rid)
-                    worktree = daemon.get("cwd", "")
-                    items.append({
-                        "run_id": rid,
-                        "tag": "daemon",
-                        "state": r["top_state"],
-                        "node": r.get("current_node", ""),
-                        "pane": r.get("pane_target", "?"),
-                        "worktree": worktree,
-                    })
-        except (ConnectionRefusedError, FileNotFoundError, OSError):
-            pass  # unreachable daemon — skip
-
-    # Collect foreground runs from global pane lock registry
-    for owner in list_pane_owners():
-        if owner.get("controller_mode") != "foreground":
-            continue
-        rid = owner.get("run_id", "?")
-        if rid in seen_run_ids:
-            continue
-        seen_run_ids.add(rid)
-        items.append({
-            "run_id": rid,
-            "tag": "foreground",
-            "state": "RUNNING",
-            "node": "",
-            "pane": owner.get("pane_target", "?"),
-            "worktree": owner.get("cwd", ""),
-        })
-
-    # Collect local state (orphaned, etc.)
-    for state in _find_local_run_summaries():
-        display = _summarize_local_state_for_hint(state)
-        rid = display.get("run_id", "?")
-        if rid in seen_run_ids:
-            continue
-        seen_run_ids.add(rid)
-        if display.get("orphaned_local_state"):
-            tag = "orphaned"
-        elif state.get("controller_mode") == "foreground":
-            tag = "foreground"
-        else:
-            tag = "local"
-        items.append({
-            "run_id": rid,
-            "tag": tag,
-            "state": display.get("top_state", "?"),
-            "node": display.get("current_node_id", ""),
-            "pane": display.get("pane_target", "?"),
-            "worktree": display.get("workspace_root", ""),
-        })
     if daemons:
         print("Daemons:")
         for d in daemons:
