@@ -18,10 +18,12 @@ thin-supervisor fixes this. It's an acceptance-centered run supervisor that sits
 > - [docs/reviews/2026-04-11-deep-code-review.md](docs/reviews/2026-04-11-deep-code-review.md) — latest deep code review log and remaining-risk audit
 > - [docs/reviews/2026-04-12-amp-supervisor-capability-review.md](docs/reviews/2026-04-12-amp-supervisor-capability-review.md) — Amp-vs-thin-supervisor capability review and oracle-layer roadmap
 
-## Current Status (0.3.2)
+## Current Status (0.3.3)
 
 - **Global-first observability is live.** `status`, `dashboard`, `tui`, and `observe` now read from one canonical session index, so runs stay visible across worktrees even after daemon idle shutdown.
 - **The runtime state machine is split by intent.** `ATTACHED`, `RECOVERY_NEEDED`, and `pause_class` now distinguish attach-boundary tightening, operational recovery, and true human-owned pauses.
+- **Structured checkpoint semantics are live.** The runtime now normalizes one canonical `NormalizedCheckpoint`, accepts v2 semantic fields (`progress_class`, `evidence_scope`, `escalation_class`, `requires_authorization`, `blocking_inputs`, `reason_code`), and routes contradictions by class instead of re-guessing everything from prose.
+- **Legacy sunset policy is encoded, not hand-waved.** `reason_code` is frozen to `esc/rec/ver/sem`, live-ingest sunset uses the 14-day dual-signal trigger, and replay/export keep permanent v1 read compatibility.
 - **Operator IM channels are live.** Telegram and Lark/Feishu provider instances are merged into one logical command surface per bot/app, with one inbound owner and multi-target outbound delivery.
 - **tmux injection is harder to wedge.** A readiness gate now checks whether the pane is still changing, actively typing, or actually idle before issuing `send-keys`.
 - **The policy-tuning loop is end-to-end.** `thin-supervisor-dev eval` now covers compare, canary, candidate review/status, gating, promotion, and the one-command `eval improve` wrapper.

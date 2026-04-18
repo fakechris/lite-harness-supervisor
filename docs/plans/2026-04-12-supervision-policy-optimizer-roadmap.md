@@ -10,7 +10,7 @@
 
 ---
 
-## Status Snapshot (updated 2026-04-17 / release 0.3.2)
+## Status Snapshot (updated 2026-04-17 / release 0.3.3)
 
 This roadmap is no longer a purely forward-looking plan. Most of the original slices have now landed on `main`.
 
@@ -18,12 +18,12 @@ This roadmap is no longer a purely forward-looking plan. Most of the original sl
 |------|--------|------------------|
 | PR1: Control plane correctness | **Shipped** | attach/resume hardening, `ATTACHED` / `RECOVERY_NEEDED`, global observability plane, stronger tmux injection gating |
 | PR2: Eval surface expansion | **Shipped** | approval, clarify, routing, escalation, finish-gate, and pause-UX suites all exist under `thin-supervisor-dev eval` |
-| PR3: Weighted replay + friction compare | **Partial** | replay, compare, friction memory, canary aggregation, and rollout ledgers are live; richer typed weighting and less heuristic semantics are still open |
+| PR3: Weighted replay + friction compare | **Partial** | replay, compare, friction memory, canary aggregation, rollout ledgers, and the v2 robustness/sunset harness are live; richer typed weighting and less heuristic semantics are still open |
 | PR4: Contract / strategy split | **Shipped** | frozen contract docs and strategy fragments are separated in the skill layout |
 | PR5: Candidate generation with lineage | **Shipped** | propose, review-candidate, candidate-status, gate-candidate, promote-candidate, and `eval improve` are all live |
 | PR6: Shadow canary runner | **Shipped** | rollout recording, gate/promotion workflow, and saved eval reports are implemented |
 
-The next milestone is no longer “build the optimizer substrate.” It is **reduce semantic fragility**: move meaning out of harness regexes and into structured skill/protocol outputs without turning every gate into a slow inference call.
+The next milestone is no longer “build the optimizer substrate.” It is **reduce semantic fragility further**: shrink the remaining heuristic fallback set now that structured checkpoint semantics, contradiction routing, and the sunset lifecycle are live.
 
 ---
 
