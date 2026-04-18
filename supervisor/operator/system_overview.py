@@ -18,6 +18,7 @@ both layers.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Iterable, Mapping
 
@@ -31,7 +32,11 @@ from .models import (
     SystemSnapshot,
     SystemTimelineEvent,
 )
-from .session_index import SessionRecord, collect_sessions
+from .session_index import (
+    SessionRecord,
+    _find_enclosing_worktree_root,
+    collect_sessions,
+)
 
 
 def fold_counts(
@@ -91,11 +96,17 @@ def build_alerts(
     """
     alerts: list[SystemAlert] = []
 
-    # A paused run with an explicit pause_reason always needs operator
-    # attention, whether or not it currently has a daemon.  The common
-    # "paused + daemon idle-shut-down" shape must surface here and not
-    # be masked into the orphan bucket alone.
-    paused = [s for s in sessions if not s.is_completed and s.pause_reason]
+    # A paused run needs operator attention whether or not it currently
+    # has a daemon.  Classify by ``top_state`` — the authoritative
+    # signal — rather than ``pause_reason``, which can be empty on
+    # legacy or malformed runs (and was the source of a miss flagged in
+    # review: paused_for_human runs with no reason text were silently
+    # dropping out of the alert list).  ``pause_reason`` is used only
+    # for display downstream.
+    paused = [
+        s for s in sessions
+        if not s.is_completed and s.top_state == "PAUSED_FOR_HUMAN"
+    ]
     if paused:
         alerts.append(SystemAlert(
             kind="paused_for_human",
@@ -106,7 +117,10 @@ def build_alerts(
     # Orphan alert covers sessions with no live owner that are *not*
     # already being flagged as paused_for_human, so the operator sees
     # each actionable condition once.
-    orphaned = [s for s in sessions if s.is_orphaned and not s.pause_reason]
+    orphaned = [
+        s for s in sessions
+        if s.is_orphaned and s.top_state != "PAUSED_FOR_HUMAN"
+    ]
     if orphaned:
         alerts.append(SystemAlert(
             kind="orphaned",
@@ -219,16 +233,30 @@ def _session_event_plane_map(
     sessions: Iterable[SessionRecord],
 ) -> dict[str, RunEventPlaneSummary]:
     """Lift each session's persisted ``event_plane`` dict into a typed
-    ``RunEventPlaneSummary`` keyed by run_id.  Sessions without an
-    event-plane block are skipped so ``fold_counts`` treats them as
-    zero-backlog."""
+    ``RunEventPlaneSummary`` keyed by ``session_id``.
+
+    Event-plane state (waits, mailbox items, requests) is correlated by
+    ``session_id`` — a single logical session can own several run_ids
+    across resume/restart cycles, and every one of those runs folds the
+    *same* event-plane log.  Keying by run_id here would cause
+    ``fold_counts`` to sum the same backlog once per run, inflating
+    counts (1 mailbox item + 2 runs → ``mailbox_new=2``).
+
+    Sessions without a session_id fall back to the run_id so
+    pre-session-first runs still contribute a single entry without
+    colliding with each other.  Sessions without an event-plane block
+    are skipped so ``fold_counts`` treats them as zero-backlog.
+    """
     out: dict[str, RunEventPlaneSummary] = {}
     for s in sessions:
         ep = getattr(s, "event_plane", None)
         if not ep:
             continue
+        key = s.session_id or s.run_id
+        if not key or key in out:
+            continue
         try:
-            out[s.run_id] = RunEventPlaneSummary(
+            out[key] = RunEventPlaneSummary(
                 waits_open=int(ep.get("waits_open", 0)),
                 mailbox_new=int(ep.get("mailbox_new", 0)),
                 mailbox_acknowledged=int(ep.get("mailbox_acknowledged", 0)),
@@ -262,6 +290,12 @@ def load_system_snapshot(
     sessions = collect_sessions(local_only=local_only)
     event_plane = _session_event_plane_map(sessions)
     daemons = list_daemons()
+    if local_only:
+        # Narrow the daemon count to daemons whose cwd resolves to the
+        # enclosing local worktree — otherwise ``--local`` would narrow
+        # sessions but keep showing every daemon across the machine,
+        # which is internally inconsistent and misreports local load.
+        daemons = _filter_local_daemons(daemons)
     runtime_roots: list[str] = []
     seen_roots: set[str] = set()
     for s in sessions:
@@ -279,3 +313,28 @@ def load_system_snapshot(
         daemons=len(daemons),
         recent_timeline=recent,
     )
+
+
+def _filter_local_daemons(daemons: list[dict]) -> list[dict]:
+    """Return the subset of daemons whose cwd resolves to the local
+    enclosing worktree root.
+
+    ``collect_sessions(local_only=True)`` uses the same enclosing-root
+    derivation (``_find_enclosing_worktree_root``), so this keeps the
+    daemon count and session list referring to the same scope.
+    """
+    try:
+        local_root = Path(_find_enclosing_worktree_root(os.getcwd())).resolve()
+    except (OSError, RuntimeError):
+        return daemons
+    filtered: list[dict] = []
+    for d in daemons:
+        raw = d.get("cwd", "")
+        if not raw:
+            continue
+        try:
+            if Path(raw).resolve() == local_root:
+                filtered.append(d)
+        except (OSError, RuntimeError):
+            continue
+    return filtered

@@ -1077,6 +1077,50 @@ class TestDaemonExternalTask:
         listing = server._do_mailbox_list({"session_id": "s1"})
         assert listing["items"][0]["wake_decision"] == "notify_operator"
 
+    def test_deferred_wake_surfaces_v1_limitation_warning(self, tmp_path, caplog):
+        """When wake_policy returns ``defer`` (run is busy at ingest),
+        nothing re-evaluates on later state changes in v1.  Warn so the
+        limitation is visible in logs rather than silent — matching the
+        existing ``wake_worker`` not-yet-wired warning.  Review finding."""
+        import logging
+
+        server = self._server(tmp_path)
+        reg = server._do_external_task_create({
+            "session_id": "s1",
+            "run_id": "run_busy",
+            "provider": "external_model",
+            "target_ref": "PR#1",
+            "blocking_policy": "block_session",
+        })
+        # Stub evaluate_wake to return 'defer' deterministically.
+        from supervisor.event_plane.wake_policy import WakeDecision
+
+        import supervisor.daemon.server as server_mod
+
+        monkeypatched = lambda *a, **kw: WakeDecision(
+            "defer", "block_session but run is RUNNING"
+        )
+        orig = server_mod.evaluate_wake
+        server_mod.evaluate_wake = monkeypatched
+        try:
+            with caplog.at_level(logging.WARNING, logger="supervisor.daemon.server"):
+                result = server._do_external_result_ingest({
+                    "request_id": reg["request_id"],
+                    "provider": "external_model",
+                    "result_kind": "review_comments",
+                    "summary": "nit",
+                })
+        finally:
+            server_mod.evaluate_wake = orig
+
+        assert result["ok"] is True
+        assert result["wake_decision"] == "defer"
+        assert any(
+            "deferred wake" in rec.message
+            and "v1 does not re-evaluate" in rec.message
+            for rec in caplog.records
+        ), caplog.records
+
     def test_status_surfaces_event_plane_counts_per_session(self, tmp_path):
         spec_path = tmp_path / "test.yaml"
         spec_path.write_text(

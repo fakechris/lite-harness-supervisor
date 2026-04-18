@@ -162,3 +162,141 @@ def test_list_requests_by_session_handles_run_id_none(tmp_path):
     by_ids = {r.request_id: r for r in by_session}
     assert by_ids[plan_req.request_id].run_id is None
     assert by_ids[exec_req.request_id].run_id == "run_x"
+
+
+# ── out-of-order guard (review finding) ────────────────────────────────
+#
+# The helper ``append_mailbox_item`` / ``append_request`` restamps
+# ``updated_at`` to ``now()`` on every write, so under the single-writer
+# daemon the physical append order matches the logical order by
+# construction.  The risk is crash-replay / concurrent-writer / clock-skew
+# / manual-fixture scenarios where a record arrives physically late with
+# an older ``updated_at`` — these tests write directly to the JSONL
+# files to simulate that out-of-order landing.
+
+
+def _write_record(path, record: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    import json as _json
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(_json.dumps(record) + "\n")
+
+
+def test_latest_mailbox_item_ignores_stale_out_of_order_append(tmp_path):
+    """A stale callback physically arriving after a newer update must
+    not overwrite the newer logical state.  Review finding — fold by
+    ``updated_at``, not by append order."""
+    store = EventPlaneStore(str(tmp_path / "runtime"))
+    mid = "mb_test"
+    _write_record(store.session_mailbox_path, {
+        "mailbox_item_id": mid, "session_id": "s1", "request_id": "r1",
+        "source_kind": "external_review", "summary": "review completed",
+        "payload": {}, "delivery_status": "acknowledged",
+        "wake_decision": "", "run_id": None,
+        "created_at": "2026-04-18T10:00:00+00:00",
+        "updated_at": "2026-04-18T12:00:00+00:00",
+    })
+    # Stale callback: physically later, logically older.
+    _write_record(store.session_mailbox_path, {
+        "mailbox_item_id": mid, "session_id": "s1", "request_id": "r1",
+        "source_kind": "external_review", "summary": "review pending (stale)",
+        "payload": {}, "delivery_status": "new",
+        "wake_decision": "", "run_id": None,
+        "created_at": "2026-04-18T10:00:00+00:00",
+        "updated_at": "2026-04-18T11:00:00+00:00",
+    })
+    latest = store.latest_mailbox_item(mid)
+    assert latest is not None
+    assert latest.delivery_status == "acknowledged"
+    assert "stale" not in latest.summary
+
+
+def test_list_mailbox_items_reflects_latest_logical_state(tmp_path):
+    """``list_mailbox_items`` must return the logical latest per id,
+    not whatever physically appeared last in the log."""
+    store = EventPlaneStore(str(tmp_path / "runtime"))
+    mid = "mb_list"
+    _write_record(store.session_mailbox_path, {
+        "mailbox_item_id": mid, "session_id": "s1", "request_id": "r1",
+        "source_kind": "external_review", "summary": "",
+        "payload": {}, "delivery_status": "acknowledged",
+        "wake_decision": "", "run_id": None,
+        "created_at": "2026-04-18T10:00:00+00:00",
+        "updated_at": "2026-04-18T12:00:00+00:00",
+    })
+    _write_record(store.session_mailbox_path, {
+        "mailbox_item_id": mid, "session_id": "s1", "request_id": "r1",
+        "source_kind": "external_review", "summary": "",
+        "payload": {}, "delivery_status": "new",
+        "wake_decision": "", "run_id": None,
+        "created_at": "2026-04-18T10:00:00+00:00",
+        "updated_at": "2026-04-18T11:00:00+00:00",
+    })
+    new_items = store.list_mailbox_items("s1", delivery_status="new")
+    acked_items = store.list_mailbox_items("s1", delivery_status="acknowledged")
+    assert new_items == []
+    assert len(acked_items) == 1
+
+
+def test_latest_wait_ignores_stale_out_of_order_append(tmp_path):
+    """A stale ``waiting`` record arriving after ``satisfied`` must not
+    flip the wait back to open."""
+    store = EventPlaneStore(str(tmp_path / "runtime"))
+    wid = "wait_test"
+    # Original waiting record.
+    _write_record(store.session_waits_path, {
+        "wait_id": wid, "session_id": "s1", "request_id": "r1",
+        "wait_kind": "external_review", "status": "waiting",
+        "resume_policy": "", "run_id": None,
+        "entered_at": "2026-04-18T10:00:00+00:00",
+        "resolved_at": "", "deadline_at": "",
+    })
+    # Resolved update.
+    _write_record(store.session_waits_path, {
+        "wait_id": wid, "session_id": "s1", "request_id": "r1",
+        "wait_kind": "external_review", "status": "satisfied",
+        "resume_policy": "", "run_id": None,
+        "entered_at": "2026-04-18T10:00:00+00:00",
+        "resolved_at": "2026-04-18T11:00:00+00:00",
+        "deadline_at": "",
+    })
+    # Stale retry of the waiting record — physically newer but logically older.
+    _write_record(store.session_waits_path, {
+        "wait_id": wid, "session_id": "s1", "request_id": "r1",
+        "wait_kind": "external_review", "status": "waiting",
+        "resume_policy": "", "run_id": None,
+        "entered_at": "2026-04-18T09:00:00+00:00",
+        "resolved_at": "", "deadline_at": "",
+    })
+    latest = store.latest_wait(wid)
+    assert latest is not None
+    assert latest.status == "satisfied"
+    open_waits = store.list_open_waits()
+    assert not any(w.wait_id == wid for w in open_waits)
+
+
+def test_latest_request_ignores_stale_out_of_order_append(tmp_path):
+    """Request status must not regress when a stale update arrives late."""
+    store = EventPlaneStore(str(tmp_path / "runtime"))
+    rid = "req_test"
+    _write_record(store.external_tasks_path, {
+        "record_type": "request",
+        "request_id": rid, "session_id": "s1", "run_id": None,
+        "phase": "execute", "task_kind": "review",
+        "provider": "external_model", "target_ref": "pr1",
+        "blocking_policy": "notify_only", "status": "completed",
+        "created_at": "2026-04-18T09:00:00+00:00",
+        "updated_at": "2026-04-18T12:00:00+00:00",
+    })
+    _write_record(store.external_tasks_path, {
+        "record_type": "request",
+        "request_id": rid, "session_id": "s1", "run_id": None,
+        "phase": "execute", "task_kind": "review",
+        "provider": "external_model", "target_ref": "pr1",
+        "blocking_policy": "notify_only", "status": "in_flight",
+        "created_at": "2026-04-18T09:00:00+00:00",
+        "updated_at": "2026-04-18T10:00:00+00:00",
+    })
+    latest = store.latest_request(rid)
+    assert latest is not None
+    assert latest.status == "completed"
