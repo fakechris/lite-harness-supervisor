@@ -2586,3 +2586,82 @@ def test_cmd_waits_prints_open_waits(monkeypatch, capsys):
     assert "wait_1" in out
     assert "external_review" in out
     assert "waiting" in out
+
+
+# ─── Task 7: plan-phase review request CLI ──────────────────────────
+
+def test_cmd_review_request_plan_phase_without_run_id(monkeypatch, capsys):
+    """`review request --phase plan` must not require --run-id (Task 7)."""
+
+    captured: dict = {}
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        def is_running(self):
+            return True
+
+        def external_task_create(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "ok": True,
+                "request_id": "req_plan_1",
+                "wait_id": "wait_plan_1",
+                "session_id": kwargs["session_id"],
+            }
+
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _Client)
+
+    args = argparse.Namespace(
+        session_id="s_plan",
+        provider="external_model",
+        target_ref="spec:intro.md",
+        run_id="",
+        phase="plan",
+        task_kind="review",
+        blocking_policy="notify_only",
+    )
+    rc = app.cmd_review_request(args)
+    assert rc == 0
+    assert captured["session_id"] == "s_plan"
+    assert captured["phase"] == "plan"
+    assert captured["run_id"] == ""
+    out = capsys.readouterr().out
+    assert "req_plan_1" in out
+    assert "wait_plan_1" in out
+
+
+def test_cmd_review_result_reports_wake_decision(monkeypatch, capsys):
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        def is_running(self):
+            return True
+
+        def external_result_ingest(self, **kwargs):
+            return {
+                "ok": True,
+                "result_id": "res_1",
+                "mailbox_item_id": "mb_1",
+                "session_id": "s_plan",
+                "wake_decision": "notify_operator",
+            }
+
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _Client)
+
+    args = argparse.Namespace(
+        request_id="req_plan_1",
+        provider="external_model",
+        result_kind="analysis",
+        summary="ok",
+        payload_json="",
+        idempotency_key="",
+    )
+    rc = app.cmd_review_result(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "res_1" in out
+    assert "mb_1" in out
+    assert "notify_operator" in out

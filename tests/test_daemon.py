@@ -1156,3 +1156,39 @@ class TestDaemonExternalTask:
 
         session_log = (run_dir / "session_log.jsonl").read_text(encoding="utf-8")
         assert "external_task_requested" in session_log
+
+    def test_phase_plan_request_with_no_run_id_succeeds_over_ipc(self, tmp_path):
+        """Task 7: phase=plan with no run_id correlates by session_id alone.
+
+        The daemon must accept a plan-phase external-task registration even
+        when no run exists yet, and the follow-up result ingest must land in
+        the mailbox under the same session_id.
+        """
+        server = self._server(tmp_path)
+        reg = server._do_external_task_create({
+            "session_id": "s_plan_ipc",
+            "provider": "external_model",
+            "target_ref": "spec:intro.md",
+            "phase": "plan",
+            "task_kind": "review",
+            "blocking_policy": "notify_only",
+            # no run_id
+        })
+        assert reg["ok"] is True
+        assert reg["session_id"] == "s_plan_ipc"
+
+        resp = server._do_external_result_ingest({
+            "request_id": reg["request_id"],
+            "provider": "external_model",
+            "result_kind": "analysis",
+            "summary": "plan ok",
+        })
+        assert resp["ok"] is True
+
+        listing = server._do_mailbox_list({"session_id": "s_plan_ipc"})
+        assert listing["ok"] is True
+        assert len(listing["items"]) == 1
+        assert listing["items"][0]["run_id"] is None
+        # Wake decision still computed on plan-phase item (no run attached,
+        # blocking_policy=notify_only → notify_operator).
+        assert resp.get("wake_decision") == "notify_operator"

@@ -905,6 +905,69 @@ def cmd_mailbox(args):
     return 0
 
 
+def cmd_review_request(args):
+    """Register an external review request (works for plan or execute phase)."""
+    from supervisor.daemon.client import DaemonClient
+
+    client = DaemonClient()
+    if not client.is_running():
+        print("Daemon not running. Start with: thin-supervisor daemon start")
+        return 1
+
+    result = client.external_task_create(
+        session_id=args.session_id,
+        provider=args.provider,
+        target_ref=args.target_ref,
+        run_id=getattr(args, "run_id", "") or "",
+        phase=getattr(args, "phase", "execute") or "execute",
+        task_kind=getattr(args, "task_kind", "review") or "review",
+        blocking_policy=getattr(args, "blocking_policy", "notify_only") or "notify_only",
+    )
+    if not result.get("ok"):
+        print(f"Error: {result.get('error', 'unknown')}")
+        return 1
+    print(f"request_id: {result['request_id']}")
+    print(f"wait_id: {result['wait_id']}")
+    print(f"session_id: {result['session_id']}")
+    return 0
+
+
+def cmd_review_result(args):
+    """Ingest an external review result for a pending request."""
+    from supervisor.daemon.client import DaemonClient
+
+    client = DaemonClient()
+    if not client.is_running():
+        print("Daemon not running. Start with: thin-supervisor daemon start")
+        return 1
+
+    payload: dict = {}
+    raw = getattr(args, "payload_json", "") or ""
+    if raw:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            print(f"Error: --payload-json must be valid JSON: {exc}")
+            return 1
+
+    result = client.external_result_ingest(
+        request_id=args.request_id,
+        provider=args.provider,
+        result_kind=args.result_kind,
+        summary=getattr(args, "summary", "") or "",
+        payload=payload,
+        idempotency_key=getattr(args, "idempotency_key", "") or "",
+    )
+    if not result.get("ok"):
+        print(f"Error: {result.get('error', 'unknown')}")
+        return 1
+    print(f"result_id: {result.get('result_id', '')}")
+    print(f"mailbox_item_id: {result.get('mailbox_item_id', '')}")
+    if result.get("wake_decision"):
+        print(f"wake_decision: {result['wake_decision']}")
+    return 0
+
+
 def cmd_waits(args):
     """List open session waits (event-plane surface)."""
     from supervisor.daemon.client import DaemonClient
@@ -2590,6 +2653,29 @@ def build_runtime_parser() -> argparse.ArgumentParser:
     p_note_list.add_argument("--type", default="", help="Filter by type")
     p_note_list.add_argument("--run", default="", help="Filter by author run ID")
 
+    p_review = sub.add_parser("review", help="Async external review (event-plane request/result)")
+    review_sub = p_review.add_subparsers(dest="review_action")
+    p_review_req = review_sub.add_parser("request", help="Register an external review request")
+    p_review_req.add_argument("--session-id", dest="session_id", required=True)
+    p_review_req.add_argument("--provider", required=True)
+    p_review_req.add_argument("--target-ref", dest="target_ref", required=True)
+    p_review_req.add_argument("--run-id", dest="run_id", default="")
+    p_review_req.add_argument("--phase", default="execute", choices=["execute", "post_implement", "finish", "plan"])
+    p_review_req.add_argument("--task-kind", dest="task_kind", default="review")
+    p_review_req.add_argument(
+        "--blocking-policy",
+        dest="blocking_policy",
+        default="notify_only",
+        choices=["block_session", "notify_only", "advisory_only"],
+    )
+    p_review_res = review_sub.add_parser("result", help="Ingest an external review result")
+    p_review_res.add_argument("--request-id", dest="request_id", required=True)
+    p_review_res.add_argument("--provider", required=True)
+    p_review_res.add_argument("--result-kind", dest="result_kind", required=True)
+    p_review_res.add_argument("--summary", default="")
+    p_review_res.add_argument("--payload-json", dest="payload_json", default="")
+    p_review_res.add_argument("--idempotency-key", dest="idempotency_key", default="")
+
     p_mailbox = sub.add_parser("mailbox", help="List event-plane mailbox items for a session")
     p_mailbox.add_argument("--session-id", dest="session_id", required=True, help="Session ID")
     p_mailbox.add_argument(
@@ -2741,6 +2827,14 @@ def main():
             sys.exit(cmd_note(args))
         else:
             print("Usage: thin-supervisor note {add|list}")
+            sys.exit(1)
+    elif args.command == "review":
+        if args.review_action == "request":
+            sys.exit(cmd_review_request(args))
+        elif args.review_action == "result":
+            sys.exit(cmd_review_result(args))
+        else:
+            print("Usage: thin-supervisor review {request|result}")
             sys.exit(1)
     elif args.command == "mailbox":
         sys.exit(cmd_mailbox(args))

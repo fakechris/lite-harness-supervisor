@@ -238,3 +238,78 @@ def test_ack_mailbox_item_rejects_unknown_id(tmp_path):
     ingest, _ = _make_ingest(tmp_path)
     resp = ingest.ack_mailbox_item(mailbox_item_id="mb_bogus")
     assert resp["ok"] is False
+
+
+# ─── Task 7: plan-phase correlation (no run_id at request time) ──────
+
+def test_phase_plan_request_correlates_by_session_id_only(tmp_path):
+    """A `phase=plan` request with no run_id correlates via session_id end-to-end.
+
+    Covers PRD Rule 6 "session-scoped at return time": the object model must
+    work for plan-stage review where no run exists yet.
+    """
+    ingest, store = _make_ingest(tmp_path)
+    reg = ingest.register_request(
+        session_id="s_plan",
+        provider="external_model",
+        target_ref="spec:intro.md",
+        phase="plan",
+        task_kind="review",
+        blocking_policy="notify_only",
+    )
+    assert reg["ok"] is True
+    assert reg["session_id"] == "s_plan"
+
+    req = store.latest_request(reg["request_id"])
+    assert req is not None
+    assert req.phase == "plan"
+    assert req.run_id is None
+
+    wait = store.latest_wait(reg["wait_id"])
+    assert wait is not None
+    assert wait.session_id == "s_plan"
+    assert wait.run_id is None
+    assert wait.status == "waiting"
+
+    # Results returning later must still correlate by session_id alone.
+    resp = ingest.ingest_result(
+        request_id=reg["request_id"],
+        provider="external_model",
+        result_kind="analysis",
+        summary="plan looks good",
+    )
+    assert resp["ok"] is True
+
+    items = store.list_mailbox_items("s_plan")
+    assert len(items) == 1
+    assert items[0].run_id is None
+    assert items[0].session_id == "s_plan"
+
+    # The wait resolves to satisfied; associated request completes.
+    resolved_wait = store.latest_wait(reg["wait_id"])
+    assert resolved_wait.status == "satisfied"
+    completed_req = store.latest_request(reg["request_id"])
+    assert completed_req.status == "completed"
+
+
+def test_phase_plan_result_records_without_active_run_on_ingest_side(tmp_path):
+    """Result ingest must not require run_id even when the request never had one."""
+    ingest, store = _make_ingest(tmp_path)
+    reg = ingest.register_request(
+        session_id="s_plan2",
+        provider="external_agent",
+        target_ref="spec:api.yaml",
+        phase="plan",
+    )
+    resp = ingest.ingest_result(
+        request_id=reg["request_id"],
+        provider="external_agent",
+        result_kind="analysis",
+        # run_id not supplied; request also has none.
+    )
+    assert resp["ok"] is True
+
+    listing = ingest.list_mailbox(session_id="s_plan2")
+    assert listing["ok"] is True
+    assert len(listing["items"]) == 1
+    assert listing["items"][0]["run_id"] is None
