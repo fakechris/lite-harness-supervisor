@@ -34,6 +34,19 @@ cp -r packaging/thin-supervisor-codex ~/.codex/skills/thin-supervisor
 This teaches Codex the checkpoint protocol and the 4-stage workflow (Clarify → Plan → Approve → Execute).
 The default is now clarify-first: the skill should produce a draft spec, ask you to confirm it, then approve and attach.
 
+### 1.5 Mental model: RPI + attach gate
+
+The supervised workflow maps cleanly to:
+
+- `Research` = clarify, codebase exploration, contract confirmation
+- `Plan` = spec writing + self-review
+- `Approve` = human approval plus attach
+- `Implement` = execute the current node under checkpoint + verifier control
+
+The important distinction is that `Approve` is an explicit gate between
+planning and implementation. The worker should not "just start coding"
+until attach succeeds.
+
 ### 2. Start tmux
 
 ```bash
@@ -75,6 +88,9 @@ The Skill will:
 7. Start emitting checkpoints as it works
 
 If a spec is still in `approval.status: draft`, execution commands reject it until you approve it.
+If a supervised run is already active, the worker should load the dedicated
+worker checkpoint protocol reference instead of relying on a large global
+prompt sheet.
 
 ### 6. Monitor
 
