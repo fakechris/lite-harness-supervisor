@@ -41,7 +41,9 @@ class EventPlaneStore:
 
     def append_request(self, request: ExternalTaskRequest) -> None:
         record = {"record_type": "request", **request.to_dict()}
-        record["request.updated_at"] = request.updated_at  # hint: latest wins
+        # ``to_dict()`` already emits ``updated_at``; the out-of-order
+        # guard in ``latest_request`` / ``list_requests_by_session``
+        # reads that field directly.
         self._append_line(self.external_tasks_path, record)
 
     def append_result(self, result: ExternalTaskResult) -> None:
