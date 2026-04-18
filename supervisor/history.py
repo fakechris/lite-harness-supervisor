@@ -94,6 +94,58 @@ def latest_oracle_consultation_id_for_run(run_id: str, runtime_dir: str = ".supe
     return consultation_id
 
 
+def _event_plane_for_session(runtime_dir: str, session_id: str) -> dict:
+    """Fold event-plane JSONL by session_id for inclusion in run export.
+
+    Returns the folded (latest-per-id) records for requests, results,
+    waits, and mailbox items belonging to *session_id*. Empty section
+    when session_id is missing.
+    """
+    if not session_id:
+        return {}
+    shared = _runtime_root(runtime_dir) / "shared"
+    external_tasks = _read_jsonl(shared / "external_tasks.jsonl")
+    waits = _read_jsonl(shared / "session_waits.jsonl")
+    mailbox = _read_jsonl(shared / "session_mailbox.jsonl")
+
+    req_by_id: dict[str, dict] = {}
+    results: list[dict] = []
+    for record in external_tasks:
+        if record.get("session_id") != session_id:
+            continue
+        if record.get("record_type") == "request":
+            rid = record.get("request_id")
+            if rid:
+                clean = {k: v for k, v in record.items() if k not in {"record_type", "request.updated_at"}}
+                req_by_id[rid] = clean
+        elif record.get("record_type") == "result":
+            results.append({k: v for k, v in record.items() if k != "record_type"})
+
+    waits_by_id: dict[str, dict] = {}
+    for record in waits:
+        if record.get("session_id") != session_id:
+            continue
+        wid = record.get("wait_id")
+        if wid:
+            waits_by_id[wid] = record
+
+    mailbox_by_id: dict[str, dict] = {}
+    for record in mailbox:
+        if record.get("session_id") != session_id:
+            continue
+        mid = record.get("mailbox_item_id")
+        if mid:
+            mailbox_by_id[mid] = record
+
+    return {
+        "session_id": session_id,
+        "requests": list(req_by_id.values()),
+        "results": results,
+        "waits": list(waits_by_id.values()),
+        "mailbox": list(mailbox_by_id.values()),
+    }
+
+
 def export_run(run_id: str, runtime_dir: str = ".supervisor/runtime") -> dict:
     run_dir = _run_dir(run_id, runtime_dir)
     state = _read_json(run_dir / "state.json", {})
@@ -115,6 +167,7 @@ def export_run(run_id: str, runtime_dir: str = ".supervisor/runtime") -> dict:
         "friction_events": list_friction_events(runtime_dir, run_id=run_id, user_id=user_id),
         "friction_summary": summarize_friction_events(runtime_dir, run_id=run_id, user_id=user_id),
         "user_preferences": load_user_preferences(runtime_dir, user_id=user_id),
+        "event_plane": _event_plane_for_session(runtime_dir, state.get("session_id", "")),
     }
 
 

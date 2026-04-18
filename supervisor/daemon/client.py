@@ -164,6 +164,89 @@ class DaemonClient:
         """Poll for async job result."""
         return self._request({"action": "get_job", "job_id": job_id})
 
+    # ------------------------------------------------------------------
+    # Event plane (Task 3): external task request / result / mailbox
+    # ------------------------------------------------------------------
+
+    def external_task_create(
+        self,
+        *,
+        session_id: str,
+        provider: str,
+        target_ref: str,
+        run_id: str = "",
+        phase: str = "execute",
+        task_kind: str = "review",
+        blocking_policy: str = "notify_only",
+        deadline_at: str = "",
+        resume_policy: str = "",
+    ) -> dict:
+        """Register an external task request; creates an associated SessionWait."""
+        req: dict = {
+            "action": "external_task_create",
+            "session_id": session_id,
+            "provider": provider,
+            "target_ref": target_ref,
+            "phase": phase,
+            "task_kind": task_kind,
+            "blocking_policy": blocking_policy,
+        }
+        if run_id:
+            req["run_id"] = run_id
+        if deadline_at:
+            req["deadline_at"] = deadline_at
+        if resume_policy:
+            req["resume_policy"] = resume_policy
+        return self._request(req)
+
+    def external_result_ingest(
+        self,
+        *,
+        request_id: str,
+        provider: str,
+        result_kind: str,
+        summary: str = "",
+        payload: dict | None = None,
+        run_id: str = "",
+        idempotency_key: str = "",
+    ) -> dict:
+        """Ingest an external task result; resolves its wait + creates a mailbox item."""
+        req: dict = {
+            "action": "external_result_ingest",
+            "request_id": request_id,
+            "provider": provider,
+            "result_kind": result_kind,
+            "summary": summary,
+            "payload": payload or {},
+        }
+        if run_id:
+            req["run_id"] = run_id
+        if idempotency_key:
+            req["idempotency_key"] = idempotency_key
+        return self._request(req)
+
+    def mailbox_list(self, *, session_id: str, delivery_status: str = "") -> dict:
+        """List mailbox items for a session, optionally filtered by delivery_status."""
+        req: dict = {"action": "mailbox_list", "session_id": session_id}
+        if delivery_status:
+            req["delivery_status"] = delivery_status
+        return self._request(req)
+
+    def mailbox_ack(self, *, mailbox_item_id: str, delivery_status: str = "acknowledged") -> dict:
+        """Transition a mailbox item to a new delivery_status."""
+        return self._request({
+            "action": "mailbox_ack",
+            "mailbox_item_id": mailbox_item_id,
+            "delivery_status": delivery_status,
+        })
+
+    def waits_list(self, *, session_id: str = "") -> dict:
+        """List open session waits, optionally scoped to a session."""
+        req: dict = {"action": "waits_list"}
+        if session_id:
+            req["session_id"] = session_id
+        return self._request(req)
+
     def _request(self, data: dict) -> dict:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(5)

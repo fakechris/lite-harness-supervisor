@@ -17,6 +17,11 @@ from pathlib import Path
 
 from supervisor.domain.enums import DeliveryState, TopState
 from supervisor.domain.models import SupervisorState
+from supervisor.event_plane.ingest import EventPlaneIngest
+from supervisor.event_plane.models import SessionMailboxItem
+from supervisor.event_plane.store import EventPlaneStore
+from supervisor.event_plane.surface import summarize_for_session
+from supervisor.event_plane.wake_policy import evaluate as evaluate_wake
 from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
 from supervisor.gates.finish_gate import FinishGate
@@ -85,6 +90,7 @@ class RunEntry:
         summary = summarize_state(state or {}) if state else {}
         return {
             "run_id": self.run_id,
+            "session_id": state.get("session_id", "") if state else "",
             "spec_path": self.spec_path,
             "pane_target": self.pane_target,
             "alive": self.thread.is_alive() if self.thread else False,
@@ -135,6 +141,11 @@ class DaemonServer:
         # command arriving during startup would hit an unbound socket.
         from supervisor.operator.channel_host import OperatorChannelHost
         self._channel_host = OperatorChannelHost.from_config(self.config)
+        # Event plane (Task 3): request/result/mailbox substrate lives
+        # under runs_dir's parent/shared so it co-locates with sessions.jsonl.
+        event_plane_root = Path(self.runs_dir).parent
+        self._event_plane_store = EventPlaneStore(event_plane_root)
+        self._event_plane_ingest = EventPlaneIngest(self._event_plane_store)
 
     def start(self) -> None:
         """Start the daemon: bind socket, write PID, accept connections."""
@@ -311,6 +322,16 @@ class DaemonServer:
             response = self._do_request_clarification(request)
         elif action == "get_job":
             response = self._do_get_job(request.get("job_id", ""))
+        elif action == "external_task_create":
+            response = self._do_external_task_create(request)
+        elif action == "external_result_ingest":
+            response = self._do_external_result_ingest(request)
+        elif action == "mailbox_list":
+            response = self._do_mailbox_list(request)
+        elif action == "mailbox_ack":
+            response = self._do_mailbox_ack(request)
+        elif action == "waits_list":
+            response = self._do_waits_list(request)
         elif action == "ping":
             response = {"ok": True, "pong": True}
         else:
@@ -418,6 +439,10 @@ class DaemonServer:
     def _do_status(self) -> dict:
         with self._lock:
             runs = [e.to_dict() for e in self._runs.values()]
+        for run in runs:
+            run["event_plane"] = summarize_for_session(
+                self._event_plane_store, run.get("session_id", "")
+            )
         return {"ok": True, "runs": runs}
 
     def _do_stop(self, run_id: str) -> dict:
@@ -690,6 +715,7 @@ class DaemonServer:
                 summary = summarize_state(state)
                 runs.append({
                     "run_id": e.run_id,
+                    "session_id": state.get("session_id", ""),
                     "spec_id": state.get("spec_id", ""),
                     "spec_path": e.spec_path,
                     "pane_target": e.pane_target,
@@ -701,6 +727,9 @@ class DaemonServer:
                     "current_attempt": state.get("current_attempt", 0),
                     "pause_reason": summary.get("pause_reason", ""),
                     "next_action": summary.get("next_action", ""),
+                    "event_plane": summarize_for_session(
+                        self._event_plane_store, state.get("session_id", "")
+                    ),
                 })
         return {"ok": True, "runs": runs}
 
@@ -729,6 +758,9 @@ class DaemonServer:
             "run_id": run_id,
             "state": state,
             "recent_events": recent,
+            "event_plane": summarize_for_session(
+                self._event_plane_store, state.get("session_id", "")
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -968,6 +1000,178 @@ class DaemonServer:
 
         # Return most recent first, up to limit
         return {"ok": True, "notes": notes[-limit:][::-1]}
+
+    # ------------------------------------------------------------------
+    # Event plane (Task 3): external task request / result / mailbox
+    # ------------------------------------------------------------------
+
+    def _find_store_for_run(self, run_id: str) -> StateStore | None:
+        if not run_id:
+            return None
+        with self._lock:
+            entry = self._runs.get(run_id)
+        if entry is not None:
+            return entry.store
+        run_dir = Path(self.runs_dir) / run_id
+        if (run_dir / "state.json").exists():
+            store = StateStore(str(run_dir))
+            # Freshly-instantiated StateStore starts at seq=0; align with the
+            # run's existing session_log so events appended via this path
+            # don't collide with earlier seqs written while the run was live.
+            store._session_seq = store._read_last_seq()
+            return store
+        return None
+
+    def _append_run_session_event(self, run_id: str, event_type: str, payload: dict) -> None:
+        store = self._find_store_for_run(run_id)
+        if store is None:
+            return
+        try:
+            store.append_session_event(run_id, event_type, payload)
+        except OSError:
+            logger.warning("failed to append session event %s for %s", event_type, run_id)
+
+    def _do_external_task_create(self, request: dict) -> dict:
+        resp = self._event_plane_ingest.register_request(
+            session_id=request.get("session_id", ""),
+            provider=request.get("provider", ""),
+            target_ref=request.get("target_ref", ""),
+            run_id=request.get("run_id") or None,
+            phase=request.get("phase", "execute"),
+            task_kind=request.get("task_kind", "review"),
+            blocking_policy=request.get("blocking_policy", "notify_only"),
+            deadline_at=request.get("deadline_at", ""),
+            resume_policy=request.get("resume_policy", ""),
+        )
+        if resp.get("ok"):
+            run_id = request.get("run_id") or ""
+            if run_id:
+                self._append_run_session_event(
+                    run_id,
+                    "external_task_requested",
+                    {
+                        "request_id": resp["request_id"],
+                        "wait_id": resp["wait_id"],
+                        "session_id": resp["session_id"],
+                        "provider": request.get("provider", ""),
+                        "target_ref": request.get("target_ref", ""),
+                        "task_kind": request.get("task_kind", "review"),
+                    },
+                )
+        return resp
+
+    def _do_external_result_ingest(self, request: dict) -> dict:
+        resp = self._event_plane_ingest.ingest_result(
+            request_id=request.get("request_id", ""),
+            provider=request.get("provider", ""),
+            result_kind=request.get("result_kind", ""),
+            summary=request.get("summary", ""),
+            payload=request.get("payload") or {},
+            run_id=request.get("run_id") if request.get("run_id") is not None else None,
+            idempotency_key=request.get("idempotency_key", ""),
+        )
+        if resp.get("ok") and not resp.get("deduped"):
+            # Best-effort session event. If run_id is known on either side we
+            # append to that run's session_log; correlation to session is
+            # handled durably in the event plane itself.
+            req_run_id = request.get("run_id") or ""
+            req = self._event_plane_store.latest_request(request.get("request_id", ""))
+            if not req_run_id and req is not None and req.run_id:
+                req_run_id = req.run_id
+            if req_run_id:
+                self._append_run_session_event(
+                    req_run_id,
+                    "external_result_ingested",
+                    {
+                        "request_id": request.get("request_id", ""),
+                        "result_id": resp.get("result_id", ""),
+                        "mailbox_item_id": resp.get("mailbox_item_id", ""),
+                        "session_id": resp.get("session_id", ""),
+                        "provider": request.get("provider", ""),
+                        "result_kind": request.get("result_kind", ""),
+                    },
+                )
+
+            # Apply wake policy to the just-landed mailbox item. This is the
+            # only legitimate place the decision gets made (Rule 4).
+            decision = self._apply_wake_policy(
+                request_id=request.get("request_id", ""),
+                mailbox_item_id=resp.get("mailbox_item_id", ""),
+                run_id_hint=req_run_id,
+            )
+            if decision:
+                resp["wake_decision"] = decision["decision"]
+                resp["wake_reason"] = decision.get("reason", "")
+        return resp
+
+    def _apply_wake_policy(
+        self,
+        *,
+        request_id: str,
+        mailbox_item_id: str,
+        run_id_hint: str,
+    ) -> dict | None:
+        """Run wake policy on a freshly-created mailbox item.
+
+        Persists the decision onto the mailbox item (append-only, latest
+        wins) and emits a ``wake_decision_applied`` session event when a
+        run is known. Returns the decision dict (or None on error).
+        """
+        req = self._event_plane_store.latest_request(request_id)
+        if req is None:
+            return None
+        item = self._event_plane_store.latest_mailbox_item(mailbox_item_id)
+        if item is None:
+            return None
+
+        run_state = None
+        run_id = run_id_hint or req.run_id or ""
+        if run_id:
+            store = self._find_store_for_run(run_id)
+            if store is not None:
+                try:
+                    data = json.loads(store.state_path.read_text())
+                    run_state = {"top_state": data.get("top_state", "")}
+                except (OSError, ValueError):
+                    run_state = None
+
+        decision = evaluate_wake(request=req, mailbox_item=item, run_state=run_state)
+
+        updated = SessionMailboxItem.from_dict(item.to_dict())
+        updated.wake_decision = decision.decision
+        self._event_plane_store.append_mailbox_item(updated)
+
+        if run_id:
+            self._append_run_session_event(
+                run_id,
+                "wake_decision_applied",
+                {
+                    "mailbox_item_id": mailbox_item_id,
+                    "request_id": request_id,
+                    "decision": decision.decision,
+                    "reason": decision.reason,
+                    "session_id": req.session_id,
+                },
+            )
+
+        return {"decision": decision.decision, "reason": decision.reason}
+
+    def _do_mailbox_list(self, request: dict) -> dict:
+        return self._event_plane_ingest.list_mailbox(
+            session_id=request.get("session_id", ""),
+            delivery_status=request.get("delivery_status", ""),
+        )
+
+    def _do_mailbox_ack(self, request: dict) -> dict:
+        return self._event_plane_ingest.ack_mailbox_item(
+            mailbox_item_id=request.get("mailbox_item_id", ""),
+            delivery_status=request.get("delivery_status", "acknowledged"),
+        )
+
+    def _do_waits_list(self, request: dict) -> dict:
+        return self._event_plane_ingest.list_waits(
+            session_id=request.get("session_id", ""),
+        )
 
     def _reap_finished(self) -> None:
         """Remove completed/stopped runs from registry.

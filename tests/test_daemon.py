@@ -936,3 +936,287 @@ class TestDaemonResume:
 
         assert result["ok"] is False
         assert "no persisted spec hash" in result["error"]
+
+
+class TestDaemonExternalTask:
+    """Daemon IPC for event-plane request/result/mailbox (Task 3)."""
+
+    def _server(self, tmp_path):
+        return DaemonServer(runs_dir=str(tmp_path / "runs"))
+
+    def test_external_task_create_persists_request_and_wait(self, tmp_path):
+        server = self._server(tmp_path)
+        resp = server._do_external_task_create({
+            "session_id": "s1",
+            "run_id": "run_1",
+            "provider": "external_model",
+            "target_ref": "PR#1",
+            "task_kind": "review",
+            "blocking_policy": "notify_only",
+        })
+        assert resp["ok"] is True
+        assert resp["request_id"].startswith("req_")
+        assert resp["wait_id"].startswith("wait_")
+
+    def test_external_task_create_requires_session_and_provider(self, tmp_path):
+        server = self._server(tmp_path)
+        resp = server._do_external_task_create({
+            "session_id": "",
+            "provider": "",
+            "target_ref": "",
+        })
+        assert resp["ok"] is False
+
+    def test_external_result_ingest_resolves_wait_and_creates_mailbox_item(self, tmp_path):
+        server = self._server(tmp_path)
+        reg = server._do_external_task_create({
+            "session_id": "s1",
+            "run_id": "run_1",
+            "provider": "external_model",
+            "target_ref": "PR#1",
+        })
+        resp = server._do_external_result_ingest({
+            "request_id": reg["request_id"],
+            "provider": "external_model",
+            "result_kind": "review_comments",
+            "summary": "nit",
+        })
+        assert resp["ok"] is True
+        listing = server._do_mailbox_list({"session_id": "s1"})
+        assert listing["ok"] is True
+        assert len(listing["items"]) == 1
+        assert listing["items"][0]["delivery_status"] == "new"
+
+    def test_external_result_ingest_rejects_unknown_request(self, tmp_path):
+        server = self._server(tmp_path)
+        resp = server._do_external_result_ingest({
+            "request_id": "req_bogus",
+            "provider": "external_model",
+            "result_kind": "review_comments",
+        })
+        assert resp["ok"] is False
+
+    def test_external_result_ingest_is_idempotent(self, tmp_path):
+        server = self._server(tmp_path)
+        reg = server._do_external_task_create({
+            "session_id": "s1",
+            "run_id": "run_1",
+            "provider": "external_model",
+            "target_ref": "PR#1",
+        })
+        first = server._do_external_result_ingest({
+            "request_id": reg["request_id"],
+            "provider": "external_model",
+            "result_kind": "review_comments",
+            "idempotency_key": "evt_42",
+        })
+        second = server._do_external_result_ingest({
+            "request_id": reg["request_id"],
+            "provider": "external_model",
+            "result_kind": "review_comments",
+            "idempotency_key": "evt_42",
+        })
+        assert first["ok"] is True and second["ok"] is True
+        assert second.get("deduped") is True
+        listing = server._do_mailbox_list({"session_id": "s1"})
+        assert len(listing["items"]) == 1
+
+    def test_external_result_ingest_applies_wake_policy_and_records_decision(self, tmp_path):
+        server = self._server(tmp_path)
+        reg = server._do_external_task_create({
+            "session_id": "s1",
+            "run_id": "run_x",
+            "provider": "external_model",
+            "target_ref": "PR#1",
+            "blocking_policy": "notify_only",
+        })
+        result = server._do_external_result_ingest({
+            "request_id": reg["request_id"],
+            "provider": "external_model",
+            "result_kind": "review_comments",
+            "summary": "nit",
+        })
+        assert result["ok"] is True
+        assert result["wake_decision"] == "notify_operator"
+
+        listing = server._do_mailbox_list({"session_id": "s1"})
+        assert listing["items"][0]["wake_decision"] == "notify_operator"
+
+    def test_status_surfaces_event_plane_counts_per_session(self, tmp_path):
+        spec_path = tmp_path / "test.yaml"
+        spec_path.write_text(
+            "kind: linear_plan\n"
+            "id: test\n"
+            "goal: test\n"
+            "steps:\n"
+            "  - id: s1\n"
+            "    type: task\n"
+            "    objective: do something\n"
+            "    verify:\n"
+            "      - type: command\n"
+            "        run: echo ok\n"
+            "        expect: pass\n"
+        )
+        spec = load_spec(str(spec_path))
+        seed = StateStore(str(tmp_path / "seed"))
+        seeded = seed.load_or_init(
+            spec,
+            spec_path=str(spec_path),
+            pane_target="%1",
+            workspace_root=str(tmp_path),
+        )
+        run_dir = tmp_path / "runs" / seeded.run_id
+        run_dir.mkdir(parents=True)
+        StateStore(str(run_dir)).save(seeded)
+
+        class _AliveThread:
+            def is_alive(self) -> bool:
+                return True
+
+        server = self._server(tmp_path)
+        server._runs[seeded.run_id] = RunEntry(
+            seeded.run_id,
+            str(spec_path),
+            "%1",
+            str(tmp_path),
+            "tmux",
+            _AliveThread(),
+            StateStore(str(run_dir)),
+        )
+
+        server._do_external_task_create({
+            "session_id": seeded.session_id,
+            "run_id": seeded.run_id,
+            "provider": "external_model",
+            "target_ref": "PR#1",
+        })
+
+        status = server._do_status()
+        plane = status["runs"][0]["event_plane"]
+        assert plane["waits_open"] == 1
+        assert plane["requests_total"] == 1
+        assert plane["mailbox_new"] == 0  # no result yet
+
+    def test_mailbox_ack_transitions_item(self, tmp_path):
+        server = self._server(tmp_path)
+        reg = server._do_external_task_create({
+            "session_id": "s1",
+            "run_id": "run_1",
+            "provider": "external_model",
+            "target_ref": "PR#1",
+        })
+        ingest = server._do_external_result_ingest({
+            "request_id": reg["request_id"],
+            "provider": "external_model",
+            "result_kind": "review_comments",
+        })
+        ack = server._do_mailbox_ack({"mailbox_item_id": ingest["mailbox_item_id"]})
+        assert ack["ok"] is True
+
+        listing = server._do_mailbox_list({"session_id": "s1", "delivery_status": "acknowledged"})
+        assert len(listing["items"]) == 1
+        assert listing["items"][0]["mailbox_item_id"] == ingest["mailbox_item_id"]
+
+    def test_external_task_create_emits_session_event_when_run_known(self, tmp_path):
+        spec_path = tmp_path / "test.yaml"
+        spec_path.write_text(
+            "kind: linear_plan\n"
+            "id: test\n"
+            "goal: test\n"
+            "steps:\n"
+            "  - id: s1\n"
+            "    type: task\n"
+            "    objective: do something\n"
+            "    verify:\n"
+            "      - type: command\n"
+            "        run: echo ok\n"
+            "        expect: pass\n"
+        )
+        spec = load_spec(str(spec_path))
+        seed = StateStore(str(tmp_path / "seed"))
+        seeded = seed.load_or_init(
+            spec,
+            spec_path=str(spec_path),
+            pane_target="%1",
+            workspace_root=str(tmp_path),
+        )
+        # Materialize state under the canonical runs_dir/<run_id>/ layout.
+        run_dir = tmp_path / "runs" / seeded.run_id
+        run_dir.mkdir(parents=True)
+        canonical = StateStore(str(run_dir))
+        canonical.save(seeded)
+
+        server = self._server(tmp_path)
+        server._do_external_task_create({
+            "session_id": seeded.session_id,
+            "run_id": seeded.run_id,
+            "provider": "external_model",
+            "target_ref": "PR#1",
+        })
+
+        session_log = (run_dir / "session_log.jsonl").read_text(encoding="utf-8")
+        assert "external_task_requested" in session_log
+
+    def test_phase_plan_request_with_no_run_id_succeeds_over_ipc(self, tmp_path):
+        """Task 7: phase=plan with no run_id correlates by session_id alone.
+
+        The daemon must accept a plan-phase external-task registration even
+        when no run exists yet, and the follow-up result ingest must land in
+        the mailbox under the same session_id.
+        """
+        server = self._server(tmp_path)
+        reg = server._do_external_task_create({
+            "session_id": "s_plan_ipc",
+            "provider": "external_model",
+            "target_ref": "spec:intro.md",
+            "phase": "plan",
+            "task_kind": "review",
+            "blocking_policy": "notify_only",
+            # no run_id
+        })
+        assert reg["ok"] is True
+        assert reg["session_id"] == "s_plan_ipc"
+
+        resp = server._do_external_result_ingest({
+            "request_id": reg["request_id"],
+            "provider": "external_model",
+            "result_kind": "analysis",
+            "summary": "plan ok",
+        })
+        assert resp["ok"] is True
+
+        listing = server._do_mailbox_list({"session_id": "s_plan_ipc"})
+        assert listing["ok"] is True
+        assert len(listing["items"]) == 1
+        assert listing["items"][0]["run_id"] is None
+        # Wake decision still computed on plan-phase item (no run attached,
+        # blocking_policy=notify_only → notify_operator).
+        assert resp.get("wake_decision") == "notify_operator"
+
+    def test_find_store_for_reaped_run_preserves_seq_monotonicity(self, tmp_path):
+        """Regression: a StateStore created for a reaped run via
+        `_find_store_for_run` must align its `_session_seq` to the existing
+        session_log so later event appends don't collide with earlier seqs.
+        """
+        # Seed a run_dir with a state.json and a session_log.jsonl that has
+        # events already at seq=1 and seq=2.
+        run_id = "run_reaped_1"
+        run_dir = tmp_path / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "state.json").write_text("{}", encoding="utf-8")
+        log = run_dir / "session_log.jsonl"
+        log.write_text(
+            '{"run_id":"run_reaped_1","seq":1,"event_type":"a","timestamp":"t","payload":{}}\n'
+            '{"run_id":"run_reaped_1","seq":2,"event_type":"b","timestamp":"t","payload":{}}\n',
+            encoding="utf-8",
+        )
+
+        server = self._server(tmp_path)
+        # The run is not in the in-memory registry, so this routes through
+        # the fresh-StateStore branch.
+        server._append_run_session_event(run_id, "external_task_requested", {"x": 1})
+
+        lines = log.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 3
+        last = json.loads(lines[-1])
+        assert last["seq"] == 3  # not 1 — seq counter must have been aligned

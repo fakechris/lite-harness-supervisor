@@ -53,6 +53,7 @@ class RunContext:
     socket: str       # daemon socket path, or ""
     spec_path: str    # from state.json (lazy-loaded)
     config_path: str  # <worktree>/.supervisor/config.yaml
+    session_id: str = ""  # cross-run logical correlation key (lazy from state.json)
 
     # Derived paths
     state_dir: Path = field(default_factory=lambda: Path("."))
@@ -79,13 +80,16 @@ class RunContext:
         state_dir = base / ".supervisor" / "runtime" / "runs" / run_id
         config_path = str(base / ".supervisor" / "config.yaml")
 
-        # Lazy-load spec_path from state.json
+        # Lazy-load spec_path and session_id from state.json
         spec_path = ""
+        session_id = run.get("session_id", "") or ""
         state_path = state_dir / "state.json"
         if state_path.exists():
             try:
                 state = json.loads(state_path.read_text(encoding="utf-8"))
                 spec_path = state.get("spec_path", "")
+                if not session_id:
+                    session_id = state.get("session_id", "")
                 if not pane_target or pane_target == "?":
                     pane_target = state.get("pane_target", "")
             except (json.JSONDecodeError, OSError):
@@ -103,6 +107,7 @@ class RunContext:
             state_dir=state_dir,
             state_path=state_path,
             session_log_path=state_dir / "session_log.jsonl",
+            session_id=session_id,
         )
 
     # ── data access ───────────────────────────────────────────────

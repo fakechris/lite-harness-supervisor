@@ -188,6 +188,80 @@ def test_export_run_includes_state_logs_and_notes(tmp_path, monkeypatch):
     ).hexdigest()[:16]
 
 
+def test_export_run_includes_event_plane_mailbox_and_waits(tmp_path, monkeypatch):
+    """Task 6: history/export must include external task + mailbox events so
+    reviewers can reconstruct the deferred-work timeline."""
+    workspace, run_id = _build_history_workspace(tmp_path)
+    monkeypatch.chdir(workspace)
+
+    # Seed the event plane with a completed review round-trip against the
+    # run's session_id. This models what the daemon would have written.
+    state = json.loads((workspace / ".supervisor" / "runtime" / "runs" / run_id / "state.json").read_text())
+    session_id = "session_demo123"
+    state["session_id"] = session_id
+    (workspace / ".supervisor" / "runtime" / "runs" / run_id / "state.json").write_text(
+        json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
+
+    shared = workspace / ".supervisor" / "runtime" / "shared"
+    shared.mkdir(parents=True, exist_ok=True)
+    (shared / "external_tasks.jsonl").write_text(
+        "\n".join([
+            json.dumps({
+                "record_type": "request",
+                "request_id": "req_1", "session_id": session_id, "run_id": run_id,
+                "phase": "execute", "task_kind": "review",
+                "provider": "external_review", "target_ref": "PR#1",
+                "blocking_policy": "notify_only", "status": "completed",
+                "created_at": "2026-04-12T00:00:01Z", "updated_at": "2026-04-12T00:00:05Z",
+            }),
+            json.dumps({
+                "record_type": "result",
+                "result_id": "res_1", "request_id": "req_1", "session_id": session_id,
+                "run_id": run_id, "provider": "external_review",
+                "result_kind": "review_comments", "summary": "LGTM",
+                "payload": {}, "occurred_at": "2026-04-12T00:00:05Z",
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    (shared / "session_waits.jsonl").write_text(
+        json.dumps({
+            "wait_id": "wait_1", "session_id": session_id, "run_id": run_id,
+            "request_id": "req_1", "wait_kind": "external_review",
+            "status": "satisfied", "resume_policy": "operator_ack",
+            "entered_at": "2026-04-12T00:00:01Z", "resolved_at": "2026-04-12T00:00:05Z",
+            "deadline_at": "",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    (shared / "session_mailbox.jsonl").write_text(
+        json.dumps({
+            "mailbox_item_id": "mb_1", "session_id": session_id, "run_id": run_id,
+            "request_id": "req_1", "source_kind": "external_review",
+            "summary": "LGTM", "payload": {"provider": "external_review"},
+            "delivery_status": "new", "wake_decision": "notify_operator",
+            "created_at": "2026-04-12T00:00:05Z", "updated_at": "2026-04-12T00:00:05Z",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    from supervisor.history import export_run
+
+    exported = export_run(run_id)
+    ep = exported.get("event_plane", {})
+    assert ep, "export_run must include event_plane section"
+    assert ep["session_id"] == session_id
+    assert len(ep["requests"]) == 1
+    assert ep["requests"][0]["request_id"] == "req_1"
+    assert len(ep["results"]) == 1
+    assert ep["results"][0]["result_id"] == "res_1"
+    assert len(ep["waits"]) == 1
+    assert ep["waits"][0]["status"] == "satisfied"
+    assert len(ep["mailbox"]) == 1
+    assert ep["mailbox"][0]["wake_decision"] == "notify_operator"
+
+
 def test_summarize_run_reports_counts_and_oracle_links(tmp_path, monkeypatch):
     workspace, run_id = _build_history_workspace(tmp_path)
     monkeypatch.chdir(workspace)
