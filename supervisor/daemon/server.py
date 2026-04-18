@@ -85,6 +85,7 @@ class RunEntry:
         summary = summarize_state(state or {}) if state else {}
         return {
             "run_id": self.run_id,
+            "session_id": state.get("session_id", "") if state else "",
             "spec_path": self.spec_path,
             "pane_target": self.pane_target,
             "alive": self.thread.is_alive() if self.thread else False,

@@ -55,11 +55,28 @@ class StateStore:
                 elif surface_type and state.surface_type and state.surface_type != surface_type:
                     self._archive_state(state.run_id)
                 else:
+                    dirty = False
                     if controller_mode and getattr(state, "controller_mode", "") != controller_mode:
                         state.controller_mode = controller_mode
+                        dirty = True
+                    # Legacy runs (pre-session_id) get backfilled so the
+                    # rest of the system can rely on the invariant that
+                    # every run carries a session_id.
+                    if not state.session_id:
+                        state.session_id = self._resolve_session_id(
+                            workspace_root=state.workspace_root or workspace_root or os.getcwd(),
+                            spec_id=state.spec_id,
+                        )
+                        dirty = True
+                    if dirty:
                         self.save(state)
                     self._session_seq = self._read_last_seq()
                     return state
+
+        resolved_workspace_root = workspace_root or os.getcwd()
+        session_id = self._resolve_session_id(
+            workspace_root=resolved_workspace_root, spec_id=spec.id
+        )
 
         state = SupervisorState(
             run_id=f"run_{uuid.uuid4().hex[:12]}",
@@ -71,13 +88,26 @@ class StateStore:
             spec_hash=spec_hash,
             pane_target=pane_target,
             surface_type=surface_type,
-            workspace_root=workspace_root or os.getcwd(),
+            workspace_root=resolved_workspace_root,
             controller_mode=controller_mode or "daemon",
+            session_id=session_id,
         )
         state.retry_budget.per_node = spec.policy.max_retries_per_node
         state.retry_budget.global_limit = spec.policy.max_retries_global
         self.save(state)
         return state
+
+    def _resolve_session_id(self, *, workspace_root: str, spec_id: str) -> str:
+        """Adopt an existing active session for (workspace_root, spec_id),
+        else create and record a new one."""
+        existing = self.find_session_by_attachment(
+            workspace_root=workspace_root, spec_id=spec_id
+        )
+        if existing is not None:
+            return existing.session_id
+        session = Session(workspace_root=workspace_root, spec_id=spec_id)
+        self.save_session(session)
+        return session.session_id
 
     def save(self, state: SupervisorState) -> None:
         """Atomic write: write to temp file then rename."""

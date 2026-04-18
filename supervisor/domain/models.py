@@ -411,6 +411,11 @@ class SupervisorState:
     # Empty string means "never paused" / "last pause did not originate from
     # a gated state we need to restore".
     pre_pause_top_state: str = ""
+    # Cross-run logical correlation key. Every run belongs to exactly one
+    # Session (see supervisor.domain.models.Session). A session may relate
+    # to 0..N run_ids over its lifetime — retries, replans, resumes, or
+    # pre-run plan-phase work where no run_id exists yet.
+    session_id: str = ""
     schema_version: int = 1
 
     def to_dict(self) -> dict[str, Any]:
@@ -455,5 +460,6 @@ class SupervisorState:
             last_mismatch_node_id=data.get("last_mismatch_node_id", ""),
             re_inject_count=data.get("re_inject_count", 0),
             pre_pause_top_state=data.get("pre_pause_top_state", ""),
+            session_id=data.get("session_id", ""),
             schema_version=data.get("schema_version", 1),
         )
