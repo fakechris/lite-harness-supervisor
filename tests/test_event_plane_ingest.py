@@ -292,6 +292,52 @@ def test_phase_plan_request_correlates_by_session_id_only(tmp_path):
     assert completed_req.status == "completed"
 
 
+def test_ingest_result_rejects_unknown_result_kind(tmp_path):
+    """result_kind must be one of the allowed values; an LLM or external
+    reviewer that ships a free-form kind must not silently corrupt the
+    mailbox taxonomy."""
+    ingest, _ = _make_ingest(tmp_path)
+    reg = ingest.register_request(
+        session_id="s1",
+        provider="external_model",
+        target_ref="PR#1",
+    )
+    resp = ingest.ingest_result(
+        request_id=reg["request_id"],
+        provider="external_model",
+        result_kind="made_up_kind",
+        payload={},
+    )
+    assert resp["ok"] is False
+    assert "result_kind" in resp["error"]
+
+
+def test_ingest_result_rejects_provider_mismatch(tmp_path):
+    """A result reporting a different provider than the request issued
+    against must be rejected — otherwise cross-source contamination
+    (e.g. an external_model callback resolving a github wait) is possible."""
+    ingest, store = _make_ingest(tmp_path)
+    reg = ingest.register_request(
+        session_id="s1",
+        provider="github",
+        target_ref="PR#1",
+    )
+    resp = ingest.ingest_result(
+        request_id=reg["request_id"],
+        provider="external_model",
+        result_kind="review_comments",
+    )
+    assert resp["ok"] is False
+    assert "provider" in resp["error"]
+
+    # Request must still be pending; wait still waiting; no mailbox item.
+    req = store.latest_request(reg["request_id"])
+    assert req.status == "pending"
+    wait = store.latest_wait(reg["wait_id"])
+    assert wait.status == "waiting"
+    assert store.list_mailbox_items("s1") == []
+
+
 def test_ingest_result_rejects_non_mapping_payload(tmp_path):
     """Non-dict payloads (e.g. JSON list over IPC) must be rejected cleanly,
     not crash the ingest handler."""

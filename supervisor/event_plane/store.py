@@ -16,6 +16,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from supervisor.storage.state_store import _atomic_append_line
+
 from .models import (
     ExternalTaskRequest,
     ExternalTaskResult,
@@ -157,9 +159,7 @@ class EventPlaneStore:
 
     @staticmethod
     def _append_line(path: Path, payload: dict) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        _atomic_append_line(path, json.dumps(payload, ensure_ascii=False))
 
     @staticmethod
     def _iter_records(path: Path):

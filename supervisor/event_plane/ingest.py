@@ -32,6 +32,16 @@ from .models import (
 from .store import EventPlaneStore
 
 
+_ALLOWED_RESULT_KINDS = frozenset({
+    "review_comments",
+    "approval",
+    "change_request",
+    "ci_failure",
+    "ci_success",
+    "analysis",
+})
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -125,6 +135,27 @@ class EventPlaneIngest:
 
         if payload is not None and not isinstance(payload, dict):
             return {"ok": False, "error": "payload must be a mapping"}
+
+        if result_kind not in _ALLOWED_RESULT_KINDS:
+            return {
+                "ok": False,
+                "error": (
+                    f"invalid result_kind: {result_kind!r}; "
+                    f"expected one of {sorted(_ALLOWED_RESULT_KINDS)}"
+                ),
+            }
+
+        # Provider must match the originating request so a misrouted or
+        # spoofed callback cannot resolve a wait owned by a different
+        # source (e.g. an external_model result closing a github wait).
+        if req.provider and provider and provider != req.provider:
+            return {
+                "ok": False,
+                "error": (
+                    f"provider mismatch: request issued by {req.provider!r}, "
+                    f"result reports {provider!r}"
+                ),
+            }
 
         if idempotency_key:
             for existing in self.store.list_results_for_request(request_id):

@@ -120,3 +120,23 @@ def test_find_session_by_attachment_matches_active_only(tmp_path):
 
     not_found = store.find_session_by_attachment(workspace_root="/w", spec_id="other")
     assert not_found is None
+
+
+def test_close_session_transitions_status_and_unhides_from_adoption(tmp_path):
+    """`close_session` is the safety valve that prevents indefinite adoption
+    of a stale session for the same (workspace_root, spec_id)."""
+    store = StateStore(str(tmp_path / "runtime"), runtime_root=str(tmp_path / "runtime"))
+    s = Session(workspace_root="/w", spec_id="spec")
+    store.save_session(s)
+    assert store.find_session_by_attachment(workspace_root="/w", spec_id="spec").session_id == s.session_id
+
+    closed = store.close_session(s.session_id)
+    assert closed is not None
+    assert closed.status == "closed"
+
+    assert store.find_session_by_attachment(workspace_root="/w", spec_id="spec") is None
+
+    # Repeated close is a no-op.
+    again = store.close_session(s.session_id)
+    assert again is not None
+    assert again.status == "closed"

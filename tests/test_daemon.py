@@ -1220,3 +1220,130 @@ class TestDaemonExternalTask:
         assert len(lines) == 3
         last = json.loads(lines[-1])
         assert last["seq"] == 3  # not 1 — seq counter must have been aligned
+
+    def test_maybe_close_session_for_terminal_run_closes_session(self, tmp_path):
+        """When a reaped run finished in a terminal state and no other
+        active run shares its session_id, the daemon closes the session.
+        This is the guard against indefinite adoption of a stale session.
+        """
+        from supervisor.domain.models import Session
+
+        run_id = "run_done_1"
+        run_dir = tmp_path / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "state.json").write_text(
+            json.dumps({
+                "run_id": run_id,
+                "top_state": "COMPLETED",
+                "session_id": "sess_done_1",
+                "workspace_root": "/w",
+                "spec_id": "spec_x",
+            }),
+            encoding="utf-8",
+        )
+
+        server = self._server(tmp_path)
+        # Seed an active session record so close_session has something to
+        # transition.
+        store = server._find_store_for_run(run_id)
+        assert store is not None
+        store.save_session(Session(
+            session_id="sess_done_1",
+            workspace_root="/w",
+            spec_id="spec_x",
+        ))
+
+        server._maybe_close_session_for(run_id)
+
+        session = store.load_session("sess_done_1")
+        assert session is not None
+        assert session.status == "closed"
+        # find_session_by_attachment must no longer return it.
+        assert store.find_session_by_attachment(
+            workspace_root="/w", spec_id="spec_x",
+        ) is None
+
+    def test_maybe_close_session_preserves_session_with_other_active_run(self, tmp_path):
+        """A session attached to multiple runs must stay open while any
+        active run holds it. Only the last run's termination closes it.
+        """
+        from supervisor.domain.models import Session
+
+        session_id = "sess_shared"
+        done_run = "run_done_shared"
+        active_run = "run_still_up"
+
+        for rid, state in [
+            (done_run, "COMPLETED"),
+            (active_run, "RUNNING"),
+        ]:
+            d = tmp_path / "runs" / rid
+            d.mkdir(parents=True)
+            (d / "state.json").write_text(json.dumps({
+                "run_id": rid,
+                "top_state": state,
+                "session_id": session_id,
+                "workspace_root": "/w",
+                "spec_id": "spec_y",
+            }), encoding="utf-8")
+
+        server = self._server(tmp_path)
+        done_store = server._find_store_for_run(done_run)
+        done_store.save_session(Session(
+            session_id=session_id, workspace_root="/w", spec_id="spec_y",
+        ))
+
+        # Stage an active RunEntry for the still-up run.
+        active_store = server._find_store_for_run(active_run)
+        entry = RunEntry(
+            active_run, "/no/spec.yaml", "%1", "/w",
+            surface_type="tmux", thread=None, store=active_store,
+        )
+        with server._lock:
+            server._runs[active_run] = entry
+
+        server._maybe_close_session_for(done_run)
+        session = done_store.load_session(session_id)
+        assert session is not None
+        assert session.status == "active"  # not closed — active sibling holds it
+
+    def test_find_store_for_reaped_run_caches_instance(self, tmp_path):
+        """Concurrent callers must share the same StateStore so the seq lock
+        and counter are authoritative. Without the cache, two threads could
+        each read seq=2 and both write seq=3, producing a duplicate.
+        """
+        run_id = "run_reaped_cache"
+        run_dir = tmp_path / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "state.json").write_text("{}", encoding="utf-8")
+        (run_dir / "session_log.jsonl").write_text("", encoding="utf-8")
+
+        server = self._server(tmp_path)
+        first = server._find_store_for_run(run_id)
+        second = server._find_store_for_run(run_id)
+        assert first is not None
+        assert first is second
+
+    def test_reaped_stores_cache_evicts_oldest_past_max(self, tmp_path):
+        """The LRU cap prevents unbounded growth for long-running daemons
+        that touch many reaped runs via the event-plane path."""
+        server = self._server(tmp_path)
+        server._reaped_stores_max = 3
+
+        def _make(rid: str) -> None:
+            run_dir = tmp_path / "runs" / rid
+            run_dir.mkdir(parents=True)
+            (run_dir / "state.json").write_text("{}", encoding="utf-8")
+            (run_dir / "session_log.jsonl").write_text("", encoding="utf-8")
+
+        for rid in ("a", "b", "c", "d"):
+            _make(rid)
+            server._find_store_for_run(rid)
+
+        assert list(server._reaped_stores.keys()) == ["b", "c", "d"]
+
+        # Re-touch "b" — must survive next eviction since it moves to tail.
+        server._find_store_for_run("b")
+        _make("e")
+        server._find_store_for_run("e")
+        assert list(server._reaped_stores.keys()) == ["d", "b", "e"]

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import fcntl
 import hashlib
 import json
 import os
@@ -10,6 +11,30 @@ from pathlib import Path
 
 from supervisor.domain.enums import TopState
 from supervisor.domain.models import Session, SupervisorState, WorkflowSpec
+
+
+def _atomic_append_line(path: Path, line: str) -> None:
+    """Append a single JSONL line under an exclusive advisory file lock.
+
+    POSIX guarantees writes under ``PIPE_BUF`` (4096) against the same fd in
+    ``O_APPEND`` mode are atomic, but records that cross that boundary (or
+    concurrent writers through different fds without fsync/lock) can still
+    interleave. Using ``fcntl.LOCK_EX`` on every append removes that risk
+    without adding a new storage mechanism.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Ensure trailing newline.
+    payload = line if line.endswith("\n") else line + "\n"
+    with path.open("a", encoding="utf-8") as f:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            f.write(payload)
+            f.flush()
+        finally:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
 
 
 class StateStore:
@@ -146,8 +171,10 @@ class StateStore:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "payload": payload,
         }
-        with self.session_log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        _atomic_append_line(
+            self.session_log_path,
+            json.dumps(record, ensure_ascii=False),
+        )
 
     def next_checkpoint_seq(self) -> int:
         with self._seq_lock:
@@ -193,8 +220,24 @@ class StateStore:
         session.updated_at = datetime.now(timezone.utc).isoformat()
         path = self.sessions_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(session.to_dict(), ensure_ascii=False) + "\n")
+        _atomic_append_line(path, json.dumps(session.to_dict(), ensure_ascii=False))
+
+    def close_session(self, session_id: str) -> Session | None:
+        """Transition a session to status="closed".
+
+        Without this, ``find_session_by_attachment`` would forever return the
+        original session for a given (workspace_root, spec_id), and every
+        future run would inherit that session's mailbox / waits / reviews.
+        """
+        current = self.load_session(session_id)
+        if current is None:
+            return None
+        if current.status == "closed":
+            return current
+        closed = Session.from_dict(current.to_dict())
+        closed.status = "closed"
+        self.save_session(closed)
+        return closed
 
     def load_session(self, session_id: str) -> Session | None:
         path = self.sessions_path
