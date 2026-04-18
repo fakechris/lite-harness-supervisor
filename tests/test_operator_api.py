@@ -3,7 +3,11 @@
 import json
 from pathlib import Path
 
-from supervisor.operator.models import RunSnapshot, RunTimelineEvent
+from supervisor.operator.models import (
+    RunEventPlaneSummary,
+    RunSnapshot,
+    RunTimelineEvent,
+)
 from supervisor.operator.api import (
     snapshot_from_state,
     timeline_from_session_log,
@@ -282,6 +286,35 @@ def test_list_run_snapshots(tmp_path):
 def test_list_run_snapshots_empty(tmp_path):
     snapshots = list_run_snapshots(tmp_path)
     assert snapshots == []
+
+
+# ── event-plane block on RunSnapshot (Task 5) ─────────────────────
+
+def test_snapshot_event_plane_defaults_to_none(tmp_path):
+    """RunSnapshot.event_plane is optional — callers that don't pass
+    it must get None and the serialized dict must still round-trip."""
+    snap = snapshot_from_state(_make_state(), tmp_path / "session_log.jsonl")
+    assert snap.event_plane is None
+    assert snap.to_dict()["event_plane"] is None
+
+
+def test_snapshot_event_plane_populated_when_supplied(tmp_path):
+    """When a caller (daemon inspect path or local do_inspect) supplies a
+    RunEventPlaneSummary, snapshot_from_state must fold it in so the
+    operator sees the same counters in status/observe as in overview."""
+    summary = RunEventPlaneSummary(
+        waits_open=1, mailbox_new=2, mailbox_acknowledged=0,
+        requests_total=3, latest_mailbox_item_id="mb_17",
+        latest_wake_decision="notify_operator",
+    )
+    snap = snapshot_from_state(
+        _make_state(), tmp_path / "session_log.jsonl",
+        event_plane=summary,
+    )
+    assert snap.event_plane is summary
+    d = snap.to_dict()
+    assert d["event_plane"]["mailbox_new"] == 2
+    assert d["event_plane"]["latest_wake_decision"] == "notify_operator"
 
 
 def test_list_run_snapshots_skips_corrupt(tmp_path):

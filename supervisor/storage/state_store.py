@@ -11,6 +11,7 @@ from pathlib import Path
 
 from supervisor.domain.enums import TopState
 from supervisor.domain.models import Session, SupervisorState, WorkflowSpec
+from supervisor.domain.state_machine import normalize_top_state, transition_top_state
 
 
 def _atomic_append_line(path: Path, line: str) -> None:
@@ -175,6 +176,57 @@ class StateStore:
             self.session_log_path,
             json.dumps(record, ensure_ascii=False),
         )
+
+    def transition_and_record(
+        self,
+        state: SupervisorState,
+        to_state: TopState | str,
+        *,
+        reason: str = "",
+        source: str = "",
+    ) -> TopState:
+        """Transition top_state and, when it actually changes, append a
+        ``state_transition`` event to the session log.
+
+        This wrapper sits over ``transition_top_state`` so the mutator
+        stays where it is; all live runtime callers should go through
+        this method so every real top_state change is auditable at the
+        timeline level. No-op transitions (same-state re-entry) are
+        suppressed to keep the timeline quiet.
+        """
+        from_value = normalize_top_state(state.top_state)
+        result = transition_top_state(state, to_state, reason=reason)
+        to_value = normalize_top_state(result)
+        if from_value != to_value:
+            payload = {
+                "from_state": from_value.value,
+                "to_state": to_value.value,
+                "reason": reason,
+                "source": source,
+            }
+            self.append_session_event(
+                getattr(state, "run_id", "") or "",
+                "state_transition",
+                payload,
+            )
+            # Promote high-signal transitions (PAUSED_FOR_HUMAN,
+            # RECOVERY_NEEDED, terminals) to the shared system log so
+            # ``overview`` can answer "what changed recently?" without
+            # tailing every per-run log.  The allowlist lives inside
+            # ``append_system_event`` — RUNNING/GATING/VERIFYING churn
+            # is filtered out there.
+            from supervisor.storage.system_events import append_system_event
+            system_payload = {
+                **payload,
+                "session_id": getattr(state, "session_id", "") or "",
+                "run_id": getattr(state, "run_id", "") or "",
+            }
+            append_system_event(
+                self.runtime_root,
+                "state_transition",
+                system_payload,
+            )
+        return result
 
     def next_checkpoint_seq(self) -> int:
         with self._seq_lock:

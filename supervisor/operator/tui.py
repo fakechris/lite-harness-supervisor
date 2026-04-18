@@ -216,6 +216,130 @@ def format_clarification(result: dict[str, Any]) -> list[str]:
     return lines
 
 
+# ── Global-mode formatters (Task 6) ───────────────────────────────
+
+def format_system_banner(snapshot) -> list[str]:
+    """One-line (wrapped) banner from ``SystemSnapshot.counts``.
+
+    Mirrors the overview CLI headline so operators see identical
+    numbers in both surfaces.
+    """
+    c = snapshot.counts
+    return [
+        "System:",
+        (
+            f"  daemons={c.daemons}  "
+            f"live={c.live_sessions}  "
+            f"foreground={c.foreground_runs}  "
+            f"orphaned={c.orphaned_sessions}  "
+            f"completed={c.completed_sessions}"
+        ),
+        (
+            f"  waits_open={c.waits_open}  "
+            f"mailbox_new={c.mailbox_new}  "
+            f"mailbox_ack={c.mailbox_acknowledged}"
+        ),
+    ]
+
+
+def format_system_alerts(alerts) -> list[str]:
+    """Bulleted alert list; quiet state renders a single ``(none)`` line."""
+    lines = ["Alerts:"]
+    if not alerts:
+        lines.append("  (none)")
+        return lines
+    for a in alerts:
+        lines.append(f"  • [{a.kind}] {a.summary}")
+    return lines
+
+
+def format_system_timeline(events) -> list[str]:
+    """Render a shared cross-run timeline (SystemTimelineEvent[])."""
+    lines = ["Recent events:"]
+    if not events:
+        lines.append("  (none)")
+        return lines
+    for ev in events[:15]:
+        ts = (ev.occurred_at or "")[:19]
+        scope_tag = ev.scope or "system"
+        lines.append(f"  [{scope_tag}] {ts}  {ev.event_type}  — {ev.summary}")
+    return lines
+
+
+def _is_paused(session) -> bool:
+    """Return True for sessions the operator must still unblock.
+
+    Classify off ``top_state`` — the authoritative signal — rather than
+    ``pause_reason``.  Legacy paused runs may have an empty reason
+    string, which would otherwise hide them from the actionable list.
+    """
+    return session.top_state == "PAUSED_FOR_HUMAN"
+
+
+def _session_urgency_key(session) -> tuple[int, str]:
+    """Sort key that surfaces the most actionable session first.
+
+    Priority (lower tuple sorts first):
+      0: paused_for_human (human must act)
+      1: orphaned (no live owner)
+      2: mailbox_new > 0
+      3: waits_open > 0
+      4: everything else live
+    Completed / foreground-but-quiet sessions are filtered out upstream.
+    """
+    if not session.is_completed and _is_paused(session):
+        return (0, session.last_update_at or "")
+    if session.is_orphaned:
+        return (1, session.last_update_at or "")
+    ep = session.event_plane or {}
+    if int(ep.get("mailbox_new", 0) or 0) > 0:
+        return (2, session.last_update_at or "")
+    if int(ep.get("waits_open", 0) or 0) > 0:
+        return (3, session.last_update_at or "")
+    return (4, session.last_update_at or "")
+
+
+def format_actionable_sessions(snapshot) -> list[str]:
+    """List sessions that still need operator attention, most urgent first.
+
+    Completed sessions are filtered out — they live under the overview's
+    ``completed`` counter, not the actionable list. A session is
+    considered actionable when it's paused, orphaned, has mailbox
+    backlog, or has an open wait.
+    """
+    lines = ["Actionable sessions:"]
+    actionable = []
+    for s in snapshot.sessions:
+        if s.is_completed:
+            continue
+        ep = s.event_plane or {}
+        has_mailbox = int(ep.get("mailbox_new", 0) or 0) > 0
+        has_waits = int(ep.get("waits_open", 0) or 0) > 0
+        if not (_is_paused(s) or s.is_orphaned or has_mailbox or has_waits):
+            continue
+        actionable.append(s)
+    if not actionable:
+        lines.append("  (none)")
+        return lines
+    actionable.sort(key=_session_urgency_key)
+    for s in actionable:
+        tags = []
+        if _is_paused(s):
+            tags.append("paused")
+        if s.is_orphaned:
+            tags.append("orphaned")
+        ep = s.event_plane or {}
+        if int(ep.get("mailbox_new", 0) or 0) > 0:
+            tags.append(f"mailbox:{int(ep['mailbox_new'])}")
+        if int(ep.get("waits_open", 0) or 0) > 0:
+            tags.append(f"waits:{int(ep['waits_open'])}")
+        label = f"[{' '.join(tags)}]" if tags else ""
+        lines.append(
+            f"  {s.run_id[-14:]}  {s.top_state:<18} {label}"
+        )
+    return lines
+
+
 # ── Curses TUI ────────────────────────────────────────────────────
 
 MIN_WIDTH = 80
@@ -241,6 +365,18 @@ def _safe_addstr(win, y: int, x: int, text: str, attr: int = 0):
         win.addnstr(y, x, text, available, attr)
     except curses.error:
         pass
+
+
+def _draw_runs_pane_lines(win, lines: list[str], *, header: str = " Overview "):
+    """Draw arbitrary text into the left pane (used by global mode)."""
+    win.erase()
+    max_y, _ = win.getmaxyx()
+    _safe_addstr(win, 0, 0, header, curses.A_BOLD | curses.A_REVERSE)
+    for i, line in enumerate(lines):
+        if i + 1 >= max_y:
+            break
+        _safe_addstr(win, i + 1, 0, line)
+    win.noutrefresh()
 
 
 def _draw_runs_pane(win, runs: list[dict], selected_idx: int):
@@ -310,9 +446,16 @@ def _curses_main(stdscr):
     detail_lines: list[str] = ["(select a run)"]
     right_lines: list[str] = ["(press 'e' to explain, 'd' for drift)"]
     language = "en"
-    status_msg = " j/k:nav  e:explain  x:exchange  d:drift  c:ask  p:pause  r:resume  l:lang  n:note  N:notes  q:quit "
+    status_msg = " j/k:nav  g:global  e:explain  x:exchange  d:drift  c:ask  p:pause  r:resume  l:lang  n:note  N:notes  q:quit "
     default_status = status_msg
     last_refresh = 0.0
+
+    # Task 6: global view mode — 'g' toggles between run-centric and
+    # system-overview rendering.  System snapshots are refreshed on the
+    # same 3s cadence as the run list to keep the two views in sync.
+    mode = "run"
+    system_snapshot = None
+    last_system_refresh = 0.0
 
     # Pending async job state (non-blocking)
     pending_job: dict[str, Any] | None = None  # {"job": OperatorJob, "ctx": RunContext, "label": ...}
@@ -358,6 +501,18 @@ def _curses_main(stdscr):
             if selected_idx >= len(runs):
                 selected_idx = max(0, len(runs) - 1)
 
+        # Global-mode snapshot refresh on the same cadence.
+        if mode == "global" and now - last_system_refresh > 3.0:
+            try:
+                from supervisor.operator.system_overview import (
+                    load_system_snapshot,
+                )
+
+                system_snapshot = load_system_snapshot()
+            except Exception:
+                system_snapshot = None
+            last_system_refresh = now
+
         # Layout: left=35%, center=35%, right=30%
         left_w = max(w * 35 // 100, 30)
         center_w = max(w * 35 // 100, 25)
@@ -375,9 +530,22 @@ def _curses_main(stdscr):
             stdscr.refresh()
             continue
 
-        _draw_runs_pane(left_win, runs, selected_idx)
-        _draw_detail_pane(center_win, detail_lines)
-        _draw_right_pane(right_win, right_lines)
+        if mode == "global" and system_snapshot is not None:
+            _draw_runs_pane_lines(
+                left_win, format_system_banner(system_snapshot)
+                + format_system_alerts(system_snapshot.alerts),
+                header=" System ",
+            )
+            _draw_detail_pane(
+                center_win, format_actionable_sessions(system_snapshot),
+            )
+            _draw_right_pane(
+                right_win, format_system_timeline(system_snapshot.recent_timeline),
+            )
+        else:
+            _draw_runs_pane(left_win, runs, selected_idx)
+            _draw_detail_pane(center_win, detail_lines)
+            _draw_right_pane(right_win, right_lines)
         _draw_status_bar(status_win, status_msg[:w - 1])
         curses.doupdate()
 
@@ -388,6 +556,20 @@ def _curses_main(stdscr):
 
         if key in (ord("q"), ord("Q"), 27):
             break
+
+        # g: toggle global / run view.  Force an immediate system-snapshot
+        # refresh on entry so the operator isn't staring at stale counts.
+        if key in (ord("g"), ord("G")):
+            mode = "global" if mode != "global" else "run"
+            last_system_refresh = 0.0
+            continue
+
+        # Global mode hides the run list; run-action keys below target
+        # `selected_idx` against a list the operator cannot see.  Skip
+        # them entirely until the operator flips back with `g`.  `l`
+        # (language) is a global toggle and stays available.
+        if mode == "global" and key != ord("l"):
+            continue
 
         if key in (ord("j"), curses.KEY_DOWN) and runs:
             selected_idx = min(selected_idx + 1, len(runs) - 1)

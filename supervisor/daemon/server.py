@@ -49,9 +49,11 @@ from supervisor.operator.api import (
     snapshot_from_state,
     timeline_from_session_log,
 )
+from supervisor.operator.models import RunEventPlaneSummary
 from supervisor.operator.jobs import JobTracker
 from supervisor.pause_summary import summarize_state
 from supervisor.spec_approval import load_runnable_spec
+from supervisor.storage.system_events import append_system_event
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +199,15 @@ class DaemonServer:
         Path(self.pid_path).write_text(str(os.getpid()))
         register_daemon(self._daemon_metadata())
         register_worktree(os.getcwd())
+        append_system_event(
+            Path(self.runs_dir).parent,
+            "daemon_started",
+            {
+                "pid": os.getpid(),
+                "socket": self.sock_path,
+                "cwd": os.getcwd(),
+            },
+        )
         self._channel_host.start()
         recovered = self._recover_orphaned_runs()
         if recovered:
@@ -237,7 +248,14 @@ class DaemonServer:
 
             previous_top_state = state_data.get("top_state", state.top_state.value)
             delivery = state_data.get("delivery_state", DeliveryState.IDLE)
-            transition_top_state(state, TopState.PAUSED_FOR_HUMAN, reason="daemon startup orphan recovery")
+            store = StateStore(str(run_dir))
+            store._session_seq = store._read_last_seq()
+            store.transition_and_record(
+                state,
+                TopState.PAUSED_FOR_HUMAN,
+                reason="daemon startup orphan recovery",
+                source="daemon._recover_orphaned_runs",
+            )
             if delivery in (DeliveryState.INJECTED, DeliveryState.SUBMITTED):
                 recovery_detail = (
                     f"daemon restarted while delivery was in progress "
@@ -263,8 +281,6 @@ class DaemonServer:
                 "delivery_state_at_crash": delivery,
                 "pause_class": "recovery",
             })
-            store = StateStore(str(run_dir))
-            store._session_seq = store._read_last_seq()
             store.append_session_event(
                 state.run_id,
                 "orphaned_run_recovered",
@@ -600,18 +616,22 @@ class DaemonServer:
                         # checkpoint, not slip into RUNNING and silently
                         # CONTINUE on admin-only evidence.
                         if state.pre_pause_top_state == TopState.ATTACHED.value:
-                            transition_top_state(
+                            store.transition_and_record(
                                 state,
                                 TopState.ATTACHED,
                                 reason="resume requested (restoring attach boundary)",
+                                source="daemon._do_resume",
                             )
                             # Re-arm the re-inject budget so the resumed run
                             # gets a fresh attempt at proving execution
                             # evidence, rather than immediately re-exhausting.
                             state.re_inject_count = 0
                         else:
-                            transition_top_state(
-                                state, TopState.RUNNING, reason="resume requested"
+                            store.transition_and_record(
+                                state,
+                                TopState.RUNNING,
+                                reason="resume requested",
+                                source="daemon._do_resume",
                             )
                         state.delivery_state = DeliveryState.IDLE
                         state.auto_intervention_count = 0
@@ -731,7 +751,12 @@ class DaemonServer:
             finish = FinishGate().evaluate(spec, state, cwd=state.workspace_root)
             if finish["ok"]:
                 if state.top_state not in FINAL_STATES:
-                    transition_top_state(state, TopState.COMPLETED, reason="review acknowledged and finish gate passed")
+                    store.transition_and_record(
+                        state,
+                        TopState.COMPLETED,
+                        reason="review acknowledged and finish gate passed",
+                        source="daemon._do_ack_review",
+                    )
                     store.append_session_event(run_id, "completed_after_review", {"reviewer": reviewer})
             store.save(state)
             return {"ok": True, "run_id": run_id, "top_state": state.top_state.value}
@@ -828,8 +853,27 @@ class DaemonServer:
         state, session_log = self._resolve_run_store(run_id)
         if state is None:
             return {"ok": False, "error": f"run {run_id} not found"}
-        snap = snapshot_from_state(state, session_log)
+        event_plane = self._event_plane_summary_for_state(state)
+        snap = snapshot_from_state(state, session_log, event_plane=event_plane)
         return {"ok": True, **snap.to_dict()}
+
+    def _event_plane_summary_for_state(self, state: dict) -> "RunEventPlaneSummary | None":
+        """Build a typed RunEventPlaneSummary from this daemon's event
+        plane store for the session on *state*.  Returns None when the
+        state has no session_id (older runs pre Task 3).
+        """
+        session_id = state.get("session_id", "") if state else ""
+        if not session_id:
+            return None
+        ep = summarize_for_session(self._event_plane_store, session_id)
+        return RunEventPlaneSummary(
+            waits_open=int(ep.get("waits_open", 0)),
+            mailbox_new=int(ep.get("mailbox_new", 0)),
+            mailbox_acknowledged=int(ep.get("mailbox_acknowledged", 0)),
+            requests_total=int(ep.get("requests_total", 0)),
+            latest_mailbox_item_id=str(ep.get("latest_mailbox_item_id", "") or ""),
+            latest_wake_decision=str(ep.get("latest_wake_decision", "") or ""),
+        )
 
     def _do_get_timeline(self, request: dict) -> dict:
         """Return RunTimelineEvents for a run."""
@@ -1216,6 +1260,23 @@ class DaemonServer:
                 },
             )
 
+        # Always promote the wake decision to the shared system log —
+        # ``run_id`` can be empty when the request's originating run has
+        # already ended, but the operator still needs to see the
+        # decision at the system level.
+        append_system_event(
+            Path(self.runs_dir).parent,
+            "wake_decision_applied",
+            {
+                "mailbox_item_id": mailbox_item_id,
+                "request_id": request_id,
+                "decision": decision.decision,
+                "reason": decision.reason,
+                "session_id": req.session_id,
+                "run_id": run_id,
+            },
+        )
+
         return {"decision": decision.decision, "reason": decision.reason}
 
     def _do_mailbox_list(self, request: dict) -> dict:
@@ -1368,6 +1429,15 @@ class DaemonServer:
         Path(self.sock_path).unlink(missing_ok=True)
         Path(self.pid_path).unlink(missing_ok=True)
         unregister_daemon(self.sock_path)
+        append_system_event(
+            Path(self.runs_dir).parent,
+            "daemon_stopped",
+            {
+                "pid": os.getpid(),
+                "socket": self.sock_path,
+                "cwd": os.getcwd(),
+            },
+        )
         logger.info("daemon stopped")
 
     @staticmethod

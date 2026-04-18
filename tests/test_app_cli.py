@@ -2665,3 +2665,204 @@ def test_cmd_review_result_reports_wake_decision(monkeypatch, capsys):
     assert "res_1" in out
     assert "mb_1" in out
     assert "notify_operator" in out
+
+
+# ─── overview command (Task 4) ───────────────────────────────────────
+
+
+def _write_paused_state_with_session(tmp_path, *, run_id="run_paused_ov"):
+    run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(json.dumps({
+        "run_id": run_id,
+        "session_id": f"sess_{run_id}",
+        "top_state": "PAUSED_FOR_HUMAN",
+        "current_node_id": "step_2",
+        "pane_target": "%2",
+        "spec_path": "/tmp/spec.yaml",
+        "surface_type": "tmux",
+        "human_escalations": [{"reason": "awaiting reviewer input"}],
+    }))
+
+
+def test_overview_prints_headline_and_alerts(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    _write_paused_state_with_session(tmp_path)
+    args = argparse.Namespace(config=None, local=True, json=False, watch=False)
+    rc = app.cmd_overview(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Headline section is present with live/orphaned/completed counts.
+    assert "daemons=" in out
+    # Alerts section surfaces the paused run.
+    assert "paused_for_human" in out
+    # Hottest-sessions section shows the paused run_id.
+    assert "run_paused_ov" in out
+
+
+def test_overview_json_output_is_machine_readable(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    _write_paused_state_with_session(tmp_path)
+    args = argparse.Namespace(config=None, local=True, json=True, watch=False)
+    rc = app.cmd_overview(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert "counts" in parsed
+    assert "alerts" in parsed
+    assert "sessions" in parsed
+    assert "recent_timeline" in parsed
+    assert any(a["kind"] == "paused_for_human" for a in parsed["alerts"])
+
+
+def test_overview_watch_runs_bounded_loop(tmp_path, monkeypatch, capsys):
+    """--watch re-renders without crashing.  We pin the render loop to
+    two iterations so the test stays deterministic."""
+    monkeypatch.chdir(tmp_path)
+    _write_paused_state_with_session(tmp_path)
+    args = argparse.Namespace(
+        config=None, local=True, json=False, watch=True,
+        max_iterations=2, interval=0.0,
+    )
+    rc = app.cmd_overview(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Two renders means the headline appears at least twice.
+    assert out.count("daemons=") >= 2
+
+
+def test_overview_empty_state_prints_friendly_message(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    args = argparse.Namespace(config=None, local=True, json=False, watch=False)
+    rc = app.cmd_overview(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "No sessions" in out or "daemons=0" in out
+
+
+def test_overview_watch_floors_zero_interval(tmp_path, monkeypatch):
+    """``--watch --interval 0`` must not degrade into a busy loop.
+
+    We assert the sleep is called with at least the floor (0.5s) so the
+    loop can't spin at CPU speed between renders.
+    """
+    monkeypatch.chdir(tmp_path)
+    _write_paused_state_with_session(tmp_path)
+    sleeps: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda s: sleeps.append(s))
+    args = argparse.Namespace(
+        config=None, local=True, json=False, watch=True,
+        max_iterations=2, interval=0.0,
+    )
+    rc = app.cmd_overview(args)
+    assert rc == 0
+    # One sleep between the two iterations.
+    assert sleeps and all(s >= 0.5 for s in sleeps)
+
+
+def test_overview_watch_survives_transient_error(tmp_path, monkeypatch, capsys):
+    """A transient ``load_system_snapshot`` failure must not kill the
+    watch loop — the next tick should retry and recover."""
+    monkeypatch.chdir(tmp_path)
+    _write_paused_state_with_session(tmp_path)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    import supervisor.operator.system_overview as system_overview
+
+    real_loader = system_overview.load_system_snapshot
+    calls = {"n": 0}
+
+    def _flaky(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("registry briefly unavailable")
+        return real_loader(**kwargs)
+
+    monkeypatch.setattr(
+        "supervisor.operator.system_overview.load_system_snapshot", _flaky,
+    )
+    args = argparse.Namespace(
+        config=None, local=True, json=False, watch=True,
+        max_iterations=2, interval=0.0,
+    )
+    rc = app.cmd_overview(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "transient error" in out
+    # The second iteration rendered successfully.
+    assert "daemons=" in out
+
+
+# ─── Task 5: event-plane surfacing in status / observe ──────────────
+
+def _write_session_state_with_mailbox(
+    worktree: Path, *, run_id: str, session_id: str,
+    mailbox_new: int = 1, wake_decision: str = "notify_operator",
+) -> None:
+    """Write a state.json carrying ``session_id`` and append a new mailbox
+    item so summarize_for_session returns mailbox_new >= 1."""
+    from supervisor.event_plane.models import SessionMailboxItem
+    from supervisor.event_plane.store import EventPlaneStore
+
+    runtime = worktree / ".supervisor" / "runtime"
+    run_dir = runtime / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(json.dumps({
+        "run_id": run_id,
+        "session_id": session_id,
+        "top_state": "RUNNING",
+        "current_node_id": "step_1",
+        "pane_target": "%3",
+        "spec_path": "/tmp/spec.yaml",
+        "surface_type": "tmux",
+        "controller_mode": "daemon",
+        "workspace_root": str(worktree),
+    }))
+    store = EventPlaneStore(runtime)
+    for i in range(mailbox_new):
+        store.append_mailbox_item(SessionMailboxItem(
+            session_id=session_id,
+            run_id=run_id,
+            request_id=f"req_{i}",
+            source_kind="external_review",
+            summary=f"review #{i}",
+            delivery_status="new",
+            wake_decision=wake_decision,
+        ))
+
+
+def test_status_tags_session_with_mailbox_backlog(tmp_path, monkeypatch, capsys):
+    """When a session has mailbox_new > 0, cmd_status must render the
+    ``mailbox:N`` tag alongside the state label so the operator sees the
+    backlog without drilling into ``mailbox list``."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
+    _write_session_state_with_mailbox(
+        tmp_path, run_id="run_mb_tag", session_id="sess_mb_tag",
+        mailbox_new=2,
+    )
+
+    rc = app.cmd_status(argparse.Namespace(config=None, local=True))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "run_mb_tag" in out
+    assert "mailbox:2" in out
+
+
+def test_observe_renders_event_plane_block(tmp_path, monkeypatch, capsys):
+    """cmd_observe must include an event-plane line when the folded
+    summary has any non-zero counter or a latest wake decision."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
+    _write_session_state_with_mailbox(
+        tmp_path, run_id="run_ob_ep", session_id="sess_ob_ep",
+        mailbox_new=1, wake_decision="notify_operator",
+    )
+    _patch_session_index_registries(monkeypatch)
+
+    rc = app.cmd_observe(argparse.Namespace(run_id="run_ob_ep"))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "run_ob_ep" in out
+    assert "mailbox_new=1" in out
+    assert "notify_operator" in out

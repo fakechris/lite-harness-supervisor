@@ -20,6 +20,7 @@ thin-supervisor fixes this. It's an acceptance-centered run supervisor that sits
 
 ## Current Status (0.3.4)
 
+- **Layered system observability is live.** `thin-supervisor overview` (with `--json` / `--watch`) renders a whole-system view — daemon counts, live/orphaned/completed sessions, event-plane backlog, actionable alerts, and a cross-run timeline — that stays consistent with `status`, `observe`, and the TUI global mode (`g` to toggle).
 - **Session-first deferred review plumbing is live.** Sessions now persist as first-class cross-run identities, external review requests/results land in a shared event-plane store, and operator surfaces can inspect mailbox items and outstanding waits by `session_id`.
 - **Post-merge review hardening landed.** Event-plane request/result ingest now has tighter validation, wake-policy bookkeeping is recorded deterministically, and session/history export includes the deferred-work timeline for audit and replay.
 - **Global-first observability is live.** `status`, `dashboard`, `tui`, and `observe` now read from one canonical session index, so runs stay visible across worktrees even after daemon idle shutdown.
@@ -283,11 +284,14 @@ thin-supervisor run replay <run_id> [--json]
 thin-supervisor run postmortem <run_id> [--output file]
 thin-supervisor spec approve --spec <spec> [--by human]
 
+thin-supervisor overview                                   # Whole-system view: counts, alerts, cross-run timeline
+thin-supervisor overview --json                            # Same view as JSON for tools / scripts
+thin-supervisor overview --watch                           # Re-render on an interval (Ctrl-C to stop)
 thin-supervisor status                                     # Every run across every known worktree (global-first)
 thin-supervisor status --local                             # Restrict to the current worktree only
 thin-supervisor list                                       # Detailed active-run view
 thin-supervisor dashboard                                  # Interactive dashboard with drill-in
-thin-supervisor tui                                        # Operator TUI with explain/drift/pause actions
+thin-supervisor tui                                        # Operator TUI; press 'g' for the global-mode overview
 thin-supervisor ps                                         # Registered daemon processes across worktrees
 thin-supervisor pane-owner <pane>                          # Show which run owns a pane
 thin-supervisor observe <run_id>                           # Read-only snapshot; works even when no daemon is live

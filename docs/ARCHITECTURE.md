@@ -194,7 +194,7 @@ Every instruction traces back through decision to the checkpoint that triggered 
 Checkpoint(seq=N) → SupervisorDecision(triggered_by_seq=N) → HandoffInstruction(triggered_by_decision_id=X)
 ```
 
-Run events are appended to `session_log.jsonl` with run_id and sequence numbers for durable audit. Project-level bootstrap and scaffold repairs are appended to `.supervisor/runtime/ops_log.jsonl` so pre-run operational incidents are preserved too. Historical analysis reads those append-only artifacts and produces:
+Run events are appended to `session_log.jsonl` with run_id and sequence numbers for durable audit. Top-state transitions are now emitted as first-class `state_transition` events (via `StateStore.transition_and_record`) so timelines describe the control-plane shape, not a best-effort reconstruction. High-signal transitions (`PAUSED_FOR_HUMAN`, `RECOVERY_NEEDED`, `COMPLETED`, `FAILED`, `ABORTED`), daemon lifecycle, mailbox arrivals, wake decisions, and wait expiries are mirrored into a shared `.supervisor/runtime/shared/system_events.jsonl` through a frozen allowlist (`supervisor/storage/system_events.py`). `thin-supervisor overview`, `status`, `observe`, and the TUI global mode all project a single `SystemSnapshot` built from `session_index.collect_sessions` + that shared log + the daemon registry, so every observability surface reads the same facts. Project-level bootstrap and scaffold repairs are appended to `.supervisor/runtime/ops_log.jsonl` so pre-run operational incidents are preserved too. Historical analysis reads those append-only artifacts and produces:
 - stable JSON exports
 - derived run summaries
 - gate-decision replay without live injection

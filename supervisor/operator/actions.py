@@ -54,12 +54,57 @@ def do_inspect(ctx: RunContext) -> dict[str, Any]:
     state = ctx.load_state()
     if not state:
         return {"snapshot": {}, "timeline": []}
-    snap = snapshot_from_state(state, ctx.session_log_path)
+    event_plane = _local_event_plane_summary(ctx, state)
+    snap = snapshot_from_state(
+        state, ctx.session_log_path, event_plane=event_plane,
+    )
     events = timeline_from_session_log(ctx.session_log_path, limit=15)
     return {
         "snapshot": snap.to_dict(),
         "timeline": [e.to_dict() for e in events],
     }
+
+
+def _local_event_plane_summary(ctx: RunContext, state: dict[str, Any]):
+    """Open a short-lived EventPlaneStore on the worktree's runtime root
+    and fold a :class:`RunEventPlaneSummary` for the state's session_id.
+
+    Returns None when the state predates Task 3 (no session_id) or when
+    no runtime root can be derived from the RunContext. Any open / fold
+    error is swallowed: observability must never block inspect.
+    """
+    from pathlib import Path
+
+    session_id = state.get("session_id", "") if state else ""
+    if not session_id:
+        return None
+    worktree = getattr(ctx, "worktree", "") or ""
+    if not worktree:
+        return None
+    runtime_root = Path(worktree) / ".supervisor" / "runtime"
+    # Read-only contract: the local inspect path must not create the
+    # event-plane shared dir on a worktree that has never emitted an
+    # event.  Skip when the directory is absent — an empty summary is
+    # equivalent to a never-used event plane.
+    if not (runtime_root / "shared").is_dir():
+        return None
+    try:
+        from supervisor.event_plane.store import EventPlaneStore
+        from supervisor.event_plane.surface import summarize_for_session
+        from supervisor.operator.models import RunEventPlaneSummary
+
+        store = EventPlaneStore(runtime_root)
+        ep = summarize_for_session(store, session_id)
+    except (OSError, ValueError):
+        return None
+    return RunEventPlaneSummary(
+        waits_open=int(ep.get("waits_open", 0)),
+        mailbox_new=int(ep.get("mailbox_new", 0)),
+        mailbox_acknowledged=int(ep.get("mailbox_acknowledged", 0)),
+        requests_total=int(ep.get("requests_total", 0)),
+        latest_mailbox_item_id=str(ep.get("latest_mailbox_item_id", "") or ""),
+        latest_wake_decision=str(ep.get("latest_wake_decision", "") or ""),
+    )
 
 
 def do_exchange(ctx: RunContext) -> dict[str, Any]:
