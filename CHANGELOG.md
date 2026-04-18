@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.3.4 (2026-04-18)
+
+### Session-First Event Plane
+
+- Added the first shipped session-first deferred review substrate: durable `Session` identity, append-only external task/result storage, session waits, session mailbox items, and daemon-owned wake-decision bookkeeping.
+- Added operator-facing CLI surfaces for async review request/result ingestion plus mailbox/wait inspection, and folded event-plane records into run history export for audit and replay.
+- Shipped the first concrete review source adapter (`external_review`) and the base contract for future sources such as GitHub review/check ingestion.
+
+### Post-Merge Hardening
+
+- Addressed the first post-merge review round on the event-plane line with additional daemon, ingest, and session-identity coverage.
+- Tightened event-plane validation and sequencing around request/result correlation, append-only mailbox state, and reaped-run session-log sequencing.
+- Clarified the release line around the new deferred-review capability in docs and operator-facing status surfaces.
+
 ## 0.3.3 (2026-04-17)
 
 ### Structured Protocol

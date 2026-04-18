@@ -18,8 +18,10 @@ thin-supervisor fixes this. It's an acceptance-centered run supervisor that sits
 > - [docs/reviews/2026-04-11-deep-code-review.md](docs/reviews/2026-04-11-deep-code-review.md) — latest deep code review log and remaining-risk audit
 > - [docs/reviews/2026-04-12-amp-supervisor-capability-review.md](docs/reviews/2026-04-12-amp-supervisor-capability-review.md) — Amp-vs-thin-supervisor capability review and oracle-layer roadmap
 
-## Current Status (0.3.3)
+## Current Status (0.3.4)
 
+- **Session-first deferred review plumbing is live.** Sessions now persist as first-class cross-run identities, external review requests/results land in a shared event-plane store, and operator surfaces can inspect mailbox items and outstanding waits by `session_id`.
+- **Post-merge review hardening landed.** Event-plane request/result ingest now has tighter validation, wake-policy bookkeeping is recorded deterministically, and session/history export includes the deferred-work timeline for audit and replay.
 - **Global-first observability is live.** `status`, `dashboard`, `tui`, and `observe` now read from one canonical session index, so runs stay visible across worktrees even after daemon idle shutdown.
 - **The runtime state machine is split by intent.** `ATTACHED`, `RECOVERY_NEEDED`, and `pause_class` now distinguish attach-boundary tightening, operational recovery, and true human-owned pauses.
 - **Structured checkpoint semantics are live.** The runtime now normalizes one canonical `NormalizedCheckpoint`, accepts v2 semantic fields (`progress_class`, `evidence_scope`, `escalation_class`, `requires_authorization`, `blocking_inputs`, `reason_code`), and routes contradictions by class instead of re-guessing everything from prose.
