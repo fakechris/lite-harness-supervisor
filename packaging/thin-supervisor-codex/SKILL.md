@@ -6,7 +6,7 @@ description: >
   Use when the user describes a complex plan, multi-step implementation,
   long-running workflow, or says "run this plan", "execute continuously",
   "don't stop until done".
-version: 0.3.2
+version: 0.3.3
 user-invocable: true
 ---
 
@@ -17,6 +17,20 @@ Four-stage supervised execution: **Clarify → Plan → Approve → Execute**.
 The supervisor is a tmux sidecar that watches your output, makes
 continue/verify/escalate decisions, and injects next-step instructions.
 You focus on execution. It handles the orchestration.
+
+## RPI Mapping
+
+This workflow maps to the common `Research -> Plan -> Implement` pattern
+like this:
+
+- `Clarify` = `Research`
+- `Plan + Self-Review` = `Plan`
+- `Approve` = the explicit human/attach gate between planning and implementation
+- `Execute` = `Implement`
+
+That boundary matters. Research and planning may explore, summarize, and
+shape the task, but they do **not** begin implementation. Implementation
+starts only after approval and successful attach.
 
 ---
 
@@ -42,11 +56,25 @@ Load strategy fragments only when they are relevant to the current step.
 - When deciding whether the user has approved execution, read `strategy/approval-boundary.md`
 - When deciding supervision style or worker trust posture, read `references/supervision-modes.md`
 - When verification fails or a retry plan is needed, read `references/debugging-playbook.md`
+- When a supervised run is already active and you need the exact execution format, read `references/worker-checkpoint-protocol.md`
 - When shaping checkpoint evidence or deciding whether `workflow_done` is justified, read `strategy/finish-proof.md`
 - When deciding whether to escalate or continue, read `references/escalation-rules.md`
 - When blocked or choosing between continue / retry / escalate behavior, read `strategy/escalation.md`
 - When the supervisor pauses or completes and you need to explain that state to the user, read `strategy/pause-ux.md`
 - When a supervised run completes, read `references/improve.md`
+
+## Sub-Agent Boundary
+
+Sub-agents may assist with read-only investigation or non-authoritative
+summaries. They must **not** become the authoritative executor for an
+active supervised run.
+
+During an active supervised run, keep these in the main worker:
+
+- current-node implementation
+- checkpoint emission
+- structured semantic declarations
+- run-state mutation (`spec approve`, `run register`, `run resume`, `run review`, `run stop`)
 
 ---
 
@@ -203,30 +231,17 @@ until these commands succeed.
 
 If attach already succeeded in Stage 3, do not run bootstrap or register again.
 
-### Checkpoint protocol
+### Follow the checkpoint protocol
 
-When deciding whether a checkpoint contains enough finish evidence, load
-`strategy/finish-proof.md`.
+Read `references/worker-checkpoint-protocol.md` for:
 
-```text
-<checkpoint>
-run_id: <run_id from thin-supervisor status>
-checkpoint_seq: <incrementing integer, start from 1>
-status: working | blocked | step_done | workflow_done
-current_node: <step_id from spec>
-summary: <one-line description>
-evidence:
-  - modified: <file path>
-  - ran: <command>
-  - result: <short result>
-candidate_next_actions:
-  - <next action>
-needs:
-  - none
-question_for_supervisor:
-  - none
-</checkpoint>
-```
+- the exact checkpoint block shape
+- the v2 structured semantic fields
+- the first-checkpoint rule for newly injected nodes
+- continue / block / finish semantics
+
+When deciding whether a checkpoint contains enough finish evidence, also
+load `strategy/finish-proof.md`.
 
 ---
 

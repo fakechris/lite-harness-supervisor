@@ -13,6 +13,66 @@
 
 ---
 
+## Workflow Phases vs. Runtime State
+
+There are two different layers of "state" in thin-supervisor, and they
+should not be conflated.
+
+### Workflow phases
+
+These are the human/worker workflow phases:
+
+- `Clarify`
+- `Plan`
+- `Approve`
+- `Execute`
+
+They also map to the common `Research -> Plan -> Implement` model:
+
+- `Research` = `Clarify` + codebase exploration + contract confirmation
+- `Plan` = `Plan + Self-Review`
+- `Approve` = explicit human/attach gate between planning and implementation
+- `Implement` = `Execute`
+
+These phases explain **what kind of work should be happening**.
+
+### Runtime states
+
+These are runtime control states such as:
+
+- `READY`
+- `ATTACHED`
+- `RUNNING`
+- `GATING`
+- `VERIFYING`
+- `RECOVERY_NEEDED`
+- `PAUSED_FOR_HUMAN`
+
+These states explain **what the control plane thinks is happening** for a
+registered run.
+
+One is not a replacement for the other:
+
+- phases guide worker behavior
+- runtime states guide supervisor control flow
+
+### Sub-agent ownership rule
+
+`thin-supervisor` is intentionally not a general sub-agent orchestration
+platform. When a supervised run is active, sub-agents may assist with
+read-only investigation or non-authoritative summaries only.
+
+The main worker remains the sole authority for:
+
+- current-node implementation
+- checkpoint emission
+- structured semantic declarations
+- run-state mutation
+
+See [Sub-Agent Boundaries](/Users/chris/workspace/lite-harness-supervisor/docs/reference/subagent-boundaries.md).
+
+---
+
 ## Six-Layer Architecture
 
 ### Layer 1: Worker & Execution Surface

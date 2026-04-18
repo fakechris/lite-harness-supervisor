@@ -1,76 +1,18 @@
-# Supervisor Checkpoint Protocol
+# thin-supervisor repo
 
-This project uses `thin-supervisor` to drive long-running tasks with
-deterministic verification. When a supervisor is active, you MUST follow
-the checkpoint protocol described below.
+This repository implements the `thin-supervisor` runtime, skills, protocol
+references, and operator tooling.
 
-## Check if supervisor is active
+## Before supervised work
 
-```bash
-thin-supervisor status
-```
+- Check run state with `thin-supervisor status`
+- Prefer `scripts/thin-supervisor-attach.sh <slug>` when starting a new supervised task
+- Do not begin implementation before attach succeeds
 
-If status shows an active run, follow the protocol below.
+## If a supervised run is active
 
-When starting a new supervised run in this repository, prefer:
+If `thin-supervisor status` shows an active run for this pane/project:
 
-```bash
-scripts/thin-supervisor-attach.sh <slug>
-```
-
-That script binds the current pane to the generated spec. Do not begin
-implementation before it succeeds.
-
-## Checkpoint protocol
-
-After completing meaningful work on a step, output a checkpoint block:
-
-```text
-<checkpoint>
-run_id: <run_id from thin-supervisor status>
-checkpoint_seq: <incrementing integer, start from 1>
-status: working | blocked | step_done | workflow_done
-current_node: <step_id>
-summary: <one-line description>
-evidence:
-  - modified: <file path>
-  - ran: <command>
-  - result: <short result>
-candidate_next_actions:
-  - <next action>
-needs:
-  - none
-question_for_supervisor:
-  - none
-</checkpoint>
-```
-
-### Status values
-
-| Status | When to use |
-|--------|-------------|
-| `working` | Still making progress on current step |
-| `blocked` | Cannot proceed without external input |
-| `step_done` | Current step is complete, ready for verification |
-| `workflow_done` | All steps complete |
-
-## Acceptance & Verification
-
-The supervisor uses an AcceptanceContract to define what "truly done" means.
-This goes beyond "agent says done" — the supervisor checks:
-
-- Required evidence present in your checkpoints
-- Forbidden states not active (e.g., test_failing)
-- All verification commands pass
-- Finish policy satisfied
-
-Your checkpoint `evidence` field is matched against the contract. Be specific
-about what you modified, what you ran, and what the result was.
-
-## Rules
-
-1. Do NOT ask "should I continue?" — the supervisor decides
-2. Do NOT skip steps or verification
-3. Emit checkpoints after every significant action
-4. The supervisor will inject next-step instructions when ready
-5. Be specific in checkpoint evidence — the acceptance contract checks it
+- load [skills/thin-supervisor/references/worker-checkpoint-protocol.md](/Users/chris/workspace/lite-harness-supervisor/skills/thin-supervisor/references/worker-checkpoint-protocol.md)
+- follow the checkpoint protocol exactly
+- do not skip verification or invent your own control flow
