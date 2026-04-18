@@ -811,6 +811,20 @@ def cmd_observe(args):
     if snap.get("next_action"):
         print(f"Next:    {snap['next_action']}")
 
+    ep = snap.get("event_plane") or {}
+    if ep:
+        parts = []
+        if ep.get("waits_open"):
+            parts.append(f"waits_open={ep['waits_open']}")
+        if ep.get("mailbox_new"):
+            parts.append(f"mailbox_new={ep['mailbox_new']}")
+        if ep.get("mailbox_acknowledged"):
+            parts.append(f"mailbox_ack={ep['mailbox_acknowledged']}")
+        if parts:
+            print(f"Event plane: {', '.join(parts)}")
+        if ep.get("latest_wake_decision"):
+            print(f"Last wake:   {ep['latest_wake_decision']}")
+
     if timeline:
         print(f"\nRecent events ({len(timeline)}):")
         for e in timeline:
@@ -1932,6 +1946,13 @@ def _display_view(record) -> dict:
     preserves the long-standing 'persisted run was left in progress without
     an active daemon worker' UX that operator tooling depends on.
     """
+    ep = getattr(record, "event_plane", None) or {}
+    ep_tags = []
+    if int(ep.get("waits_open", 0) or 0) > 0:
+        ep_tags.append("awaiting-review")
+    if int(ep.get("mailbox_new", 0) or 0) > 0:
+        ep_tags.append(f"mailbox:{int(ep['mailbox_new'])}")
+
     view = {
         "run_id": record.run_id,
         "worktree_root": record.worktree_root,
@@ -1945,6 +1966,7 @@ def _display_view(record) -> dict:
         "status_reason": record.last_checkpoint_summary,
         "daemon_socket": record.daemon_socket,
         "tag": record.tag,
+        "event_plane_tags": ep_tags,
     }
     orphan_non_paused = (
         record.is_orphaned
@@ -2042,9 +2064,9 @@ def cmd_status(args):
         # top_state is already specific.
         state = r.get("top_state", "")
         pclass = r.get("pause_class", "")
-        if state == "PAUSED_FOR_HUMAN" and pclass:
-            return f"{state}[{pclass}]"
-        return state
+        base = f"{state}[{pclass}]" if state == "PAUSED_FOR_HUMAN" and pclass else state
+        tags = r.get("event_plane_tags") or []
+        return f"{base} [{' '.join(tags)}]" if tags else base
 
     if daemon_runs:
         print("Active runs:")

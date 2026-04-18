@@ -34,6 +34,10 @@ class RunSnapshot:
     last_instruction_summary: str
     delivery_state: str
     updated_at: str               # timestamp from state or session log
+    # Event-plane backlog summary (Task 5). Optional: callers that do not
+    # have an EventPlaneStore handy (history replay, tests that don't
+    # exercise the event plane) leave it None.
+    event_plane: "RunEventPlaneSummary | None" = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -55,6 +59,7 @@ class RunSnapshot:
             "last_instruction_summary": self.last_instruction_summary,
             "delivery_state": self.delivery_state,
             "updated_at": self.updated_at,
+            "event_plane": self.event_plane.to_dict() if self.event_plane else None,
         }
 
 

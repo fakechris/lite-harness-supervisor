@@ -2738,3 +2738,78 @@ def test_overview_empty_state_prints_friendly_message(tmp_path, monkeypatch, cap
     assert rc == 0
     out = capsys.readouterr().out
     assert "No sessions" in out or "daemons=0" in out
+
+
+# ─── Task 5: event-plane surfacing in status / observe ──────────────
+
+def _write_session_state_with_mailbox(
+    worktree: Path, *, run_id: str, session_id: str,
+    mailbox_new: int = 1, wake_decision: str = "notify_operator",
+) -> None:
+    """Write a state.json carrying ``session_id`` and append a new mailbox
+    item so summarize_for_session returns mailbox_new >= 1."""
+    from supervisor.event_plane.models import SessionMailboxItem
+    from supervisor.event_plane.store import EventPlaneStore
+
+    runtime = worktree / ".supervisor" / "runtime"
+    run_dir = runtime / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(json.dumps({
+        "run_id": run_id,
+        "session_id": session_id,
+        "top_state": "RUNNING",
+        "current_node_id": "step_1",
+        "pane_target": "%3",
+        "spec_path": "/tmp/spec.yaml",
+        "surface_type": "tmux",
+        "controller_mode": "daemon",
+        "workspace_root": str(worktree),
+    }))
+    store = EventPlaneStore(runtime)
+    for i in range(mailbox_new):
+        store.append_mailbox_item(SessionMailboxItem(
+            session_id=session_id,
+            run_id=run_id,
+            request_id=f"req_{i}",
+            source_kind="external_review",
+            summary=f"review #{i}",
+            delivery_status="new",
+            wake_decision=wake_decision,
+        ))
+
+
+def test_status_tags_session_with_mailbox_backlog(tmp_path, monkeypatch, capsys):
+    """When a session has mailbox_new > 0, cmd_status must render the
+    ``mailbox:N`` tag alongside the state label so the operator sees the
+    backlog without drilling into ``mailbox list``."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
+    _write_session_state_with_mailbox(
+        tmp_path, run_id="run_mb_tag", session_id="sess_mb_tag",
+        mailbox_new=2,
+    )
+
+    rc = app.cmd_status(argparse.Namespace(config=None, local=True))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "run_mb_tag" in out
+    assert "mailbox:2" in out
+
+
+def test_observe_renders_event_plane_block(tmp_path, monkeypatch, capsys):
+    """cmd_observe must include an event-plane line when the folded
+    summary has any non-zero counter or a latest wake decision."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("supervisor.daemon.client.DaemonClient", _DaemonStopped)
+    _write_session_state_with_mailbox(
+        tmp_path, run_id="run_ob_ep", session_id="sess_ob_ep",
+        mailbox_new=1, wake_decision="notify_operator",
+    )
+    _patch_session_index_registries(monkeypatch)
+
+    rc = app.cmd_observe(argparse.Namespace(run_id="run_ob_ep"))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "run_ob_ep" in out
+    assert "mailbox_new=1" in out
+    assert "notify_operator" in out

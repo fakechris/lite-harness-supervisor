@@ -49,6 +49,7 @@ from supervisor.operator.api import (
     snapshot_from_state,
     timeline_from_session_log,
 )
+from supervisor.operator.models import RunEventPlaneSummary
 from supervisor.operator.jobs import JobTracker
 from supervisor.pause_summary import summarize_state
 from supervisor.spec_approval import load_runnable_spec
@@ -852,8 +853,27 @@ class DaemonServer:
         state, session_log = self._resolve_run_store(run_id)
         if state is None:
             return {"ok": False, "error": f"run {run_id} not found"}
-        snap = snapshot_from_state(state, session_log)
+        event_plane = self._event_plane_summary_for_state(state)
+        snap = snapshot_from_state(state, session_log, event_plane=event_plane)
         return {"ok": True, **snap.to_dict()}
+
+    def _event_plane_summary_for_state(self, state: dict) -> "RunEventPlaneSummary | None":
+        """Build a typed RunEventPlaneSummary from this daemon's event
+        plane store for the session on *state*.  Returns None when the
+        state has no session_id (older runs pre Task 3).
+        """
+        session_id = state.get("session_id", "") if state else ""
+        if not session_id:
+            return None
+        ep = summarize_for_session(self._event_plane_store, session_id)
+        return RunEventPlaneSummary(
+            waits_open=int(ep.get("waits_open", 0)),
+            mailbox_new=int(ep.get("mailbox_new", 0)),
+            mailbox_acknowledged=int(ep.get("mailbox_acknowledged", 0)),
+            requests_total=int(ep.get("requests_total", 0)),
+            latest_mailbox_item_id=str(ep.get("latest_mailbox_item_id", "") or ""),
+            latest_wake_decision=str(ep.get("latest_wake_decision", "") or ""),
+        )
 
     def _do_get_timeline(self, request: dict) -> dict:
         """Return RunTimelineEvents for a run."""
