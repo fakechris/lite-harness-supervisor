@@ -1323,3 +1323,27 @@ class TestDaemonExternalTask:
         second = server._find_store_for_run(run_id)
         assert first is not None
         assert first is second
+
+    def test_reaped_stores_cache_evicts_oldest_past_max(self, tmp_path):
+        """The LRU cap prevents unbounded growth for long-running daemons
+        that touch many reaped runs via the event-plane path."""
+        server = self._server(tmp_path)
+        server._reaped_stores_max = 3
+
+        def _make(rid: str) -> None:
+            run_dir = tmp_path / "runs" / rid
+            run_dir.mkdir(parents=True)
+            (run_dir / "state.json").write_text("{}", encoding="utf-8")
+            (run_dir / "session_log.jsonl").write_text("", encoding="utf-8")
+
+        for rid in ("a", "b", "c", "d"):
+            _make(rid)
+            server._find_store_for_run(rid)
+
+        assert list(server._reaped_stores.keys()) == ["b", "c", "d"]
+
+        # Re-touch "b" — must survive next eviction since it moves to tail.
+        server._find_store_for_run("b")
+        _make("e")
+        server._find_store_for_run("e")
+        assert list(server._reaped_stores.keys()) == ["d", "b", "e"]

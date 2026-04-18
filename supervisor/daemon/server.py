@@ -13,6 +13,7 @@ import socket
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 
 from supervisor.domain.enums import DeliveryState, TopState
@@ -146,13 +147,15 @@ class DaemonServer:
         event_plane_root = Path(self.runs_dir).parent
         self._event_plane_store = EventPlaneStore(event_plane_root)
         self._event_plane_ingest = EventPlaneIngest(self._event_plane_store)
-        # Cache of StateStore instances for reaped runs so concurrent
-        # event-plane appends share the same seq lock/counter. Without
-        # this, two threads hitting `_find_store_for_run` for the same
-        # reaped run would create separate StateStores and race on seq
-        # allocation.
-        self._reaped_stores: dict[str, StateStore] = {}
+        # Bounded LRU of StateStore instances for reaped runs so concurrent
+        # event-plane appends share the same seq lock/counter. Without this,
+        # two threads hitting `_find_store_for_run` for the same reaped run
+        # would create separate StateStores and race on seq allocation. The
+        # cap prevents unbounded growth over long-running daemons that
+        # process many runs.
+        self._reaped_stores: OrderedDict[str, StateStore] = OrderedDict()
         self._reaped_stores_lock = threading.Lock()
+        self._reaped_stores_max = 128
 
     def start(self) -> None:
         """Start the daemon: bind socket, write PID, accept connections."""
@@ -1029,6 +1032,7 @@ class DaemonServer:
         with self._reaped_stores_lock:
             cached = self._reaped_stores.get(run_id)
             if cached is not None:
+                self._reaped_stores.move_to_end(run_id)
                 return cached
             store = StateStore(str(run_dir))
             # Freshly-instantiated StateStore starts at seq=0; align with the
@@ -1036,6 +1040,8 @@ class DaemonServer:
             # don't collide with earlier seqs written while the run was live.
             store._session_seq = store._read_last_seq()
             self._reaped_stores[run_id] = store
+            while len(self._reaped_stores) > self._reaped_stores_max:
+                self._reaped_stores.popitem(last=False)
             return store
 
     def _append_run_session_event(self, run_id: str, event_type: str, payload: dict) -> None:
@@ -1270,15 +1276,18 @@ class DaemonServer:
         session_id = data.get("session_id", "")
         if not session_id:
             return
+        # Snapshot active stores under the lock, then do disk reads outside
+        # of it — the per-entry state.json reads can't be held under
+        # self._lock because that lock guards every IPC handler.
         with self._lock:
-            for entry in self._runs.values():
-                entry_store = entry.store
-                try:
-                    entry_state = json.loads(entry_store.state_path.read_text())
-                except (OSError, ValueError):
-                    continue
-                if entry_state.get("session_id") == session_id:
-                    return  # another run still holds this session
+            active_stores = [entry.store for entry in self._runs.values()]
+        for entry_store in active_stores:
+            try:
+                entry_state = json.loads(entry_store.state_path.read_text())
+            except (OSError, ValueError):
+                continue
+            if entry_state.get("session_id") == session_id:
+                return  # another run still holds this session
         try:
             store.close_session(session_id)
         except OSError:
