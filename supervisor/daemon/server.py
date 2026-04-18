@@ -146,6 +146,13 @@ class DaemonServer:
         event_plane_root = Path(self.runs_dir).parent
         self._event_plane_store = EventPlaneStore(event_plane_root)
         self._event_plane_ingest = EventPlaneIngest(self._event_plane_store)
+        # Cache of StateStore instances for reaped runs so concurrent
+        # event-plane appends share the same seq lock/counter. Without
+        # this, two threads hitting `_find_store_for_run` for the same
+        # reaped run would create separate StateStores and race on seq
+        # allocation.
+        self._reaped_stores: dict[str, StateStore] = {}
+        self._reaped_stores_lock = threading.Lock()
 
     def start(self) -> None:
         """Start the daemon: bind socket, write PID, accept connections."""
@@ -1013,14 +1020,23 @@ class DaemonServer:
         if entry is not None:
             return entry.store
         run_dir = Path(self.runs_dir) / run_id
-        if (run_dir / "state.json").exists():
+        if not (run_dir / "state.json").exists():
+            return None
+        # Reuse a cached StateStore per run_id so concurrent callers share
+        # the seq lock/counter. This closes a race where two threads would
+        # each build their own StateStore, read the same last seq, and both
+        # emit seq=N+1 for different events.
+        with self._reaped_stores_lock:
+            cached = self._reaped_stores.get(run_id)
+            if cached is not None:
+                return cached
             store = StateStore(str(run_dir))
             # Freshly-instantiated StateStore starts at seq=0; align with the
             # run's existing session_log so events appended via this path
             # don't collide with earlier seqs written while the run was live.
             store._session_seq = store._read_last_seq()
+            self._reaped_stores[run_id] = store
             return store
-        return None
 
     def _append_run_session_event(self, run_id: str, event_type: str, payload: dict) -> None:
         store = self._find_store_for_run(run_id)
@@ -1141,6 +1157,22 @@ class DaemonServer:
         updated.wake_decision = decision.decision
         self._event_plane_store.append_mailbox_item(updated)
 
+        # v1 scope: the wake_policy decision is durably recorded on the
+        # mailbox item and in the session_log, and the mailbox item is the
+        # operator-observable notification. Auto-resume for ``wake_worker``
+        # (via `_do_resume`) is intentionally deferred because the resume
+        # path needs spec_path / pane_target / surface_type that the event-
+        # plane path does not currently carry. Log a clear warning so the
+        # gap is visible rather than silent.
+        if decision.decision == "wake_worker":
+            logger.warning(
+                "wake_policy decided wake_worker for run=%s session=%s mailbox_item=%s; "
+                "auto-resume not yet wired — operator must resume explicitly",
+                run_id or "?",
+                req.session_id,
+                mailbox_item_id,
+            )
+
         if run_id:
             self._append_run_session_event(
                 run_id,
@@ -1207,6 +1239,50 @@ class DaemonServer:
                     self._runs.pop(rid, None)
                 self._update_daemon_record_locked()
             logger.info("reaped %d finished run(s)", len(reaped))
+            # Phase 4: close sessions attached to runs that finished in a
+            # terminal state and have no remaining active run. Without this,
+            # find_session_by_attachment would forever return the same
+            # session for a given (workspace_root, spec_id), and every
+            # future run would inherit stale mailbox / waits.
+            for rid in reaped:
+                self._maybe_close_session_for(rid)
+
+    def _maybe_close_session_for(self, run_id: str) -> None:
+        """Close the Session attached to a reaped run if safe.
+
+        A session is safe to close when:
+        - the reaped run finished in a terminal top_state
+          (COMPLETED / FAILED / ABORTED), and
+        - no other run currently in the in-memory registry shares the
+          same session_id (so we don't close a session that still has
+          an active run).
+        """
+        store = self._find_store_for_run(run_id)
+        if store is None:
+            return
+        try:
+            data = json.loads(store.state_path.read_text())
+        except (OSError, ValueError):
+            return
+        top_state = data.get("top_state", "")
+        if top_state not in {"COMPLETED", "FAILED", "ABORTED"}:
+            return
+        session_id = data.get("session_id", "")
+        if not session_id:
+            return
+        with self._lock:
+            for entry in self._runs.values():
+                entry_store = entry.store
+                try:
+                    entry_state = json.loads(entry_store.state_path.read_text())
+                except (OSError, ValueError):
+                    continue
+                if entry_state.get("session_id") == session_id:
+                    return  # another run still holds this session
+        try:
+            store.close_session(session_id)
+        except OSError:
+            logger.warning("failed to close session %s on reap of %s", session_id, run_id)
 
     def _refresh_idle_state(self) -> None:
         """Update registry with current idle duration (called every ~1s from accept loop)."""
