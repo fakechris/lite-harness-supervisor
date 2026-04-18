@@ -40,6 +40,31 @@ def test_daemon_registry_round_trip(tmp_path, monkeypatch):
     assert list_daemons() == []
 
 
+def test_daemon_metadata_uses_absolute_socket_and_avoids_cross_worktree_collision(tmp_path, monkeypatch):
+    monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_DIR", str(tmp_path / "global"))
+
+    worktree_a = tmp_path / "wt-a"
+    worktree_b = tmp_path / "wt-b"
+    worktree_a.mkdir()
+    worktree_b.mkdir()
+
+    monkeypatch.chdir(worktree_a)
+    server_a = DaemonServer()
+    meta_a = server_a._daemon_metadata()
+    register_daemon(meta_a)
+
+    monkeypatch.chdir(worktree_b)
+    server_b = DaemonServer()
+    meta_b = server_b._daemon_metadata()
+    register_daemon(meta_b)
+
+    daemons = list_daemons()
+    assert len(daemons) == 2
+    assert all(Path(item["socket"]).is_absolute() for item in daemons)
+    assert {item["cwd"] for item in daemons} == {str(worktree_a), str(worktree_b)}
+    assert len({item["socket"] for item in daemons}) == 2
+
+
 def test_stale_pane_lock_is_reclaimed(tmp_path, monkeypatch):
     monkeypatch.setenv("THIN_SUPERVISOR_GLOBAL_DIR", str(tmp_path / "global"))
 

@@ -119,9 +119,9 @@ class DaemonServer:
                  sock_path: str = "", pid_path: str = "", runs_dir: str = "",
                  idle_shutdown_sec: int | None = None):
         self.config = config or RuntimeConfig()
-        self.sock_path = sock_path or DEFAULT_SOCK_PATH
-        self.pid_path = pid_path or DEFAULT_PID_PATH
-        self.runs_dir = runs_dir or DEFAULT_RUNS_DIR
+        self.sock_path = str(Path(sock_path or DEFAULT_SOCK_PATH).resolve())
+        self.pid_path = str(Path(pid_path or DEFAULT_PID_PATH).resolve())
+        self.runs_dir = str(Path(runs_dir or DEFAULT_RUNS_DIR).resolve())
         self.idle_shutdown_sec = idle_shutdown_sec if idle_shutdown_sec is not None else DEFAULT_IDLE_SHUTDOWN_SEC
         self._runs: dict[str, RunEntry] = {}
         self._lock = threading.Lock()
