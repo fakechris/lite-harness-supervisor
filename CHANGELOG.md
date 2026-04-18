@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.3.3 (2026-04-17)
+
+### Structured Protocol
+
+- Added a canonical checkpoint normalizer and frozen `reason_code` families (`esc.*`, `rec.*`, `ver.*`, `sem.*`) so runtime decisions can consume typed semantics instead of repeatedly re-parsing raw checkpoint prose.
+- Extended the worker checkpoint wire format with v2 semantic fields for progress, evidence scope, escalation class, authorization, blocking inputs, and machine-readable reason codes.
+- Tightened `reason_code` validation so only known frozen codes survive normalization; invented but regex-shaped tails are now rejected.
+
+### Routing & Recovery
+
+- Added contradiction routing by class: safety contradictions fail closed, business contradictions escalate, execution-semantic contradictions re-inject, and runtime-owned fields no longer silently override runtime truth.
+- Preserved attach-boundary semantics across pause/resume by recording the pre-pause top state and restoring `ATTACHED` when a run is resumed from an attach-boundary pause.
+- Added a recovery fail-safe for sidecars that restart while persisted in `RECOVERY_NEEDED`, preventing an empty-pane spin loop after a mid-recovery crash.
+
+### Sunset & Eval
+
+- Added the Slice 4A/4B regression and robustness harnesses, including golden scenarios, contradiction-routing coverage, v2 synthetic corpora, and sunset-trigger evaluation.
+- Encoded the v1 live-ingest sunset lifecycle (`NORMAL -> DEPRECATION -> ENFORCEMENT`) while keeping permanent replay/export compatibility for legacy checkpoints.
+- Locked the sunset trigger to the current observation window and frozen ingress surfaces, and added regression coverage for stale and future-dated coverage signals.
+
 ## 0.3.2 (2026-04-17)
 
 ### Observability
