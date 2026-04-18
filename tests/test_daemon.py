@@ -118,7 +118,6 @@ class TestDaemonStatus:
         assert status["runs"][0]["pause_reason"] == "node mismatch persisted for 5 checkpoints"
         assert "thin-supervisor run resume" in status["runs"][0]["next_action"]
         assert listed["runs"][0]["pause_reason"] == "node mismatch persisted for 5 checkpoints"
-        assert "thin-supervisor run resume" in listed["runs"][0]["next_action"]
 
     def test_recover_orphaned_running_state_pauses_it_for_explicit_resume(self, tmp_path):
         spec_path = tmp_path / "test.yaml"
@@ -208,6 +207,42 @@ class TestDaemonStatus:
         session_path = run_dir / "session_log.jsonl"
         if session_path.exists():
             assert "orphaned_run_recovered" not in session_path.read_text(encoding="utf-8")
+
+
+def test_daemon_server_uses_bindable_socket_path_for_deep_worktrees(tmp_path, monkeypatch):
+    deep_root = tmp_path
+    while len(str((deep_root / ".supervisor/daemon.sock").resolve()).encode("utf-8")) <= 120:
+        deep_root = deep_root / ("nestedsegment" * 2)
+    deep_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(deep_root)
+
+    server = DaemonServer()
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock_path = Path(server.sock_path)
+    sock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        sock.bind(server.sock_path)
+    finally:
+        sock.close()
+        sock_path.unlink(missing_ok=True)
+
+
+def test_daemon_server_expands_user_paths(tmp_path, monkeypatch):
+    import tempfile
+
+    home = Path(tempfile.mkdtemp(prefix="lhs-home-", dir="/tmp"))
+    monkeypatch.setenv("HOME", str(home))
+
+    server = DaemonServer(
+        sock_path="~/.supervisor/custom.sock",
+        pid_path="~/.supervisor/custom.pid",
+        runs_dir="~/.supervisor/runtime/runs",
+    )
+
+    assert server.sock_path == str((home / ".supervisor/custom.sock").resolve())
+    assert server.pid_path == str((home / ".supervisor/custom.pid").resolve())
+    assert server.runs_dir == str((home / ".supervisor/runtime/runs").resolve())
 
 
 class TestDaemonRegister:
