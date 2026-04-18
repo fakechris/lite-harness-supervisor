@@ -700,3 +700,49 @@ class TestPauseClassTag:
         rec = collect_sessions()[0]
         assert rec.pause_class == ""
         assert rec.tag == "paused"
+
+
+class TestEventPlanePopulation:
+    """Task 3: session_index should fold a passive event-plane summary
+    into every SessionRecord so overview / status / tui all see the
+    same ``event_plane`` block without re-doing the fold themselves."""
+
+    def test_record_carries_event_plane_summary(self, fake_worktrees):
+        from supervisor.event_plane.models import SessionMailboxItem
+        from supervisor.event_plane.store import EventPlaneStore
+
+        root, child = fake_worktrees
+        _write_state(child, "run_ep")
+        # State.json created above includes a session_id.  Point the
+        # event-plane store at the same runtime root and add one mailbox
+        # item for that session_id.
+        state_path = child / ".supervisor" / "runtime" / "runs" / "run_ep" / "state.json"
+        state_data = json.loads(state_path.read_text())
+        session_id = "sess_test"
+        state_data["session_id"] = session_id
+        state_path.write_text(json.dumps(state_data))
+
+        ep_store = EventPlaneStore(str(child / ".supervisor" / "runtime"))
+        ep_store.append_mailbox_item(SessionMailboxItem(
+            session_id=session_id,
+            request_id="r1",
+            source_kind="external_review",
+            summary="review landed",
+            payload={},
+            wake_decision="notify_operator",
+        ))
+
+        rec = collect_sessions()[0]
+        assert rec.session_id == session_id
+        assert rec.event_plane is not None
+        assert rec.event_plane["mailbox_new"] == 1
+        assert rec.event_plane["latest_wake_decision"] == "notify_operator"
+        assert rec.event_plane["latest_mailbox_item_id"]
+
+    def test_record_event_plane_none_when_session_id_missing(self, fake_worktrees):
+        root, child = fake_worktrees
+        # _write_state does not add session_id to state.json by default.
+        _write_state(child, "run_no_session")
+        rec = collect_sessions()[0]
+        assert rec.session_id == ""
+        assert rec.event_plane is None

@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from supervisor.event_plane.store import EventPlaneStore
+from supervisor.event_plane.surface import summarize_for_session
 from supervisor.global_registry import (
     list_daemons,
     list_known_worktrees,
@@ -75,6 +77,14 @@ class SessionRecord:
     surface_type: str = ""  # persisted surface ("tmux", "jsonl", "open_relay", …)
     tag: str = ""  # derived display tag; see _derive_tag
     pause_class: str = ""  # business|safety|review|recovery when top_state==PAUSED_FOR_HUMAN
+    session_id: str = ""  # persisted session_id (outlives run_id across replay)
+    # Passive event-plane summary for this session (see
+    # ``event_plane/surface.py``).  Dict-shaped to avoid pulling the
+    # operator.models dataclass into the session_index module; callers
+    # that want a typed handle can lift it with
+    # ``RunEventPlaneSummary(**record.event_plane)``.  ``None`` when the
+    # session has no event-plane record or the store is unreadable.
+    event_plane: dict | None = None
 
     def as_dict(self) -> dict:
         from dataclasses import asdict
@@ -311,8 +321,13 @@ def collect_sessions(*, local_only: bool = False) -> list[SessionRecord]:
 
     records: list[SessionRecord] = []
     seen: set[str] = set()
+    # One EventPlaneStore per worktree.  `collect_sessions` is a
+    # read-only scan, so we cache the store by runtime root to avoid
+    # reopening it for every run in the same worktree.
+    ep_store_cache: dict[Path, EventPlaneStore] = {}
 
     for worktree in roots:
+        runtime_root = worktree / ".supervisor" / "runtime"
         for run_id, state, last_update_at in _iter_run_states(worktree):
             if run_id in seen:
                 continue
@@ -346,6 +361,17 @@ def collect_sessions(*, local_only: bool = False) -> list[SessionRecord]:
                 controller_mode=controller_mode,
                 pause_class=pclass,
             )
+            session_id = state.get("session_id", "") or ""
+            ep_summary: dict | None = None
+            if session_id:
+                try:
+                    ep = ep_store_cache.get(runtime_root)
+                    if ep is None:
+                        ep = EventPlaneStore(str(runtime_root))
+                        ep_store_cache[runtime_root] = ep
+                    ep_summary = summarize_for_session(ep, session_id)
+                except OSError:
+                    ep_summary = None
             records.append(
                 SessionRecord(
                     run_id=run_id,
@@ -366,6 +392,8 @@ def collect_sessions(*, local_only: bool = False) -> list[SessionRecord]:
                     surface_type=state.get("surface_type", "") or "",
                     tag=tag,
                     pause_class=pclass,
+                    session_id=session_id,
+                    event_plane=ep_summary,
                 )
             )
     # Global recency sort: the operator asking "what's running?" cares

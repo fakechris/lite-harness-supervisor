@@ -18,8 +18,10 @@ from supervisor.operator.models import (
 from supervisor.operator.session_index import SessionRecord
 from supervisor.operator.system_overview import (
     build_alerts,
+    build_recent_system_timeline,
     build_system_snapshot,
     fold_counts,
+    load_system_snapshot,
 )
 
 
@@ -248,3 +250,112 @@ def test_build_system_snapshot_end_to_end():
     # is wired (Task 3). Keep that assertion explicit so future work
     # surfaces as a test change, not a silent drift.
     assert all(a.kind != "overdue_wait" for a in snapshot.alerts)
+
+
+# ─── shared system_events.jsonl aggregation ───────────────────────────
+
+def test_build_recent_system_timeline_merges_roots_newest_first(tmp_path):
+    """Shared system_events can live under multiple runtime roots; the
+    timeline folder merges them, dedups across discovery sources, and
+    returns the newest first."""
+    from supervisor.storage.system_events import append_system_event
+
+    root_a = tmp_path / "a" / ".supervisor" / "runtime"
+    root_b = tmp_path / "b" / ".supervisor" / "runtime"
+
+    append_system_event(
+        root_a, "daemon_started",
+        {"pid": 111, "cwd": "/a"}, occurred_at="2026-04-18T10:00:00+00:00",
+    )
+    append_system_event(
+        root_b, "daemon_started",
+        {"pid": 222, "cwd": "/b"}, occurred_at="2026-04-18T11:00:00+00:00",
+    )
+    # Duplicate discovery of root_a (e.g. cwd + known_worktrees).  The
+    # folder must not double-count the event.
+    events = build_recent_system_timeline([root_a, root_b, root_a], limit=10)
+    assert [e.payload.get("pid") for e in events] == [222, 111]
+    # Newest first carries a system-scope label since there's no
+    # session_id / run_id on daemon lifecycle events.
+    assert all(e.scope == "system" for e in events)
+
+
+def test_build_recent_system_timeline_state_transition_renders_scope_session(tmp_path):
+    from supervisor.storage.system_events import append_system_event
+
+    root = tmp_path / ".supervisor" / "runtime"
+    append_system_event(
+        root, "state_transition",
+        {
+            "from_state": "RUNNING",
+            "to_state": "PAUSED_FOR_HUMAN",
+            "reason": "awaiting input",
+            "session_id": "sess_1",
+            "run_id": "run_1",
+        },
+        occurred_at="2026-04-18T12:00:00+00:00",
+    )
+    events = build_recent_system_timeline([root], limit=10)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.scope == "session"
+    assert ev.session_id == "sess_1"
+    assert ev.run_id == "run_1"
+    assert "RUNNING → PAUSED_FOR_HUMAN" in ev.summary
+
+
+def test_load_system_snapshot_end_to_end_reads_real_sessions(tmp_path, monkeypatch):
+    """Full orchestration: write a state.json under a fake worktree,
+    append a shared system_event, and ensure ``load_system_snapshot``
+    returns a coherent SystemSnapshot that threads all three inputs."""
+    import json
+
+    from supervisor.storage.system_events import append_system_event
+
+    worktree = tmp_path / "worktree"
+    runtime = worktree / ".supervisor" / "runtime"
+    run_dir = runtime / "runs" / "run_load"
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(json.dumps({
+        "run_id": "run_load",
+        "session_id": "sess_load",
+        "spec_id": "phase_x",
+        "top_state": "RUNNING",
+        "current_node_id": "n1",
+        "pane_target": "tmux:0",
+        "spec_path": str(worktree / "spec.yaml"),
+        "workspace_root": str(worktree),
+        "controller_mode": "local",
+        "human_escalations": [],
+        "delivery_state": "IDLE",
+        "surface_type": "tmux",
+    }))
+    append_system_event(
+        runtime, "daemon_started",
+        {"pid": 9, "cwd": str(worktree)},
+        occurred_at="2026-04-18T09:00:00+00:00",
+    )
+
+    monkeypatch.chdir(worktree)
+    monkeypatch.setattr(
+        "supervisor.operator.session_index.list_daemons", lambda: [],
+    )
+    monkeypatch.setattr(
+        "supervisor.operator.session_index.list_pane_owners", lambda: [],
+    )
+    monkeypatch.setattr(
+        "supervisor.operator.session_index.list_known_worktrees", lambda: [],
+    )
+    monkeypatch.setattr(
+        "supervisor.operator.session_index._discover_git_worktrees",
+        lambda cwd: [],
+    )
+    monkeypatch.setattr(
+        "supervisor.operator.system_overview.list_daemons", lambda: [],
+    )
+
+    snapshot = load_system_snapshot(local_only=True)
+    assert snapshot.counts.daemons == 0
+    assert len(snapshot.sessions) == 1
+    assert snapshot.sessions[0].run_id == "run_load"
+    assert any(e.event_type == "daemon_started" for e in snapshot.recent_timeline)

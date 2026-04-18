@@ -52,6 +52,7 @@ from supervisor.operator.api import (
 from supervisor.operator.jobs import JobTracker
 from supervisor.pause_summary import summarize_state
 from supervisor.spec_approval import load_runnable_spec
+from supervisor.storage.system_events import append_system_event
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +198,15 @@ class DaemonServer:
         Path(self.pid_path).write_text(str(os.getpid()))
         register_daemon(self._daemon_metadata())
         register_worktree(os.getcwd())
+        append_system_event(
+            Path(self.runs_dir).parent,
+            "daemon_started",
+            {
+                "pid": os.getpid(),
+                "socket": self.sock_path,
+                "cwd": os.getcwd(),
+            },
+        )
         self._channel_host.start()
         recovered = self._recover_orphaned_runs()
         if recovered:
@@ -1230,6 +1240,23 @@ class DaemonServer:
                 },
             )
 
+        # Always promote the wake decision to the shared system log —
+        # ``run_id`` can be empty when the request's originating run has
+        # already ended, but the operator still needs to see the
+        # decision at the system level.
+        append_system_event(
+            Path(self.runs_dir).parent,
+            "wake_decision_applied",
+            {
+                "mailbox_item_id": mailbox_item_id,
+                "request_id": request_id,
+                "decision": decision.decision,
+                "reason": decision.reason,
+                "session_id": req.session_id,
+                "run_id": run_id,
+            },
+        )
+
         return {"decision": decision.decision, "reason": decision.reason}
 
     def _do_mailbox_list(self, request: dict) -> dict:
@@ -1382,6 +1409,15 @@ class DaemonServer:
         Path(self.sock_path).unlink(missing_ok=True)
         Path(self.pid_path).unlink(missing_ok=True)
         unregister_daemon(self.sock_path)
+        append_system_event(
+            Path(self.runs_dir).parent,
+            "daemon_stopped",
+            {
+                "pid": os.getpid(),
+                "socket": self.sock_path,
+                "cwd": os.getcwd(),
+            },
+        )
         logger.info("daemon stopped")
 
     @staticmethod
