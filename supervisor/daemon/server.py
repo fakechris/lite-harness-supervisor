@@ -6,10 +6,12 @@ Each run executes in its own thread via run_sidecar().
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import signal
 import socket
+import sys
 import threading
 import time
 import uuid
@@ -110,6 +112,28 @@ class RunEntry:
 
 
 DEFAULT_IDLE_SHUTDOWN_SEC = 600  # 10 minutes
+UNIX_SOCKET_MAX_PATH_BYTES = 107 if sys.platform.startswith("linux") else 103
+
+
+def _resolve_runtime_path(path: str) -> str:
+    return str(Path(path).expanduser().resolve())
+
+
+def _bindable_socket_path(path: str) -> str:
+    resolved = _resolve_runtime_path(path)
+    if len(resolved.encode("utf-8")) <= UNIX_SOCKET_MAX_PATH_BYTES:
+        return resolved
+
+    # AF_UNIX bind paths are short on macOS/BSD/Linux; keep the registry key
+    # unique by deriving a deterministic hashed socket path under /tmp.
+    digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:16]
+    fallback = f"/tmp/thin-supervisor-{digest}.sock"
+    logger.warning(
+        "socket path %s exceeds AF_UNIX limit; using fallback %s",
+        resolved,
+        fallback,
+    )
+    return fallback
 
 
 class DaemonServer:
@@ -119,9 +143,9 @@ class DaemonServer:
                  sock_path: str = "", pid_path: str = "", runs_dir: str = "",
                  idle_shutdown_sec: int | None = None):
         self.config = config or RuntimeConfig()
-        self.sock_path = str(Path(sock_path or DEFAULT_SOCK_PATH).resolve())
-        self.pid_path = str(Path(pid_path or DEFAULT_PID_PATH).resolve())
-        self.runs_dir = str(Path(runs_dir or DEFAULT_RUNS_DIR).resolve())
+        self.sock_path = _bindable_socket_path(sock_path or DEFAULT_SOCK_PATH)
+        self.pid_path = _resolve_runtime_path(pid_path or DEFAULT_PID_PATH)
+        self.runs_dir = _resolve_runtime_path(runs_dir or DEFAULT_RUNS_DIR)
         self.idle_shutdown_sec = idle_shutdown_sec if idle_shutdown_sec is not None else DEFAULT_IDLE_SHUTDOWN_SEC
         self._runs: dict[str, RunEntry] = {}
         self._lock = threading.Lock()
