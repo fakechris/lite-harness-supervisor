@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Layered System Observability
+
+- Added `thin-supervisor overview` (plus `--json` and `--watch`) so operators can see the whole system — daemons, live/orphaned/completed sessions, event-plane backlog, alerts, and a cross-run timeline — from any directory without tailing logs.
+- Emitted `state_transition` as a first-class event on every real `top_state` change through a new `StateStore.transition_and_record()` wrapper, and added a frozen allowlist + shared `.supervisor/runtime/shared/system_events.jsonl` log for cross-run observability (daemon lifecycle, high-signal transitions, mailbox arrivals, wake decisions, wait expiries).
+- Folded an event-plane summary (`waits_open`, `mailbox_new`, `mailbox_acknowledged`, `latest_mailbox_item_id`, `latest_wake_decision`) into both `RunSnapshot` and `SessionRecord`, so `status` now tags sessions with `mailbox:N` / `awaiting-review` and `observe` renders backlog + latest wake decision inline.
+- Added a TUI global mode (`g` toggle) that renders the same `SystemSnapshot` projection as `overview` without leaving the run-centric view.
+
 ## 0.3.4 (2026-04-18)
 
 ### Session-First Event Plane
