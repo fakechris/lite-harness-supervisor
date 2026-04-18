@@ -91,7 +91,11 @@ def build_alerts(
     """
     alerts: list[SystemAlert] = []
 
-    paused = [s for s in sessions if not s.is_completed and not s.is_orphaned and s.pause_reason]
+    # A paused run with an explicit pause_reason always needs operator
+    # attention, whether or not it currently has a daemon.  The common
+    # "paused + daemon idle-shut-down" shape must surface here and not
+    # be masked into the orphan bucket alone.
+    paused = [s for s in sessions if not s.is_completed and s.pause_reason]
     if paused:
         alerts.append(SystemAlert(
             kind="paused_for_human",
@@ -99,7 +103,10 @@ def build_alerts(
             summary=f"{len(paused)} run(s) paused waiting for operator input",
         ))
 
-    orphaned = [s for s in sessions if s.is_orphaned]
+    # Orphan alert covers sessions with no live owner that are *not*
+    # already being flagged as paused_for_human, so the operator sees
+    # each actionable condition once.
+    orphaned = [s for s in sessions if s.is_orphaned and not s.pause_reason]
     if orphaned:
         alerts.append(SystemAlert(
             kind="orphaned",

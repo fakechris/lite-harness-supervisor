@@ -2665,3 +2665,76 @@ def test_cmd_review_result_reports_wake_decision(monkeypatch, capsys):
     assert "res_1" in out
     assert "mb_1" in out
     assert "notify_operator" in out
+
+
+# ─── overview command (Task 4) ───────────────────────────────────────
+
+
+def _write_paused_state_with_session(tmp_path, *, run_id="run_paused_ov"):
+    run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(json.dumps({
+        "run_id": run_id,
+        "session_id": f"sess_{run_id}",
+        "top_state": "PAUSED_FOR_HUMAN",
+        "current_node_id": "step_2",
+        "pane_target": "%2",
+        "spec_path": "/tmp/spec.yaml",
+        "surface_type": "tmux",
+        "human_escalations": [{"reason": "awaiting reviewer input"}],
+    }))
+
+
+def test_overview_prints_headline_and_alerts(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    _write_paused_state_with_session(tmp_path)
+    args = argparse.Namespace(config=None, local=True, json=False, watch=False)
+    rc = app.cmd_overview(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Headline section is present with live/orphaned/completed counts.
+    assert "daemons=" in out
+    # Alerts section surfaces the paused run.
+    assert "paused_for_human" in out
+    # Hottest-sessions section shows the paused run_id.
+    assert "run_paused_ov" in out
+
+
+def test_overview_json_output_is_machine_readable(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    _write_paused_state_with_session(tmp_path)
+    args = argparse.Namespace(config=None, local=True, json=True, watch=False)
+    rc = app.cmd_overview(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    parsed = json.loads(out)
+    assert "counts" in parsed
+    assert "alerts" in parsed
+    assert "sessions" in parsed
+    assert "recent_timeline" in parsed
+    assert any(a["kind"] == "paused_for_human" for a in parsed["alerts"])
+
+
+def test_overview_watch_runs_bounded_loop(tmp_path, monkeypatch, capsys):
+    """--watch re-renders without crashing.  We pin the render loop to
+    two iterations so the test stays deterministic."""
+    monkeypatch.chdir(tmp_path)
+    _write_paused_state_with_session(tmp_path)
+    args = argparse.Namespace(
+        config=None, local=True, json=False, watch=True,
+        max_iterations=2, interval=0.0,
+    )
+    rc = app.cmd_overview(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Two renders means the headline appears at least twice.
+    assert out.count("daemons=") >= 2
+
+
+def test_overview_empty_state_prints_friendly_message(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    args = argparse.Namespace(config=None, local=True, json=False, watch=False)
+    rc = app.cmd_overview(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "No sessions" in out or "daemons=0" in out
