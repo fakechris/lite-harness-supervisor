@@ -11,7 +11,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from supervisor.operator.models import RunSnapshot, RunTimelineEvent
+from supervisor.operator.models import (
+    RunEventPlaneSummary,
+    RunSnapshot,
+    RunTimelineEvent,
+)
 from supervisor.pause_summary import (
     next_action,
     pause_reason,
@@ -92,6 +96,10 @@ _EVENT_SUMMARIES: dict[str, Any] = {
     "completed_after_review": lambda p: f"completed after review by {p.get('reviewer', '')}",
     "clarification_request": lambda p: f"Q: {p.get('question', '')[:80]}",
     "clarification_response": lambda p: f"A: {p.get('answer', '')[:80]}",
+    "state_transition": lambda p: (
+        f"{p.get('from_state', '')} → {p.get('to_state', '')}"
+        + (f" — {p.get('reason', '')}" if p.get('reason') else "")
+    ),
 }
 
 
@@ -160,8 +168,20 @@ def _read_max_seq(session_log_path: Path) -> int:
 
 # ── public API ──────────────────────────────────────────────────────
 
-def snapshot_from_state(state: dict[str, Any], session_log_path: Path) -> RunSnapshot:
-    """Build a RunSnapshot from a raw state dict (state.json content)."""
+def snapshot_from_state(
+    state: dict[str, Any],
+    session_log_path: Path,
+    *,
+    event_plane: RunEventPlaneSummary | None = None,
+) -> RunSnapshot:
+    """Build a RunSnapshot from a raw state dict (state.json content).
+
+    ``event_plane`` is optional: callers that have a live EventPlaneStore
+    (daemon inspect, local ``do_inspect``) can pass a
+    :class:`RunEventPlaneSummary` so the same counters the overview uses
+    also appear on the per-run snapshot.  Replay / history paths leave
+    it ``None``.
+    """
     return RunSnapshot(
         run_id=state.get("run_id", ""),
         spec_id=state.get("spec_id", ""),
@@ -181,6 +201,7 @@ def snapshot_from_state(state: dict[str, Any], session_log_path: Path) -> RunSna
         last_instruction_summary=_last_instruction_summary(state),
         delivery_state=state.get("delivery_state", "IDLE"),
         updated_at=_updated_at(state, session_log_path),
+        event_plane=event_plane,
     )
 
 

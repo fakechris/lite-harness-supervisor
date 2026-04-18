@@ -811,6 +811,20 @@ def cmd_observe(args):
     if snap.get("next_action"):
         print(f"Next:    {snap['next_action']}")
 
+    ep = snap.get("event_plane") or {}
+    if ep:
+        parts = []
+        if ep.get("waits_open"):
+            parts.append(f"waits_open={ep['waits_open']}")
+        if ep.get("mailbox_new"):
+            parts.append(f"mailbox_new={ep['mailbox_new']}")
+        if ep.get("mailbox_acknowledged"):
+            parts.append(f"mailbox_ack={ep['mailbox_acknowledged']}")
+        if parts:
+            print(f"Event plane: {', '.join(parts)}")
+        if ep.get("latest_wake_decision"):
+            print(f"Last wake:   {ep['latest_wake_decision']}")
+
     if timeline:
         print(f"\nRecent events ({len(timeline)}):")
         for e in timeline:
@@ -1932,6 +1946,13 @@ def _display_view(record) -> dict:
     preserves the long-standing 'persisted run was left in progress without
     an active daemon worker' UX that operator tooling depends on.
     """
+    ep = getattr(record, "event_plane", None) or {}
+    ep_tags = []
+    if int(ep.get("waits_open", 0) or 0) > 0:
+        ep_tags.append("awaiting-review")
+    if int(ep.get("mailbox_new", 0) or 0) > 0:
+        ep_tags.append(f"mailbox:{int(ep['mailbox_new'])}")
+
     view = {
         "run_id": record.run_id,
         "worktree_root": record.worktree_root,
@@ -1945,6 +1966,7 @@ def _display_view(record) -> dict:
         "status_reason": record.last_checkpoint_summary,
         "daemon_socket": record.daemon_socket,
         "tag": record.tag,
+        "event_plane_tags": ep_tags,
     }
     orphan_non_paused = (
         record.is_orphaned
@@ -2042,9 +2064,9 @@ def cmd_status(args):
         # top_state is already specific.
         state = r.get("top_state", "")
         pclass = r.get("pause_class", "")
-        if state == "PAUSED_FOR_HUMAN" and pclass:
-            return f"{state}[{pclass}]"
-        return state
+        base = f"{state}[{pclass}]" if state == "PAUSED_FOR_HUMAN" and pclass else state
+        tags = r.get("event_plane_tags") or []
+        return f"{base} [{' '.join(tags)}]" if tags else base
 
     if daemon_runs:
         print("Active runs:")
@@ -2245,6 +2267,120 @@ def cmd_bootstrap(args):
                 pid = result.conflict.get("pid", "?")
                 print(f"  Stop:     kill {pid}  # foreground debug process")
     return 0 if result.ok else 1
+
+
+def _render_overview_text(snapshot, *, cwd: str) -> str:
+    """Render a ``SystemSnapshot`` as compact plain text.
+
+    Sections (in order):
+      1. headline counts
+      2. alerts (only when non-empty)
+      3. hottest sessions (non-completed first, newest first)
+      4. recent system events
+    """
+    from pathlib import Path as _Path
+
+    lines: list[str] = []
+    c = snapshot.counts
+    lines.append(
+        f"System: daemons={c.daemons}  live={c.live_sessions}  "
+        f"foreground={c.foreground_runs}  orphaned={c.orphaned_sessions}  "
+        f"completed={c.completed_sessions}"
+    )
+    lines.append(
+        f"Event plane: waits_open={c.waits_open}  mailbox_new={c.mailbox_new}  "
+        f"mailbox_acknowledged={c.mailbox_acknowledged}"
+    )
+
+    if snapshot.alerts:
+        lines.append("")
+        lines.append("Alerts:")
+        for alert in snapshot.alerts:
+            lines.append(f"  [{alert.kind}] {alert.summary}")
+
+    actionable = [s for s in snapshot.sessions if not s.is_completed]
+    if actionable:
+        lines.append("")
+        lines.append("Hottest sessions:")
+        for s in actionable[:8]:
+            wt_suffix = ""
+            try:
+                if _Path(s.worktree_root).resolve() != _Path(cwd).resolve():
+                    wt_suffix = f"  worktree={s.worktree_root}"
+            except (OSError, RuntimeError):
+                pass
+            tag = s.tag or ("live" if s.is_live else "local")
+            ep = s.event_plane or {}
+            ep_suffix = ""
+            if ep.get("waits_open") or ep.get("mailbox_new"):
+                ep_suffix = (
+                    f"  waits={ep.get('waits_open', 0)}"
+                    f"  mailbox_new={ep.get('mailbox_new', 0)}"
+                )
+            lines.append(
+                f"  [{tag}]  {s.run_id}  {s.top_state}  "
+                f"node={s.current_node}{ep_suffix}{wt_suffix}"
+            )
+            if s.pause_reason:
+                lines.append(f"    reason: {s.pause_reason}")
+    elif not snapshot.sessions:
+        lines.append("")
+        lines.append("No sessions found under this worktree scope.")
+
+    if snapshot.recent_timeline:
+        lines.append("")
+        lines.append("Recent system events:")
+        for ev in snapshot.recent_timeline[:10]:
+            who = ev.run_id or ev.session_id or "system"
+            lines.append(f"  {ev.occurred_at}  [{who}]  {ev.summary}")
+
+    return "\n".join(lines)
+
+
+def cmd_overview(args):
+    """System-level snapshot: daemons, sessions, alerts, recent events.
+
+    Flags (via argparse ``Namespace``):
+      - ``local``: restrict to the current worktree (same semantics as
+        ``status --local``).
+      - ``json``: emit machine-readable JSON instead of text.
+      - ``watch``: re-render until the user interrupts.  Tests pass
+        ``max_iterations`` and ``interval`` to keep the loop bounded.
+    """
+    import json as _json
+    import time as _time
+
+    from supervisor.operator.system_overview import load_system_snapshot
+
+    local_only = bool(getattr(args, "local", False))
+    want_json = bool(getattr(args, "json", False))
+    watch = bool(getattr(args, "watch", False))
+    interval = float(getattr(args, "interval", 2.0) or 0.0)
+    max_iterations = int(getattr(args, "max_iterations", 0) or 0)
+
+    def _once() -> None:
+        snapshot = load_system_snapshot(local_only=local_only)
+        if want_json:
+            print(_json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2))
+        else:
+            print(_render_overview_text(snapshot, cwd=os.getcwd()))
+
+    if not watch:
+        _once()
+        return 0
+
+    iterations = 0
+    try:
+        while True:
+            _once()
+            iterations += 1
+            if max_iterations and iterations >= max_iterations:
+                break
+            if interval > 0:
+                _time.sleep(interval)
+    except KeyboardInterrupt:
+        pass
+    return 0
 
 
 def cmd_config_set(args):
@@ -2712,6 +2848,31 @@ def build_runtime_parser() -> argparse.ArgumentParser:
         help="Restrict to the current worktree (skip other known worktrees)",
     )
 
+    p_overview = sub.add_parser(
+        "overview",
+        help="System-level snapshot: daemons, sessions, alerts, recent events",
+    )
+    p_overview.add_argument("--config", default=None)
+    p_overview.add_argument(
+        "--local",
+        action="store_true",
+        help="Restrict to the current worktree (skip other known worktrees)",
+    )
+    p_overview.add_argument(
+        "--json", action="store_true", help="Emit machine-readable JSON",
+    )
+    p_overview.add_argument(
+        "--watch", action="store_true", help="Re-render until interrupted",
+    )
+    p_overview.add_argument(
+        "--interval", type=float, default=2.0,
+        help="Seconds between renders under --watch (default 2.0)",
+    )
+    p_overview.add_argument(
+        "--max-iterations", dest="max_iterations", type=int, default=0,
+        help=argparse.SUPPRESS,  # test hook to bound the watch loop
+    )
+
     sub.add_parser("stop", help="Stop the supervisor daemon (alias for daemon stop)")
 
     p_bridge = sub.add_parser("bridge", help="Tmux pane operations")
@@ -2856,6 +3017,8 @@ def main():
             sys.exit(1)
     elif args.command == "status":
         sys.exit(cmd_status(args))
+    elif args.command == "overview":
+        sys.exit(cmd_overview(args))
     elif args.command == "bridge":
         sys.exit(cmd_bridge(args))
     elif args.command == "bootstrap":

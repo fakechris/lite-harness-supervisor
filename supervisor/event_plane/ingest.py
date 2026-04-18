@@ -190,6 +190,24 @@ class EventPlaneIngest:
         )
         self.store.append_mailbox_item(mb_item)
 
+        # Promote mailbox creation to the shared system log so
+        # ``overview`` can show recent backlog arrivals without
+        # re-folding every per-session store.  Observability-only:
+        # ack / wake transitions are *not* re-emitted here.
+        from supervisor.storage.system_events import append_system_event
+        append_system_event(
+            self.store.runtime_root,
+            "session_mailbox_item_created",
+            {
+                "mailbox_item_id": mb_item.mailbox_item_id,
+                "session_id": mb_item.session_id,
+                "run_id": mb_item.run_id or "",
+                "request_id": mb_item.request_id,
+                "source_kind": mb_item.source_kind,
+                "summary": mb_item.summary,
+            },
+        )
+
         if idempotency_key:
             pay["_idempotency_key"] = idempotency_key
             pay["_mailbox_item_id"] = mb_item.mailbox_item_id

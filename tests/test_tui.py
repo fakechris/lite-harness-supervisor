@@ -14,6 +14,12 @@ from supervisor.operator.tui import (
     format_clarification,
     collect_runs,
 )
+from supervisor.operator.tui import (
+    format_system_banner,
+    format_system_alerts,
+    format_system_timeline,
+    format_actionable_sessions,
+)
 
 
 def _make_run(**overrides):
@@ -453,3 +459,141 @@ class TestTuiCollectRunsParity:
         persist = next((r for r in items if r["run_id"] == "run_persist"), None)
         assert persist is not None
         assert persist["tag"] in {"paused", "orphaned"}
+
+
+# ── Task 6: global-mode TUI formatters ─────────────────────────────
+
+class TestGlobalModeFormatters:
+    """Task 6: the TUI global mode renders a SystemSnapshot through the
+    same projection layer as the overview CLI.  The formatters are pure
+    (input → list[str]) so they can be unit-tested without curses."""
+
+    def _snapshot(self, **overrides):
+        from supervisor.operator.models import (
+            SystemAlert,
+            SystemCounts,
+            SystemSnapshot,
+            SystemTimelineEvent,
+        )
+        from supervisor.operator.session_index import SessionRecord
+
+        counts = SystemCounts(
+            daemons=2,
+            foreground_runs=1,
+            live_sessions=3,
+            orphaned_sessions=1,
+            completed_sessions=4,
+            waits_open=2,
+            mailbox_new=1,
+            mailbox_acknowledged=0,
+        )
+        alerts = [
+            SystemAlert(kind="paused_for_human", count=1,
+                        summary="1 run paused"),
+            SystemAlert(kind="mailbox_backlog", count=1,
+                        summary="1 mailbox item"),
+        ]
+        timeline = [
+            SystemTimelineEvent(
+                event_type="state_transition",
+                occurred_at="2026-04-18T12:00:00+00:00",
+                scope="session", session_id="s1", run_id="r1",
+                summary="RUNNING → PAUSED_FOR_HUMAN",
+                payload={},
+            ),
+            SystemTimelineEvent(
+                event_type="daemon_started",
+                occurred_at="2026-04-18T11:00:00+00:00",
+                scope="system", session_id="", run_id="",
+                summary="daemon started (pid 42)",
+                payload={},
+            ),
+        ]
+        sessions = [
+            SessionRecord(
+                run_id="run_paused", worktree_root="/w",
+                spec_path="s.yaml", controller_mode="daemon",
+                top_state="PAUSED_FOR_HUMAN", current_node="n",
+                pane_target="%1", daemon_socket="/tmp/d",
+                is_live=True, is_orphaned=False, is_completed=False,
+                pause_reason="needs review", next_action="",
+                last_checkpoint_summary="",
+                last_update_at="2026-04-18T09:00:00Z",
+                surface_type="tmux", tag="paused", pause_class="",
+                session_id="sess_paused",
+                event_plane={"waits_open": 0, "mailbox_new": 1,
+                             "mailbox_acknowledged": 0, "requests_total": 1,
+                             "latest_mailbox_item_id": "mb_1",
+                             "latest_wake_decision": "notify_operator"},
+            ),
+            SessionRecord(
+                run_id="run_done", worktree_root="/w",
+                spec_path="s.yaml", controller_mode="daemon",
+                top_state="COMPLETED", current_node="n",
+                pane_target="%2", daemon_socket="",
+                is_live=False, is_orphaned=False, is_completed=True,
+                pause_reason="", next_action="",
+                last_checkpoint_summary="",
+                last_update_at="2026-04-18T08:00:00Z",
+                surface_type="tmux", tag="completed", pause_class="",
+            ),
+        ]
+        snap = SystemSnapshot(
+            counts=counts, alerts=alerts,
+            recent_timeline=timeline, sessions=sessions,
+        )
+        return snap
+
+    def test_banner_shows_counts(self):
+        snap = self._snapshot()
+        lines = format_system_banner(snap)
+        text = "\n".join(lines)
+        assert "daemons=2" in text
+        assert "live=3" in text
+        assert "orphaned=1" in text
+        assert "mailbox_new=1" in text
+
+    def test_banner_handles_zero_counts(self):
+        from supervisor.operator.models import (
+            SystemCounts, SystemSnapshot,
+        )
+        empty = SystemSnapshot(
+            counts=SystemCounts(
+                daemons=0, foreground_runs=0, live_sessions=0,
+                orphaned_sessions=0, completed_sessions=0,
+                waits_open=0, mailbox_new=0, mailbox_acknowledged=0,
+            ),
+            alerts=[], recent_timeline=[], sessions=[],
+        )
+        lines = format_system_banner(empty)
+        assert any("daemons=0" in l for l in lines)
+
+    def test_alerts_panel_lists_each_alert(self):
+        snap = self._snapshot()
+        lines = format_system_alerts(snap.alerts)
+        text = "\n".join(lines)
+        assert "paused_for_human" in text
+        assert "1 run paused" in text
+        assert "mailbox_backlog" in text
+
+    def test_alerts_panel_when_quiet(self):
+        lines = format_system_alerts([])
+        text = "\n".join(lines)
+        assert "No alerts" in text or "(none)" in text
+
+    def test_system_timeline_renders_scope_and_summary(self):
+        snap = self._snapshot()
+        lines = format_system_timeline(snap.recent_timeline)
+        text = "\n".join(lines)
+        assert "PAUSED_FOR_HUMAN" in text
+        assert "daemon started" in text
+
+    def test_actionable_sessions_puts_paused_first(self):
+        snap = self._snapshot()
+        lines = format_actionable_sessions(snap)
+        text = "\n".join(lines)
+        # The paused session with a mailbox backlog must be visible, and
+        # the completed one must not (it's not actionable).
+        assert "run_paused" in text
+        assert "run_done" not in text
+        assert "mailbox:1" in text or "mailbox=1" in text

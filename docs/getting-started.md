@@ -97,6 +97,13 @@ prompt sheet.
 In another terminal:
 
 ```bash
+# Whole-system observability at a glance: counts, alerts, and a
+# cross-run timeline. Use --json to pipe into jq / tooling, or
+# --watch to re-render on an interval (defaults to 2s).
+thin-supervisor overview
+thin-supervisor overview --json | jq .
+thin-supervisor overview --watch
+
 # See every run known to the harness — across all worktrees —
 # even when no daemon is currently running in this directory.
 # status is global-first: it reads the canonical session index.

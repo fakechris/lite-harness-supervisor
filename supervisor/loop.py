@@ -120,13 +120,25 @@ class SupervisorLoop:
                 else:
                     state.last_agent_checkpoint = cp
                 if state.top_state not in preserve_state:
-                    transition_top_state(state, TopState.GATING, reason="agent checkpoint arrived")
+                    self.store.transition_and_record(
+                        state, TopState.GATING,
+                        reason="agent checkpoint arrived",
+                        source="loop.handle_event",
+                    )
         elif event["type"] == "agent_ask":
             if state.top_state not in preserve_state:
-                transition_top_state(state, TopState.GATING, reason="agent asked question")
+                self.store.transition_and_record(
+                    state, TopState.GATING,
+                    reason="agent asked question",
+                    source="loop.handle_event",
+                )
         elif event["type"] in {"agent_stop", "timeout"}:
             if state.top_state not in preserve_state:
-                transition_top_state(state, TopState.GATING, reason=f"agent event: {event['type']}")
+                self.store.transition_and_record(
+                    state, TopState.GATING,
+                    reason=f"agent event: {event['type']}",
+                    source="loop.handle_event",
+                )
 
     def gate(self, spec, state, *, triggered_by_seq: int = 0,
              triggered_by_checkpoint_id: str = "") -> SupervisorDecision:
@@ -399,11 +411,19 @@ class SupervisorLoop:
 
         if kind == DecisionType.CONTINUE.value:
             state.re_inject_count = 0
-            transition_top_state(state, TopState.RUNNING, reason="continue decision")
+            self.store.transition_and_record(
+                state, TopState.RUNNING,
+                reason="continue decision",
+                source="loop.apply_decision",
+            )
             return
         if kind == DecisionType.VERIFY_STEP.value:
             state.re_inject_count = 0
-            transition_top_state(state, TopState.VERIFYING, reason="verify_step decision")
+            self.store.transition_and_record(
+                state, TopState.VERIFYING,
+                reason="verify_step decision",
+                source="loop.apply_decision",
+            )
             return
         if kind == DecisionType.RE_INJECT.value:
             # Attach-boundary re-inject: MUST NOT touch current_attempt or the
@@ -447,7 +467,11 @@ class SupervisorLoop:
                     "reason_code": REC_RETRY_BUDGET_EXHAUSTED,
                 })
             else:
-                transition_top_state(state, TopState.RUNNING, reason="retry decision")
+                self.store.transition_and_record(
+                    state, TopState.RUNNING,
+                    reason="retry decision",
+                    source="loop.apply_decision",
+                )
             return
         if kind == DecisionType.BRANCH.value:
             _get = decision.get if isinstance(decision, dict) else lambda k, d=None: getattr(decision, k, d)
@@ -459,7 +483,11 @@ class SupervisorLoop:
             })
             state.current_node_id = _get("next_node_id")
             state.current_attempt = 0
-            transition_top_state(state, TopState.RUNNING, reason="branch decision")
+            self.store.transition_and_record(
+                state, TopState.RUNNING,
+                reason="branch decision",
+                source="loop.apply_decision",
+            )
             return
         if kind == DecisionType.ESCALATE_TO_HUMAN.value:
             pause_payload = decision.to_dict() if hasattr(decision, "to_dict") else dict(decision)
@@ -487,12 +515,20 @@ class SupervisorLoop:
             )
             return
         if kind == DecisionType.ABORT.value:
-            transition_top_state(state, TopState.ABORTED, reason="abort decision")
+            self.store.transition_and_record(
+                state, TopState.ABORTED,
+                reason="abort decision",
+                source="loop.apply_decision",
+            )
             return
         if kind == DecisionType.FINISH.value:
             finish = self.finish_gate.evaluate(spec, state, cwd=state.workspace_root or None)
             if finish["ok"]:
-                transition_top_state(state, TopState.COMPLETED, reason="finish gate satisfied")
+                self.store.transition_and_record(
+                    state, TopState.COMPLETED,
+                    reason="finish gate satisfied",
+                    source="loop.apply_decision",
+                )
                 self._notify_transition(
                     state,
                     event_type="run_completed",
@@ -516,7 +552,11 @@ class SupervisorLoop:
             if next_id is None:
                 finish = self.finish_gate.evaluate(spec, state, cwd=cwd)
                 if finish["ok"]:
-                    transition_top_state(state, TopState.COMPLETED, reason="final verification passed")
+                    self.store.transition_and_record(
+                        state, TopState.COMPLETED,
+                        reason="final verification passed",
+                        source="loop.apply_verification",
+                    )
                     self._notify_transition(
                         state,
                         event_type="run_completed",
@@ -528,7 +568,11 @@ class SupervisorLoop:
             else:
                 state.current_node_id = next_id
                 state.current_attempt = 0
-                transition_top_state(state, TopState.RUNNING, reason="verification advanced to next node")
+                self.store.transition_and_record(
+                    state, TopState.RUNNING,
+                    reason="verification advanced to next node",
+                    source="loop.apply_verification",
+                )
                 self._notify_transition(
                     state,
                     event_type="step_verified",
@@ -552,7 +596,11 @@ class SupervisorLoop:
                 "reason_code": REC_VERIFICATION_RETRY_EXHAUSTED,
             })
         else:
-            transition_top_state(state, TopState.RUNNING, reason="verification failed but retry budget remains")
+            self.store.transition_and_record(
+                state, TopState.RUNNING,
+                reason="verification failed but retry budget remains",
+                source="loop.apply_verification",
+            )
 
     def _set_delivery_state(self, state, new_state, *, reason: str = "") -> None:
         value = new_state.value if isinstance(new_state, DeliveryState) else str(new_state)
@@ -592,7 +640,11 @@ class SupervisorLoop:
         # with "RECOVERY_NEEDED" and let resume silently default to RUNNING.
         if not state.pre_pause_top_state:
             state.pre_pause_top_state = state.top_state.value
-        transition_top_state(state, TopState.PAUSED_FOR_HUMAN, reason="paused for human")
+        self.store.transition_and_record(
+            state, TopState.PAUSED_FOR_HUMAN,
+            reason="paused for human",
+            source="loop._pause_for_human",
+        )
         state.human_escalations.append(details)
         summary = summarize_state(state.to_dict())
         event_payload = dict(details)
@@ -641,7 +693,11 @@ class SupervisorLoop:
         # instead of defaulting to RUNNING.
         if not state.pre_pause_top_state:
             state.pre_pause_top_state = state.top_state.value
-        transition_top_state(state, TopState.RECOVERY_NEEDED, reason="recovery needed")
+        self.store.transition_and_record(
+            state, TopState.RECOVERY_NEEDED,
+            reason="recovery needed",
+            source="loop._enter_recovery",
+        )
         self.store.append_session_event(state.run_id, "recovery_needed", details)
         return details
 
@@ -712,7 +768,11 @@ class SupervisorLoop:
         adapter_state = getattr(terminal, "last_delivery_state", None) or DeliveryState.SUBMITTED
         self._set_delivery_state(state, adapter_state, reason="auto intervention confirmed")
         state.auto_intervention_count += 1
-        transition_top_state(state, TopState.RUNNING, reason="auto intervention requested")
+        self.store.transition_and_record(
+            state, TopState.RUNNING,
+            reason="auto intervention requested",
+            source="loop._attempt_auto_intervention",
+        )
         # Recovery succeeded. Clear any pre-recovery state snapshot — a
         # subsequent natural pause from RUNNING should capture RUNNING,
         # not inherit the stale pre-recovery (e.g. ATTACHED) value.
@@ -870,7 +930,11 @@ class SupervisorLoop:
         # current node, not clarify/plan/attach artifacts. Fresh register only;
         # resume paths skip this branch and keep their existing top_state.
         if state.top_state == TopState.READY:
-            transition_top_state(state, TopState.ATTACHED, reason="initial handoff")
+            self.store.transition_and_record(
+                state, TopState.ATTACHED,
+                reason="initial handoff",
+                source="loop.run_sidecar",
+            )
             self.store.save(state)
             pending_text = terminal.read(lines=read_lines)
             # Only parse the LAST checkpoint in the pane to avoid stale ones
