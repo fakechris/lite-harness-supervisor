@@ -17,6 +17,8 @@ from pathlib import Path
 
 from supervisor.domain.enums import DeliveryState, TopState
 from supervisor.domain.models import SupervisorState
+from supervisor.event_plane.ingest import EventPlaneIngest
+from supervisor.event_plane.store import EventPlaneStore
 from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
 from supervisor.gates.finish_gate import FinishGate
@@ -136,6 +138,11 @@ class DaemonServer:
         # command arriving during startup would hit an unbound socket.
         from supervisor.operator.channel_host import OperatorChannelHost
         self._channel_host = OperatorChannelHost.from_config(self.config)
+        # Event plane (Task 3): request/result/mailbox substrate lives
+        # under runs_dir's parent/shared so it co-locates with sessions.jsonl.
+        event_plane_root = Path(self.runs_dir).parent
+        self._event_plane_store = EventPlaneStore(event_plane_root)
+        self._event_plane_ingest = EventPlaneIngest(self._event_plane_store)
 
     def start(self) -> None:
         """Start the daemon: bind socket, write PID, accept connections."""
@@ -312,6 +319,14 @@ class DaemonServer:
             response = self._do_request_clarification(request)
         elif action == "get_job":
             response = self._do_get_job(request.get("job_id", ""))
+        elif action == "external_task_create":
+            response = self._do_external_task_create(request)
+        elif action == "external_result_ingest":
+            response = self._do_external_result_ingest(request)
+        elif action == "mailbox_list":
+            response = self._do_mailbox_list(request)
+        elif action == "mailbox_ack":
+            response = self._do_mailbox_ack(request)
         elif action == "ping":
             response = {"ok": True, "pong": True}
         else:
@@ -969,6 +984,106 @@ class DaemonServer:
 
         # Return most recent first, up to limit
         return {"ok": True, "notes": notes[-limit:][::-1]}
+
+    # ------------------------------------------------------------------
+    # Event plane (Task 3): external task request / result / mailbox
+    # ------------------------------------------------------------------
+
+    def _find_store_for_run(self, run_id: str) -> StateStore | None:
+        if not run_id:
+            return None
+        with self._lock:
+            entry = self._runs.get(run_id)
+        if entry is not None:
+            return entry.store
+        run_dir = Path(self.runs_dir) / run_id
+        if (run_dir / "state.json").exists():
+            return StateStore(str(run_dir))
+        return None
+
+    def _append_run_session_event(self, run_id: str, event_type: str, payload: dict) -> None:
+        store = self._find_store_for_run(run_id)
+        if store is None:
+            return
+        try:
+            store.append_session_event(run_id, event_type, payload)
+        except OSError:
+            logger.warning("failed to append session event %s for %s", event_type, run_id)
+
+    def _do_external_task_create(self, request: dict) -> dict:
+        resp = self._event_plane_ingest.register_request(
+            session_id=request.get("session_id", ""),
+            provider=request.get("provider", ""),
+            target_ref=request.get("target_ref", ""),
+            run_id=request.get("run_id") or None,
+            phase=request.get("phase", "execute"),
+            task_kind=request.get("task_kind", "review"),
+            blocking_policy=request.get("blocking_policy", "notify_only"),
+            deadline_at=request.get("deadline_at", ""),
+            resume_policy=request.get("resume_policy", ""),
+        )
+        if resp.get("ok"):
+            run_id = request.get("run_id") or ""
+            if run_id:
+                self._append_run_session_event(
+                    run_id,
+                    "external_task_requested",
+                    {
+                        "request_id": resp["request_id"],
+                        "wait_id": resp["wait_id"],
+                        "session_id": resp["session_id"],
+                        "provider": request.get("provider", ""),
+                        "target_ref": request.get("target_ref", ""),
+                        "task_kind": request.get("task_kind", "review"),
+                    },
+                )
+        return resp
+
+    def _do_external_result_ingest(self, request: dict) -> dict:
+        resp = self._event_plane_ingest.ingest_result(
+            request_id=request.get("request_id", ""),
+            provider=request.get("provider", ""),
+            result_kind=request.get("result_kind", ""),
+            summary=request.get("summary", ""),
+            payload=request.get("payload") or {},
+            run_id=request.get("run_id") if request.get("run_id") is not None else None,
+            idempotency_key=request.get("idempotency_key", ""),
+        )
+        if resp.get("ok") and not resp.get("deduped"):
+            # Best-effort session event. If run_id is known on either side we
+            # append to that run's session_log; correlation to session is
+            # handled durably in the event plane itself.
+            req_run_id = request.get("run_id") or ""
+            if not req_run_id:
+                req = self._event_plane_store.latest_request(request.get("request_id", ""))
+                if req is not None and req.run_id:
+                    req_run_id = req.run_id
+            if req_run_id:
+                self._append_run_session_event(
+                    req_run_id,
+                    "external_result_ingested",
+                    {
+                        "request_id": request.get("request_id", ""),
+                        "result_id": resp.get("result_id", ""),
+                        "mailbox_item_id": resp.get("mailbox_item_id", ""),
+                        "session_id": resp.get("session_id", ""),
+                        "provider": request.get("provider", ""),
+                        "result_kind": request.get("result_kind", ""),
+                    },
+                )
+        return resp
+
+    def _do_mailbox_list(self, request: dict) -> dict:
+        return self._event_plane_ingest.list_mailbox(
+            session_id=request.get("session_id", ""),
+            delivery_status=request.get("delivery_status", ""),
+        )
+
+    def _do_mailbox_ack(self, request: dict) -> dict:
+        return self._event_plane_ingest.ack_mailbox_item(
+            mailbox_item_id=request.get("mailbox_item_id", ""),
+            delivery_status=request.get("delivery_status", "acknowledged"),
+        )
 
     def _reap_finished(self) -> None:
         """Remove completed/stopped runs from registry.
