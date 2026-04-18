@@ -1021,6 +1021,82 @@ class TestDaemonExternalTask:
         listing = server._do_mailbox_list({"session_id": "s1"})
         assert len(listing["items"]) == 1
 
+    def test_external_result_ingest_applies_wake_policy_and_records_decision(self, tmp_path):
+        server = self._server(tmp_path)
+        reg = server._do_external_task_create({
+            "session_id": "s1",
+            "run_id": "run_x",
+            "provider": "external_model",
+            "target_ref": "PR#1",
+            "blocking_policy": "notify_only",
+        })
+        result = server._do_external_result_ingest({
+            "request_id": reg["request_id"],
+            "provider": "external_model",
+            "result_kind": "review_comments",
+            "summary": "nit",
+        })
+        assert result["ok"] is True
+        assert result["wake_decision"] == "notify_operator"
+
+        listing = server._do_mailbox_list({"session_id": "s1"})
+        assert listing["items"][0]["wake_decision"] == "notify_operator"
+
+    def test_status_surfaces_event_plane_counts_per_session(self, tmp_path):
+        spec_path = tmp_path / "test.yaml"
+        spec_path.write_text(
+            "kind: linear_plan\n"
+            "id: test\n"
+            "goal: test\n"
+            "steps:\n"
+            "  - id: s1\n"
+            "    type: task\n"
+            "    objective: do something\n"
+            "    verify:\n"
+            "      - type: command\n"
+            "        run: echo ok\n"
+            "        expect: pass\n"
+        )
+        spec = load_spec(str(spec_path))
+        seed = StateStore(str(tmp_path / "seed"))
+        seeded = seed.load_or_init(
+            spec,
+            spec_path=str(spec_path),
+            pane_target="%1",
+            workspace_root=str(tmp_path),
+        )
+        run_dir = tmp_path / "runs" / seeded.run_id
+        run_dir.mkdir(parents=True)
+        StateStore(str(run_dir)).save(seeded)
+
+        class _AliveThread:
+            def is_alive(self) -> bool:
+                return True
+
+        server = self._server(tmp_path)
+        server._runs[seeded.run_id] = RunEntry(
+            seeded.run_id,
+            str(spec_path),
+            "%1",
+            str(tmp_path),
+            "tmux",
+            _AliveThread(),
+            StateStore(str(run_dir)),
+        )
+
+        server._do_external_task_create({
+            "session_id": seeded.session_id,
+            "run_id": seeded.run_id,
+            "provider": "external_model",
+            "target_ref": "PR#1",
+        })
+
+        status = server._do_status()
+        plane = status["runs"][0]["event_plane"]
+        assert plane["waits_open"] == 1
+        assert plane["requests_total"] == 1
+        assert plane["mailbox_new"] == 0  # no result yet
+
     def test_mailbox_ack_transitions_item(self, tmp_path):
         server = self._server(tmp_path)
         reg = server._do_external_task_create({

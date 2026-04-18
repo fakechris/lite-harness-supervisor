@@ -18,7 +18,10 @@ from pathlib import Path
 from supervisor.domain.enums import DeliveryState, TopState
 from supervisor.domain.models import SupervisorState
 from supervisor.event_plane.ingest import EventPlaneIngest
+from supervisor.event_plane.models import SessionMailboxItem
 from supervisor.event_plane.store import EventPlaneStore
+from supervisor.event_plane.surface import summarize_for_session
+from supervisor.event_plane.wake_policy import evaluate as evaluate_wake
 from supervisor.plan.loader import load_spec
 from supervisor.storage.state_store import StateStore
 from supervisor.gates.finish_gate import FinishGate
@@ -434,6 +437,10 @@ class DaemonServer:
     def _do_status(self) -> dict:
         with self._lock:
             runs = [e.to_dict() for e in self._runs.values()]
+        for run in runs:
+            run["event_plane"] = summarize_for_session(
+                self._event_plane_store, run.get("session_id", "")
+            )
         return {"ok": True, "runs": runs}
 
     def _do_stop(self, run_id: str) -> dict:
@@ -706,6 +713,7 @@ class DaemonServer:
                 summary = summarize_state(state)
                 runs.append({
                     "run_id": e.run_id,
+                    "session_id": state.get("session_id", ""),
                     "spec_id": state.get("spec_id", ""),
                     "spec_path": e.spec_path,
                     "pane_target": e.pane_target,
@@ -717,6 +725,9 @@ class DaemonServer:
                     "current_attempt": state.get("current_attempt", 0),
                     "pause_reason": summary.get("pause_reason", ""),
                     "next_action": summary.get("next_action", ""),
+                    "event_plane": summarize_for_session(
+                        self._event_plane_store, state.get("session_id", "")
+                    ),
                 })
         return {"ok": True, "runs": runs}
 
@@ -745,6 +756,9 @@ class DaemonServer:
             "run_id": run_id,
             "state": state,
             "recent_events": recent,
+            "event_plane": summarize_for_session(
+                self._event_plane_store, state.get("session_id", "")
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -1054,10 +1068,9 @@ class DaemonServer:
             # append to that run's session_log; correlation to session is
             # handled durably in the event plane itself.
             req_run_id = request.get("run_id") or ""
-            if not req_run_id:
-                req = self._event_plane_store.latest_request(request.get("request_id", ""))
-                if req is not None and req.run_id:
-                    req_run_id = req.run_id
+            req = self._event_plane_store.latest_request(request.get("request_id", ""))
+            if not req_run_id and req is not None and req.run_id:
+                req_run_id = req.run_id
             if req_run_id:
                 self._append_run_session_event(
                     req_run_id,
@@ -1071,7 +1084,71 @@ class DaemonServer:
                         "result_kind": request.get("result_kind", ""),
                     },
                 )
+
+            # Apply wake policy to the just-landed mailbox item. This is the
+            # only legitimate place the decision gets made (Rule 4).
+            decision = self._apply_wake_policy(
+                request_id=request.get("request_id", ""),
+                mailbox_item_id=resp.get("mailbox_item_id", ""),
+                run_id_hint=req_run_id,
+            )
+            if decision:
+                resp["wake_decision"] = decision["decision"]
+                resp["wake_reason"] = decision.get("reason", "")
         return resp
+
+    def _apply_wake_policy(
+        self,
+        *,
+        request_id: str,
+        mailbox_item_id: str,
+        run_id_hint: str,
+    ) -> dict | None:
+        """Run wake policy on a freshly-created mailbox item.
+
+        Persists the decision onto the mailbox item (append-only, latest
+        wins) and emits a ``wake_decision_applied`` session event when a
+        run is known. Returns the decision dict (or None on error).
+        """
+        req = self._event_plane_store.latest_request(request_id)
+        if req is None:
+            return None
+        item = self._event_plane_store.latest_mailbox_item(mailbox_item_id)
+        if item is None:
+            return None
+
+        run_state = None
+        run_id = run_id_hint or req.run_id or ""
+        if run_id:
+            store = self._find_store_for_run(run_id)
+            if store is not None:
+                try:
+                    import json as _json
+                    data = _json.loads(store.state_path.read_text())
+                    run_state = {"top_state": data.get("top_state", "")}
+                except (OSError, ValueError):
+                    run_state = None
+
+        decision = evaluate_wake(request=req, mailbox_item=item, run_state=run_state)
+
+        updated = SessionMailboxItem.from_dict(item.to_dict())
+        updated.wake_decision = decision.decision
+        self._event_plane_store.append_mailbox_item(updated)
+
+        if run_id:
+            self._append_run_session_event(
+                run_id,
+                "wake_decision_applied",
+                {
+                    "mailbox_item_id": mailbox_item_id,
+                    "request_id": request_id,
+                    "decision": decision.decision,
+                    "reason": decision.reason,
+                    "session_id": req.session_id,
+                },
+            )
+
+        return {"decision": decision.decision, "reason": decision.reason}
 
     def _do_mailbox_list(self, request: dict) -> dict:
         return self._event_plane_ingest.list_mailbox(
