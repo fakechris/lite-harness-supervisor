@@ -322,6 +322,52 @@ class HandoffInstruction:
 
 
 @dataclass
+class Session:
+    """Cross-run logical correlation entity.
+
+    Distinct from SessionRun (which wraps a single SupervisorState).
+    A Session is a durable record representing a task/intent. It may be
+    associated with 0..N runs over its lifetime — retries, replans,
+    re-executes, resumes, or pre-run (plan-phase) work where no run
+    exists yet. External task requests and results correlate to
+    session_id first; run_id is recorded when known but is optional.
+    """
+    session_id: str = ""
+    status: str = "active"              # active | closed
+    workspace_root: str = ""            # adoption key: same worktree
+    spec_id: str = ""                   # adoption key: same spec
+    label: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not self.session_id:
+            self.session_id = f"session_{uuid.uuid4().hex[:12]}"
+        now = datetime.now(timezone.utc).isoformat()
+        if not self.created_at:
+            self.created_at = now
+        if not self.updated_at:
+            self.updated_at = self.created_at
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Session":
+        return cls(
+            session_id=data.get("session_id", ""),
+            status=data.get("status", "active"),
+            workspace_root=data.get("workspace_root", ""),
+            spec_id=data.get("spec_id", ""),
+            label=data.get("label", ""),
+            created_at=data.get("created_at", ""),
+            updated_at=data.get("updated_at", ""),
+            metadata=dict(data.get("metadata", {})),
+        )
+
+
+@dataclass
 class SupervisorState:
     run_id: str
     spec_id: str

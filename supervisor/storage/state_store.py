@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from supervisor.domain.enums import TopState
-from supervisor.domain.models import SupervisorState, WorkflowSpec
+from supervisor.domain.models import Session, SupervisorState, WorkflowSpec
 
 
 class StateStore:
@@ -145,6 +145,87 @@ class StateStore:
             if isinstance(seq, int):
                 return seq
         return 0
+
+    # ------------------------------------------------------------------
+    # Session (cross-run logical entity) — stored under shared/sessions.jsonl
+    # ------------------------------------------------------------------
+
+    @property
+    def sessions_path(self) -> Path:
+        return self.runtime_root / "shared" / "sessions.jsonl"
+
+    def save_session(self, session: Session) -> None:
+        """Append a session record. Latest line wins for a given session_id.
+
+        Append-only preserves an audit trail of status transitions; queries
+        fold the log to derive the current state per session_id.
+        """
+        session.updated_at = datetime.now(timezone.utc).isoformat()
+        path = self.sessions_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(session.to_dict(), ensure_ascii=False) + "\n")
+
+    def load_session(self, session_id: str) -> Session | None:
+        path = self.sessions_path
+        if not path.exists():
+            return None
+        latest: dict | None = None
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("session_id") == session_id:
+                    latest = record
+        except OSError:
+            return None
+        return Session.from_dict(latest) if latest else None
+
+    def list_sessions(self, *, status: str = "") -> list[Session]:
+        """Return one Session per session_id (latest record wins).
+
+        Optional *status* filter (e.g. "active"). Records with missing or
+        malformed session_id are skipped.
+        """
+        path = self.sessions_path
+        if not path.exists():
+            return []
+        by_id: dict[str, dict] = {}
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                sid = record.get("session_id")
+                if not sid:
+                    continue
+                by_id[sid] = record
+        except OSError:
+            return []
+        sessions = [Session.from_dict(r) for r in by_id.values()]
+        if status:
+            sessions = [s for s in sessions if s.status == status]
+        return sessions
+
+    def find_session_by_attachment(
+        self, *, workspace_root: str, spec_id: str
+    ) -> Session | None:
+        """Find an active session matching (workspace_root, spec_id).
+
+        Used at run registration (Task 1b) to decide adoption vs. new session.
+        Returns None if no open session matches.
+        """
+        for session in self.list_sessions(status="active"):
+            if session.workspace_root == workspace_root and session.spec_id == spec_id:
+                return session
+        return None
 
     def load_raw(self) -> dict | None:
         """Load state as a raw dict without constructing SupervisorState."""
