@@ -123,6 +123,9 @@ class EventPlaneIngest:
         if req is None:
             return {"ok": False, "error": f"unknown request: {request_id}"}
 
+        if payload is not None and not isinstance(payload, dict):
+            return {"ok": False, "error": "payload must be a mapping"}
+
         if idempotency_key:
             for existing in self.store.list_results_for_request(request_id):
                 if existing.payload.get("_idempotency_key") == idempotency_key:

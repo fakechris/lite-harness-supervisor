@@ -1014,7 +1014,12 @@ class DaemonServer:
             return entry.store
         run_dir = Path(self.runs_dir) / run_id
         if (run_dir / "state.json").exists():
-            return StateStore(str(run_dir))
+            store = StateStore(str(run_dir))
+            # Freshly-instantiated StateStore starts at seq=0; align with the
+            # run's existing session_log so events appended via this path
+            # don't collide with earlier seqs written while the run was live.
+            store._session_seq = store._read_last_seq()
+            return store
         return None
 
     def _append_run_session_event(self, run_id: str, event_type: str, payload: dict) -> None:
@@ -1125,8 +1130,7 @@ class DaemonServer:
             store = self._find_store_for_run(run_id)
             if store is not None:
                 try:
-                    import json as _json
-                    data = _json.loads(store.state_path.read_text())
+                    data = json.loads(store.state_path.read_text())
                     run_state = {"top_state": data.get("top_state", "")}
                 except (OSError, ValueError):
                     run_state = None

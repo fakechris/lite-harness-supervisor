@@ -292,6 +292,25 @@ def test_phase_plan_request_correlates_by_session_id_only(tmp_path):
     assert completed_req.status == "completed"
 
 
+def test_ingest_result_rejects_non_mapping_payload(tmp_path):
+    """Non-dict payloads (e.g. JSON list over IPC) must be rejected cleanly,
+    not crash the ingest handler."""
+    ingest, _ = _make_ingest(tmp_path)
+    reg = ingest.register_request(
+        session_id="s_bad",
+        provider="external_model",
+        target_ref="PR#1",
+    )
+    resp = ingest.ingest_result(
+        request_id=reg["request_id"],
+        provider="external_model",
+        result_kind="review_comments",
+        payload=["not", "a", "dict"],  # type: ignore[arg-type]
+    )
+    assert resp["ok"] is False
+    assert "payload" in resp["error"]
+
+
 def test_phase_plan_result_records_without_active_run_on_ingest_side(tmp_path):
     """Result ingest must not require run_id even when the request never had one."""
     ingest, store = _make_ingest(tmp_path)

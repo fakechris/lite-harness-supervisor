@@ -1192,3 +1192,31 @@ class TestDaemonExternalTask:
         # Wake decision still computed on plan-phase item (no run attached,
         # blocking_policy=notify_only → notify_operator).
         assert resp.get("wake_decision") == "notify_operator"
+
+    def test_find_store_for_reaped_run_preserves_seq_monotonicity(self, tmp_path):
+        """Regression: a StateStore created for a reaped run via
+        `_find_store_for_run` must align its `_session_seq` to the existing
+        session_log so later event appends don't collide with earlier seqs.
+        """
+        # Seed a run_dir with a state.json and a session_log.jsonl that has
+        # events already at seq=1 and seq=2.
+        run_id = "run_reaped_1"
+        run_dir = tmp_path / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "state.json").write_text("{}", encoding="utf-8")
+        log = run_dir / "session_log.jsonl"
+        log.write_text(
+            '{"run_id":"run_reaped_1","seq":1,"event_type":"a","timestamp":"t","payload":{}}\n'
+            '{"run_id":"run_reaped_1","seq":2,"event_type":"b","timestamp":"t","payload":{}}\n',
+            encoding="utf-8",
+        )
+
+        server = self._server(tmp_path)
+        # The run is not in the in-memory registry, so this routes through
+        # the fresh-StateStore branch.
+        server._append_run_session_event(run_id, "external_task_requested", {"x": 1})
+
+        lines = log.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 3
+        last = json.loads(lines[-1])
+        assert last["seq"] == 3  # not 1 — seq counter must have been aligned
