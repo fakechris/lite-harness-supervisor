@@ -2740,6 +2740,59 @@ def test_overview_empty_state_prints_friendly_message(tmp_path, monkeypatch, cap
     assert "No sessions" in out or "daemons=0" in out
 
 
+def test_overview_watch_floors_zero_interval(tmp_path, monkeypatch):
+    """``--watch --interval 0`` must not degrade into a busy loop.
+
+    We assert the sleep is called with at least the floor (0.5s) so the
+    loop can't spin at CPU speed between renders.
+    """
+    monkeypatch.chdir(tmp_path)
+    _write_paused_state_with_session(tmp_path)
+    sleeps: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda s: sleeps.append(s))
+    args = argparse.Namespace(
+        config=None, local=True, json=False, watch=True,
+        max_iterations=2, interval=0.0,
+    )
+    rc = app.cmd_overview(args)
+    assert rc == 0
+    # One sleep between the two iterations.
+    assert sleeps and all(s >= 0.5 for s in sleeps)
+
+
+def test_overview_watch_survives_transient_error(tmp_path, monkeypatch, capsys):
+    """A transient ``load_system_snapshot`` failure must not kill the
+    watch loop — the next tick should retry and recover."""
+    monkeypatch.chdir(tmp_path)
+    _write_paused_state_with_session(tmp_path)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    import supervisor.operator.system_overview as system_overview
+
+    real_loader = system_overview.load_system_snapshot
+    calls = {"n": 0}
+
+    def _flaky(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("registry briefly unavailable")
+        return real_loader(**kwargs)
+
+    monkeypatch.setattr(
+        "supervisor.operator.system_overview.load_system_snapshot", _flaky,
+    )
+    args = argparse.Namespace(
+        config=None, local=True, json=False, watch=True,
+        max_iterations=2, interval=0.0,
+    )
+    rc = app.cmd_overview(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "transient error" in out
+    # The second iteration rendered successfully.
+    assert "daemons=" in out
+
+
 # ─── Task 5: event-plane surfacing in status / observe ──────────────
 
 def _write_session_state_with_mailbox(

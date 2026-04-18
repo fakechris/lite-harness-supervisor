@@ -266,6 +266,16 @@ def format_system_timeline(events) -> list[str]:
     return lines
 
 
+def _is_paused(session) -> bool:
+    """Return True for sessions the operator must still unblock.
+
+    Classify off ``top_state`` — the authoritative signal — rather than
+    ``pause_reason``.  Legacy paused runs may have an empty reason
+    string, which would otherwise hide them from the actionable list.
+    """
+    return session.top_state == "PAUSED_FOR_HUMAN"
+
+
 def _session_urgency_key(session) -> tuple[int, str]:
     """Sort key that surfaces the most actionable session first.
 
@@ -277,7 +287,7 @@ def _session_urgency_key(session) -> tuple[int, str]:
       4: everything else live
     Completed / foreground-but-quiet sessions are filtered out upstream.
     """
-    if not session.is_completed and session.pause_reason:
+    if not session.is_completed and _is_paused(session):
         return (0, session.last_update_at or "")
     if session.is_orphaned:
         return (1, session.last_update_at or "")
@@ -305,7 +315,7 @@ def format_actionable_sessions(snapshot) -> list[str]:
         ep = s.event_plane or {}
         has_mailbox = int(ep.get("mailbox_new", 0) or 0) > 0
         has_waits = int(ep.get("waits_open", 0) or 0) > 0
-        if not (s.pause_reason or s.is_orphaned or has_mailbox or has_waits):
+        if not (_is_paused(s) or s.is_orphaned or has_mailbox or has_waits):
             continue
         actionable.append(s)
     if not actionable:
@@ -314,7 +324,7 @@ def format_actionable_sessions(snapshot) -> list[str]:
     actionable.sort(key=_session_urgency_key)
     for s in actionable:
         tags = []
-        if s.pause_reason:
+        if _is_paused(s):
             tags.append("paused")
         if s.is_orphaned:
             tags.append("orphaned")
@@ -552,6 +562,13 @@ def _curses_main(stdscr):
         if key in (ord("g"), ord("G")):
             mode = "global" if mode != "global" else "run"
             last_system_refresh = 0.0
+            continue
+
+        # Global mode hides the run list; run-action keys below target
+        # `selected_idx` against a list the operator cannot see.  Skip
+        # them entirely until the operator flips back with `g`.  `l`
+        # (language) is a global toggle and stays available.
+        if mode == "global" and key != ord("l"):
             continue
 
         if key in (ord("j"), curses.KEY_DOWN) and runs:

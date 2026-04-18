@@ -363,7 +363,12 @@ def collect_sessions(*, local_only: bool = False) -> list[SessionRecord]:
             )
             session_id = state.get("session_id", "") or ""
             ep_summary: dict | None = None
-            if session_id:
+            # Read-only contract: never create the shared event-plane
+            # directory during discovery.  Skip worktrees whose shared
+            # dir has not been materialized yet (no event-plane activity
+            # has happened on them), which leaves their filesystems
+            # untouched by read-only operator surfaces.
+            if session_id and (runtime_root / "shared").is_dir():
                 try:
                     ep = ep_store_cache.get(runtime_root)
                     if ep is None:

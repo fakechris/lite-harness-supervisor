@@ -126,3 +126,24 @@ def test_read_recent_limit_returns_newest_first(tmp_path: Path):
     assert events[0]["payload"]["daemon_id"] == "d4"
     assert events[1]["payload"]["daemon_id"] == "d3"
     assert events[2]["payload"]["daemon_id"] == "d2"
+
+
+def test_append_is_best_effort_when_write_fails(tmp_path: Path, monkeypatch):
+    """Observability must never block a production code path.
+
+    Simulate a filesystem that rejects the append (read-only mount,
+    permission denied, disk full) and verify the call returns False
+    cleanly rather than raising into the caller.
+    """
+    runtime = tmp_path / "runtime"
+
+    def _raise(*_args, **_kwargs):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(
+        "supervisor.storage.system_events._atomic_append_line", _raise,
+    )
+    ok = append_system_event(
+        runtime, "daemon_started", {"daemon_id": "d_fail"},
+    )
+    assert ok is False

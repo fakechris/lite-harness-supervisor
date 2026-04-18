@@ -82,6 +82,12 @@ def _local_event_plane_summary(ctx: RunContext, state: dict[str, Any]):
     if not worktree:
         return None
     runtime_root = Path(worktree) / ".supervisor" / "runtime"
+    # Read-only contract: the local inspect path must not create the
+    # event-plane shared dir on a worktree that has never emitted an
+    # event.  Skip when the directory is absent — an empty summary is
+    # equivalent to a never-used event plane.
+    if not (runtime_root / "shared").is_dir():
+        return None
     try:
         from supervisor.event_plane.store import EventPlaneStore
         from supervisor.event_plane.surface import summarize_for_session

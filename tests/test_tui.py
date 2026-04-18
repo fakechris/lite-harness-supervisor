@@ -514,7 +514,7 @@ class TestGlobalModeFormatters:
                 run_id="run_paused", worktree_root="/w",
                 spec_path="s.yaml", controller_mode="daemon",
                 top_state="PAUSED_FOR_HUMAN", current_node="n",
-                pane_target="%1", daemon_socket="/tmp/d",
+                pane_target="%1", daemon_socket="",
                 is_live=True, is_orphaned=False, is_completed=False,
                 pause_reason="needs review", next_action="",
                 last_checkpoint_summary="",
@@ -597,3 +597,40 @@ class TestGlobalModeFormatters:
         assert "run_paused" in text
         assert "run_done" not in text
         assert "mailbox:1" in text or "mailbox=1" in text
+
+    def test_paused_session_visible_even_with_empty_pause_reason(self):
+        """A legacy paused run with `pause_reason=""` must still surface
+        in the actionable list — we classify by top_state, not reason."""
+        from supervisor.operator.models import (
+            SystemCounts, SystemSnapshot,
+        )
+        from supervisor.operator.session_index import SessionRecord
+
+        legacy = SessionRecord(
+            run_id="run_legacy_paused", worktree_root="/w",
+            spec_path="s.yaml", controller_mode="daemon",
+            top_state="PAUSED_FOR_HUMAN", current_node="n",
+            pane_target="%3", daemon_socket="",
+            is_live=True, is_orphaned=False, is_completed=False,
+            pause_reason="", next_action="",
+            last_checkpoint_summary="",
+            last_update_at="2026-04-18T10:00:00Z",
+            surface_type="tmux", tag="paused", pause_class="",
+            session_id="sess_legacy",
+            event_plane=None,
+        )
+        snap = SystemSnapshot(
+            counts=SystemCounts(
+                daemons=0, foreground_runs=0, live_sessions=1,
+                orphaned_sessions=0, completed_sessions=0,
+                waits_open=0, mailbox_new=0, mailbox_acknowledged=0,
+            ),
+            alerts=[], recent_timeline=[], sessions=[legacy],
+        )
+        lines = format_actionable_sessions(snap)
+        text = "\n".join(lines)
+        # The run_id is displayed truncated to last 14 chars by the
+        # formatter.  Assert on the truncated form + the paused tag.
+        assert "_legacy_paused" in text
+        assert "PAUSED_FOR_HUMAN" in text
+        assert "paused" in text

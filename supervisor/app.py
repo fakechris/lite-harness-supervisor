@@ -2357,9 +2357,23 @@ def cmd_overview(args):
     watch = bool(getattr(args, "watch", False))
     interval = float(getattr(args, "interval", 2.0) or 0.0)
     max_iterations = int(getattr(args, "max_iterations", 0) or 0)
+    # Floor the watch interval so `--interval 0` (or negative) does not
+    # degrade into a CPU-bound busy loop rendering the snapshot as fast
+    # as it can be computed.
+    WATCH_MIN_INTERVAL = 0.5
 
     def _once() -> None:
-        snapshot = load_system_snapshot(local_only=local_only)
+        try:
+            snapshot = load_system_snapshot(local_only=local_only)
+        except Exception as exc:  # noqa: BLE001 — watch must survive transient errors
+            # Under --watch, a transient failure (missing registry file
+            # mid-rotation, permission blip, partially-written JSON)
+            # must not kill the render loop.  Print one diagnostic line
+            # and let the next tick retry.
+            if watch:
+                print(f"(overview: transient error — {exc})")
+                return
+            raise
         if want_json:
             print(_json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2))
         else:
@@ -2369,6 +2383,7 @@ def cmd_overview(args):
         _once()
         return 0
 
+    sleep_for = max(interval, WATCH_MIN_INTERVAL)
     iterations = 0
     try:
         while True:
@@ -2376,8 +2391,7 @@ def cmd_overview(args):
             iterations += 1
             if max_iterations and iterations >= max_iterations:
                 break
-            if interval > 0:
-                _time.sleep(interval)
+            _time.sleep(sleep_for)
     except KeyboardInterrupt:
         pass
     return 0

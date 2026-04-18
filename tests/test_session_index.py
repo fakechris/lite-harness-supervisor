@@ -746,3 +746,25 @@ class TestEventPlanePopulation:
         rec = collect_sessions()[0]
         assert rec.session_id == ""
         assert rec.event_plane is None
+
+    def test_collect_does_not_create_shared_dir(self, fake_worktrees):
+        """Read-only contract: discovery must not materialize the
+        event-plane shared directory on worktrees that never used it."""
+        root, child = fake_worktrees
+        _write_state(child, "run_ep_readonly")
+        state_path = (
+            child / ".supervisor" / "runtime" / "runs"
+            / "run_ep_readonly" / "state.json"
+        )
+        state_data = json.loads(state_path.read_text())
+        state_data["session_id"] = "sess_readonly"
+        state_path.write_text(json.dumps(state_data))
+
+        shared_dir = child / ".supervisor" / "runtime" / "shared"
+        assert not shared_dir.exists()
+
+        rec = collect_sessions()[0]
+        assert rec.session_id == "sess_readonly"
+        assert rec.event_plane is None
+        # Still absent: discovery must not have materialized it.
+        assert not shared_dir.exists()

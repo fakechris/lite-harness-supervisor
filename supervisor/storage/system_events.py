@@ -79,19 +79,28 @@ def append_system_event(
     """Append one record to ``system_events.jsonl`` if allowlisted.
 
     Returns True when the event was persisted, False when it was
-    dropped by the allowlist.  Callers may ignore the return value; it
-    exists mainly for tests.
+    dropped by the allowlist or the best-effort write failed.
+
+    Observability must never block a production path: filesystem errors
+    while writing the shared log (read-only mount, disk full, permission
+    denied, lock contention) are caught here so callers in daemon
+    startup, mailbox writes, and cleanup paths do not fail because of a
+    downstream observability hiccup.  The failure mode is visible in
+    ``overview``'s completeness, not in runtime behaviour.
     """
     if not should_log_system_event(kind, payload):
         return False
-    path = system_events_path(runtime_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "event_type": kind,
         "occurred_at": occurred_at or _now_iso(),
         "payload": dict(payload),
     }
-    _atomic_append_line(path, json.dumps(record, ensure_ascii=False))
+    try:
+        path = system_events_path(runtime_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_append_line(path, json.dumps(record, ensure_ascii=False))
+    except (OSError, ValueError):
+        return False
     return True
 
 
