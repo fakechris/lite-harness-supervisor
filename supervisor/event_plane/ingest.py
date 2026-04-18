@@ -201,6 +201,13 @@ class EventPlaneIngest:
         items = self.store.list_mailbox_items(session_id, delivery_status=delivery_status)
         return {"ok": True, "items": [i.to_dict() for i in items]}
 
+    def list_waits(self, *, session_id: str = "") -> dict:
+        """List open session waits, optionally scoped to a session."""
+        waits = self.store.list_open_waits()
+        if session_id:
+            waits = [w for w in waits if w.session_id == session_id]
+        return {"ok": True, "waits": [w.to_dict() for w in waits]}
+
     def ack_mailbox_item(
         self,
         *,

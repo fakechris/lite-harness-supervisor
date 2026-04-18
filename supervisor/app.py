@@ -867,6 +867,76 @@ def cmd_note(args):
 
 
 # ------------------------------------------------------------------
+# event-plane surfaces (mailbox + waits)
+# ------------------------------------------------------------------
+
+
+def cmd_mailbox(args):
+    """List mailbox items for a session (event-plane surface)."""
+    from supervisor.daemon.client import DaemonClient
+
+    client = DaemonClient()
+    if not client.is_running():
+        print("Daemon not running. Start with: thin-supervisor daemon start")
+        return 1
+
+    session_id = getattr(args, "session_id", "") or ""
+    delivery_status = getattr(args, "delivery_status", "") or ""
+    result = client.mailbox_list(session_id=session_id, delivery_status=delivery_status)
+    if not result.get("ok"):
+        print(f"Error: {result.get('error', 'unknown')}")
+        return 1
+
+    items = result.get("items", [])
+    if not items:
+        print("No mailbox items.")
+        return 0
+
+    for it in items:
+        created = (it.get("created_at") or "")[:19]
+        print(
+            f"[{it.get('mailbox_item_id','')}] {created} "
+            f"{it.get('source_kind','')}/{it.get('wake_decision','')} "
+            f"status={it.get('delivery_status','')}"
+        )
+        summary = it.get("summary") or ""
+        if summary:
+            print(f"  {summary[:200]}")
+    return 0
+
+
+def cmd_waits(args):
+    """List open session waits (event-plane surface)."""
+    from supervisor.daemon.client import DaemonClient
+
+    client = DaemonClient()
+    if not client.is_running():
+        print("Daemon not running. Start with: thin-supervisor daemon start")
+        return 1
+
+    session_id = getattr(args, "session_id", "") or ""
+    result = client.waits_list(session_id=session_id)
+    if not result.get("ok"):
+        print(f"Error: {result.get('error', 'unknown')}")
+        return 1
+
+    waits = result.get("waits", [])
+    if not waits:
+        print("No open waits.")
+        return 0
+
+    for w in waits:
+        entered = (w.get("entered_at") or "")[:19]
+        deadline = (w.get("deadline_at") or "").strip() or "-"
+        print(
+            f"[{w.get('wait_id','')}] {entered} "
+            f"{w.get('wait_kind','')} status={w.get('status','')} "
+            f"session={w.get('session_id','')} deadline={deadline}"
+        )
+    return 0
+
+
+# ------------------------------------------------------------------
 # oracle
 # ------------------------------------------------------------------
 
@@ -2520,6 +2590,18 @@ def build_runtime_parser() -> argparse.ArgumentParser:
     p_note_list.add_argument("--type", default="", help="Filter by type")
     p_note_list.add_argument("--run", default="", help="Filter by author run ID")
 
+    p_mailbox = sub.add_parser("mailbox", help="List event-plane mailbox items for a session")
+    p_mailbox.add_argument("--session-id", dest="session_id", required=True, help="Session ID")
+    p_mailbox.add_argument(
+        "--delivery-status",
+        dest="delivery_status",
+        default="",
+        help="Filter by delivery_status (new|surfaced|acknowledged|consumed)",
+    )
+
+    p_waits = sub.add_parser("waits", help="List open event-plane session waits")
+    p_waits.add_argument("--session-id", dest="session_id", default="", help="Filter by session ID")
+
     p_skill = sub.add_parser("skill", help="Skill management")
     skill_sub = p_skill.add_subparsers(dest="skill_action")
     skill_sub.add_parser("install", help="Auto-detect agent and install skill")
@@ -2660,6 +2742,10 @@ def main():
         else:
             print("Usage: thin-supervisor note {add|list}")
             sys.exit(1)
+    elif args.command == "mailbox":
+        sys.exit(cmd_mailbox(args))
+    elif args.command == "waits":
+        sys.exit(cmd_waits(args))
     elif args.command == "skill":
         if args.skill_action == "install":
             sys.exit(cmd_skill_install(args))

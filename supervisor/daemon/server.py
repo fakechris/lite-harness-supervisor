@@ -330,6 +330,8 @@ class DaemonServer:
             response = self._do_mailbox_list(request)
         elif action == "mailbox_ack":
             response = self._do_mailbox_ack(request)
+        elif action == "waits_list":
+            response = self._do_waits_list(request)
         elif action == "ping":
             response = {"ok": True, "pong": True}
         else:
@@ -1160,6 +1162,11 @@ class DaemonServer:
         return self._event_plane_ingest.ack_mailbox_item(
             mailbox_item_id=request.get("mailbox_item_id", ""),
             delivery_status=request.get("delivery_status", "acknowledged"),
+        )
+
+    def _do_waits_list(self, request: dict) -> dict:
+        return self._event_plane_ingest.list_waits(
+            session_id=request.get("session_id", ""),
         )
 
     def _reap_finished(self) -> None:

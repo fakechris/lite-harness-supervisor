@@ -2489,3 +2489,100 @@ def test_observe_handles_dead_daemon_socket_cleanly(
     out = capsys.readouterr().out
     assert "daemon unreachable" in out
     assert "run_dead_daemon" in out
+
+
+# ─── Task 6: mailbox + waits CLI surfaces ────────────────────────────
+
+class _DaemonWithMailbox:
+    """Mock daemon that exposes the Task 3 event-plane actions."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def is_running(self):
+        return True
+
+    def mailbox_list(self, *, session_id, delivery_status=""):
+        return {
+            "ok": True,
+            "items": [
+                {
+                    "mailbox_item_id": "mb_abc",
+                    "session_id": session_id,
+                    "run_id": "run_xyz",
+                    "request_id": "req_1",
+                    "source_kind": "external_review",
+                    "summary": "LGTM",
+                    "payload": {},
+                    "delivery_status": "new",
+                    "wake_decision": "notify_operator",
+                    "created_at": "2026-04-12T00:00:05Z",
+                    "updated_at": "2026-04-12T00:00:05Z",
+                }
+            ],
+        }
+
+    def waits_list(self, *, session_id=""):
+        return {
+            "ok": True,
+            "waits": [
+                {
+                    "wait_id": "wait_1",
+                    "session_id": session_id or "session_x",
+                    "run_id": "run_xyz",
+                    "request_id": "req_1",
+                    "wait_kind": "external_review",
+                    "status": "waiting",
+                    "resume_policy": "operator_ack",
+                    "entered_at": "2026-04-12T00:00:01Z",
+                    "resolved_at": "",
+                    "deadline_at": "",
+                }
+            ],
+        }
+
+
+def test_cmd_mailbox_prints_new_items(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "supervisor.daemon.client.DaemonClient", _DaemonWithMailbox
+    )
+    args = argparse.Namespace(session_id="session_x", delivery_status="")
+    result = app.cmd_mailbox(args)
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "mb_abc" in out
+    assert "external_review" in out
+    assert "notify_operator" in out
+    assert "LGTM" in out
+
+
+def test_cmd_mailbox_empty(monkeypatch, capsys):
+    class _EmptyClient:
+        def __init__(self, *a, **kw):
+            pass
+        def is_running(self):
+            return True
+        def mailbox_list(self, **kwargs):
+            return {"ok": True, "items": []}
+
+    monkeypatch.setattr(
+        "supervisor.daemon.client.DaemonClient", _EmptyClient
+    )
+    args = argparse.Namespace(session_id="session_y", delivery_status="")
+    result = app.cmd_mailbox(args)
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "No mailbox items" in out
+
+
+def test_cmd_waits_prints_open_waits(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "supervisor.daemon.client.DaemonClient", _DaemonWithMailbox
+    )
+    args = argparse.Namespace(session_id="session_x")
+    result = app.cmd_waits(args)
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "wait_1" in out
+    assert "external_review" in out
+    assert "waiting" in out

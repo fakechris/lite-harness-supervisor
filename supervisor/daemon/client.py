@@ -240,6 +240,13 @@ class DaemonClient:
             "delivery_status": delivery_status,
         })
 
+    def waits_list(self, *, session_id: str = "") -> dict:
+        """List open session waits, optionally scoped to a session."""
+        req: dict = {"action": "waits_list"}
+        if session_id:
+            req["session_id"] = session_id
+        return self._request(req)
+
     def _request(self, data: dict) -> dict:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(5)
