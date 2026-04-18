@@ -225,6 +225,125 @@ def test_apply_verification_failure_exhaustion_pauses(tmp_path):
     assert channel.events[-1].event_type == "human_pause"
 
 
+def _state_transition_events(store: StateStore) -> list[dict]:
+    if not store.session_log_path.exists():
+        return []
+    out = []
+    for line in store.session_log_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        rec = json.loads(line)
+        if rec.get("event_type") == "state_transition":
+            out.append(rec)
+    return out
+
+
+def test_transition_and_record_emits_state_transition_event(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    assert state.top_state == TopState.READY
+
+    store.transition_and_record(
+        state, TopState.ATTACHED, reason="initial handoff", source="loop.run_sidecar"
+    )
+
+    events = _state_transition_events(store)
+    assert len(events) == 1
+    payload = events[0]["payload"]
+    assert payload["from_state"] == "READY"
+    assert payload["to_state"] == "ATTACHED"
+    assert payload["reason"] == "initial handoff"
+    assert payload["source"] == "loop.run_sidecar"
+    assert state.top_state == TopState.ATTACHED
+
+
+def test_transition_and_record_suppresses_noop_transitions(tmp_path):
+    """Same-state re-entry (allowed by can_transition) must not emit a
+    state_transition event — otherwise the timeline fills with churn."""
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    state.top_state = TopState.RUNNING
+
+    store.transition_and_record(state, TopState.RUNNING, reason="noop")
+    store.transition_and_record(state, TopState.RUNNING, reason="still noop")
+
+    assert _state_transition_events(store) == []
+
+
+def test_transition_and_record_rejects_invalid_transition(tmp_path):
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    state.top_state = TopState.COMPLETED
+
+    try:
+        store.transition_and_record(state, TopState.RUNNING, reason="invalid")
+    except InvalidTopStateTransition:
+        pass
+    else:
+        raise AssertionError("expected InvalidTopStateTransition")
+
+    assert _state_transition_events(store) == []
+
+
+def test_handle_event_emits_state_transition_for_running_to_gating(tmp_path):
+    """Live runtime call site (loop.handle_event) must go through the
+    wrapper — a checkpoint arriving in RUNNING should leave a
+    state_transition record on the session log.
+
+    ATTACHED is in handle_event's preserve_state set (that transition
+    is driven elsewhere), so RUNNING is the case that exercises the
+    wrapper inside handle_event itself.
+    """
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    state.top_state = TopState.RUNNING
+    loop = SupervisorLoop(store)
+
+    event = {
+        "type": "agent_output",
+        "payload": {
+            "checkpoint": {
+                "status": "working",
+                "current_node": "write_test",
+                "summary": "first output",
+            }
+        },
+    }
+    loop.handle_event(state, event)
+
+    events = _state_transition_events(store)
+    assert events, "expected state_transition from RUNNING -> GATING"
+    latest = events[-1]["payload"]
+    assert latest["from_state"] == "RUNNING"
+    assert latest["to_state"] == "GATING"
+    assert latest["source"] == "loop.handle_event"
+
+
+def test_history_replay_does_not_reemit_state_transition(tmp_path):
+    """Replay path (history._apply_replay_resume) must stay on raw
+    transition_top_state — re-emitting state_transition during replay
+    would double-count live events. History doesn't own a store, so
+    the guarantee is simply that no append_session_event is reachable
+    from its transition calls."""
+    from supervisor.history import _apply_replay_resume
+    spec = load_spec("specs/examples/linear_plan.example.yaml")
+    store = StateStore(str(tmp_path / "runtime"))
+    state = store.load_or_init(spec)
+    # Put state into a pause shape that the replay helper will act on.
+    state.top_state = TopState.PAUSED_FOR_HUMAN
+    state.pre_pause_top_state = TopState.ATTACHED.value
+
+    _apply_replay_resume(state)
+    assert state.top_state == TopState.ATTACHED
+    # History cannot emit state_transition records because it holds no
+    # store reference — assert nothing landed in the run's log.
+    assert _state_transition_events(store) == []
+
+
 def test_continue_transition_is_persisted_as_continue_injection(tmp_path):
     spec = load_spec("specs/examples/linear_plan.example.yaml")
     store = StateStore(str(tmp_path / "runtime"))

@@ -92,6 +92,10 @@ _EVENT_SUMMARIES: dict[str, Any] = {
     "completed_after_review": lambda p: f"completed after review by {p.get('reviewer', '')}",
     "clarification_request": lambda p: f"Q: {p.get('question', '')[:80]}",
     "clarification_response": lambda p: f"A: {p.get('answer', '')[:80]}",
+    "state_transition": lambda p: (
+        f"{p.get('from_state', '')} → {p.get('to_state', '')}"
+        + (f" — {p.get('reason', '')}" if p.get('reason') else "")
+    ),
 }
 
 

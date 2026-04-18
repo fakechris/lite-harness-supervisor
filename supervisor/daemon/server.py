@@ -237,7 +237,14 @@ class DaemonServer:
 
             previous_top_state = state_data.get("top_state", state.top_state.value)
             delivery = state_data.get("delivery_state", DeliveryState.IDLE)
-            transition_top_state(state, TopState.PAUSED_FOR_HUMAN, reason="daemon startup orphan recovery")
+            store = StateStore(str(run_dir))
+            store._session_seq = store._read_last_seq()
+            store.transition_and_record(
+                state,
+                TopState.PAUSED_FOR_HUMAN,
+                reason="daemon startup orphan recovery",
+                source="daemon._recover_orphaned_runs",
+            )
             if delivery in (DeliveryState.INJECTED, DeliveryState.SUBMITTED):
                 recovery_detail = (
                     f"daemon restarted while delivery was in progress "
@@ -263,8 +270,6 @@ class DaemonServer:
                 "delivery_state_at_crash": delivery,
                 "pause_class": "recovery",
             })
-            store = StateStore(str(run_dir))
-            store._session_seq = store._read_last_seq()
             store.append_session_event(
                 state.run_id,
                 "orphaned_run_recovered",
@@ -600,18 +605,22 @@ class DaemonServer:
                         # checkpoint, not slip into RUNNING and silently
                         # CONTINUE on admin-only evidence.
                         if state.pre_pause_top_state == TopState.ATTACHED.value:
-                            transition_top_state(
+                            store.transition_and_record(
                                 state,
                                 TopState.ATTACHED,
                                 reason="resume requested (restoring attach boundary)",
+                                source="daemon._do_resume",
                             )
                             # Re-arm the re-inject budget so the resumed run
                             # gets a fresh attempt at proving execution
                             # evidence, rather than immediately re-exhausting.
                             state.re_inject_count = 0
                         else:
-                            transition_top_state(
-                                state, TopState.RUNNING, reason="resume requested"
+                            store.transition_and_record(
+                                state,
+                                TopState.RUNNING,
+                                reason="resume requested",
+                                source="daemon._do_resume",
                             )
                         state.delivery_state = DeliveryState.IDLE
                         state.auto_intervention_count = 0
@@ -731,7 +740,12 @@ class DaemonServer:
             finish = FinishGate().evaluate(spec, state, cwd=state.workspace_root)
             if finish["ok"]:
                 if state.top_state not in FINAL_STATES:
-                    transition_top_state(state, TopState.COMPLETED, reason="review acknowledged and finish gate passed")
+                    store.transition_and_record(
+                        state,
+                        TopState.COMPLETED,
+                        reason="review acknowledged and finish gate passed",
+                        source="daemon._do_ack_review",
+                    )
                     store.append_session_event(run_id, "completed_after_review", {"reviewer": reviewer})
             store.save(state)
             return {"ok": True, "run_id": run_id, "top_state": state.top_state.value}
