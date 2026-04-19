@@ -1246,6 +1246,25 @@ class DaemonServer:
                 req.session_id,
                 mailbox_item_id,
             )
+        # ``defer`` means the run is busy (RUNNING/GATING/VERIFYING/ATTACHED)
+        # when the mailbox item arrives.  v1 only evaluates wake policy
+        # once at ingest time — no state-transition callback re-runs this
+        # when the run later pauses, so a deferred decision is effectively
+        # stranded on the mailbox item until an operator acts.  Match the
+        # ``wake_worker`` warning so the v1 scope limitation is visible
+        # in logs rather than silent.  (The mailbox item still surfaces
+        # through ``overview`` / ``status`` via ``mailbox_new``, so the
+        # operator is not blind to it — just not auto-woken.)
+        if decision.decision == "defer":
+            logger.warning(
+                "wake_policy deferred wake for run=%s session=%s mailbox_item=%s "
+                "(%s); v1 does not re-evaluate on later state changes — "
+                "operator must resume explicitly",
+                run_id or "?",
+                req.session_id,
+                mailbox_item_id,
+                decision.reason,
+            )
 
         if run_id:
             self._append_run_session_event(
