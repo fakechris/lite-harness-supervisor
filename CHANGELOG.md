@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### A2A inbound adapter + boundary guard
+
+- Added `supervisor/boundary/`: a transport-agnostic ingress safety layer with independently-toggleable auth (bearer + localhost fallback), sliding-window per-IP rate-limit, 8-pattern injection scan, JWT / GitHub / Slack / AWS / OpenAI-key redaction, and an append-only audit log that stores SHA-256 text hashes instead of raw bodies.
+- Added `supervisor/adapters/a2a/`: a stdlib-only A2A (Google Agent-to-Agent) inbound adapter. `thin-supervisor a2a serve` hosts `.well-known/agent.json` plus JSON-RPC 2.0 `tasks/send` and `tasks/get`, routing through the boundary guard into `EventPlaneIngest`. Returned `task_id == request_id`, so A2A task identity is durable across adapter and daemon restarts.
+- Extended the `system_events.jsonl` v1 allowlist with `a2a_started` / `a2a_stopped`, so `overview` now surfaces the listener host, port, and auth mode at a glance.
+
 ### Layered System Observability
 
 - Added `thin-supervisor overview` (plus `--json` and `--watch`) so operators can see the whole system — daemons, live/orphaned/completed sessions, event-plane backlog, alerts, and a cross-run timeline — from any directory without tailing logs.

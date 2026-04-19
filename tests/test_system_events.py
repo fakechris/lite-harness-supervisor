@@ -22,8 +22,10 @@ from supervisor.storage.system_events import (
 
 
 def test_allowlist_contains_the_frozen_v1_kinds():
-    """Task 3 freezes the v1 system-event surface. Adding a new kind is
-    a one-line change later, but the v1 set must match the plan."""
+    """Task 3 froze the v1 system-event surface at six kinds.  The A2A
+    inbound adapter (2026-04-19) extends it by two lifecycle kinds so
+    ``overview`` can surface listener host/port/auth-mode at a glance —
+    still a deliberate, spelled-out addition, not silent drift."""
     assert ALLOWED_SYSTEM_EVENT_KINDS == frozenset({
         "daemon_started",
         "daemon_stopped",
@@ -31,6 +33,8 @@ def test_allowlist_contains_the_frozen_v1_kinds():
         "session_wait_expired",
         "session_mailbox_item_created",
         "wake_decision_applied",
+        "a2a_started",
+        "a2a_stopped",
     })
 
 

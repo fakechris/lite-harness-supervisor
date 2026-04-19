@@ -180,6 +180,13 @@ def _timeline_summary(event_type: str, payload: dict) -> str:
         return f"wake decision: {payload.get('decision', '')}"
     if event_type == "session_wait_expired":
         return f"wait expired ({payload.get('wait_kind', '')})"
+    if event_type == "a2a_started":
+        host = payload.get("host", "?")
+        port = payload.get("port", "?")
+        auth = "auth-required" if payload.get("auth_required") else "localhost-only"
+        return f"A2A adapter listening on {host}:{port} ({auth})"
+    if event_type == "a2a_stopped":
+        return f"A2A adapter stopped ({payload.get('host', '?')}:{payload.get('port', '?')})"
     return event_type.replace("_", " ")
 
 
