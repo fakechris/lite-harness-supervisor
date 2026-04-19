@@ -338,6 +338,22 @@ Add `--save-report` to `run`, `replay`, `compare`, `canary`, `propose`, `review-
 
 If a daemon-managed run pauses, `status` and `list` now show the human-readable reason and the suggested next command. For non-active persisted runs, the same hint appears under `Local state found:`.
 
+### A2A inbound adapter
+
+Other agents can submit tasks into a supervisor session via Google's
+[A2A protocol](https://github.com/google/A2A):
+
+```bash
+export SUPERVISOR_A2A_TOKEN=your-secret   # optional; omit for localhost-only
+thin-supervisor a2a serve --port 8081
+```
+
+The listener advertises itself through `overview` and routes
+`tasks/send` through `InboundGuard` → `EventPlaneIngest.register_request`
+→ session mailbox. `task_id == request_id` is durable: it survives
+adapter and daemon restart. See [`docs/a2a.md`](docs/a2a.md) for the
+full protocol mapping + security model.
+
 ### Global observability plane
 
 `status`, `dashboard`, and `tui` all read from a single canonical session index (`supervisor/operator/session_index.py`) that unions discovery across:

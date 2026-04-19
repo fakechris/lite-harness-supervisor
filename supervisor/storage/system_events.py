@@ -35,6 +35,8 @@ ALLOWED_SYSTEM_EVENT_KINDS: frozenset[str] = frozenset({
     "session_wait_expired",
     "session_mailbox_item_created",
     "wake_decision_applied",
+    "a2a_started",
+    "a2a_stopped",
 })
 
 # ``state_transition`` is promoted only when it signals "something

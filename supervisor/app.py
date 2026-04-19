@@ -2337,6 +2337,96 @@ def _render_overview_text(snapshot, *, cwd: str) -> str:
     return "\n".join(lines)
 
 
+def cmd_a2a(args):
+    """Run the A2A HTTP adapter.
+
+    Durable state lives in ``.supervisor/runtime/shared/`` (same event-plane
+    store the daemon writes to).  A2A runs as a standalone process — it
+    does not require the supervisor daemon to be running; it only needs
+    write access to the shared runtime root.
+    """
+    action = getattr(args, "a2a_action", None)
+    if action != "serve":
+        print("Usage: thin-supervisor a2a serve [--host H] [--port P] [--token-env VAR]")
+        return 1
+
+    from supervisor.adapters.a2a.server import A2AServer
+    from supervisor.boundary.models import InboundGuardConfig
+    from supervisor.event_plane.ingest import EventPlaneIngest
+    from supervisor.event_plane.store import EventPlaneStore
+    from supervisor.learning import _shared_dir
+    from supervisor.storage.system_events import append_system_event
+
+    host = str(getattr(args, "host", "127.0.0.1"))
+    port = int(getattr(args, "port", 8081))
+    token_env = str(getattr(args, "token_env", "SUPERVISOR_A2A_TOKEN"))
+    rate_limit = int(getattr(args, "rate_limit", 20))
+
+    runtime_root = Path(RUNTIME_DIR)
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    shared = _shared_dir(runtime_root)
+    audit_path = shared / "inbound_audit.jsonl"
+
+    token = os.environ.get(token_env, "").strip()
+    cfg = InboundGuardConfig(
+        auth_token=token,
+        rate_limit_per_minute=rate_limit,
+        audit_path=audit_path,
+    )
+
+    store = EventPlaneStore(str(runtime_root))
+    ingest = EventPlaneIngest(store)
+    server = A2AServer(host=host, port=port, ingest=ingest, guard_config=cfg)
+
+    # Advertise the listener to overview via system_events.
+    append_system_event(
+        runtime_root,
+        "a2a_started",
+        {"host": host, "port": server.port, "auth_required": bool(token)},
+    )
+
+    print(
+        f"thin-supervisor a2a listening on http://{host}:{server.port} "
+        f"(auth {'required' if token else 'off (localhost only)'}, "
+        f"rate_limit={rate_limit}/min)"
+    )
+
+    # ``BaseServer.shutdown()`` deadlocks if called from the thread
+    # currently executing ``serve_forever()`` (it sets a flag and then
+    # waits for the serve loop to notice, but that loop is the very
+    # thread that got interrupted by the signal).  Run the serve loop
+    # on a daemon worker thread and keep the main thread parked on an
+    # ``Event`` so the signal handler can cleanly tear the server down.
+    import threading
+
+    stop = threading.Event()
+    serve_thread = threading.Thread(
+        target=server.serve_forever, name="a2a-serve", daemon=True
+    )
+    serve_thread.start()
+
+    def _graceful(*_a):
+        stop.set()
+
+    signal.signal(signal.SIGTERM, _graceful)
+    signal.signal(signal.SIGINT, _graceful)
+    try:
+        try:
+            stop.wait()
+        except KeyboardInterrupt:
+            stop.set()
+    finally:
+        server.shutdown()
+        server.server_close()
+        serve_thread.join(timeout=5.0)
+        append_system_event(
+            runtime_root,
+            "a2a_stopped",
+            {"host": host, "port": server.port},
+        )
+    return 0
+
+
 def cmd_overview(args):
     """System-level snapshot: daemons, sessions, alerts, recent events.
 
@@ -2898,6 +2988,23 @@ def build_runtime_parser() -> argparse.ArgumentParser:
     sub.add_parser("dashboard", help="Interactive run dashboard — numbered list with drill-in")
     sub.add_parser("tui", help="Operator TUI — three-pane view with explain/drift/pause")
 
+    p_a2a = sub.add_parser("a2a", help="A2A (Agent-to-Agent) inbound protocol adapter")
+    a2a_sub = p_a2a.add_subparsers(dest="a2a_action")
+    p_a2a_serve = a2a_sub.add_parser("serve", help="Run the A2A HTTP server")
+    p_a2a_serve.add_argument("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1)")
+    p_a2a_serve.add_argument("--port", type=int, default=8081, help="Bind port (default 8081)")
+    p_a2a_serve.add_argument(
+        "--token-env",
+        default="SUPERVISOR_A2A_TOKEN",
+        help="Env var holding the bearer token; if unset, localhost-only",
+    )
+    p_a2a_serve.add_argument(
+        "--rate-limit",
+        type=int,
+        default=20,
+        help="Requests-per-minute per client IP (default 20)",
+    )
+
     p_config = sub.add_parser("config", help="Read or write config values")
     config_sub = p_config.add_subparsers(dest="config_action")
     p_config_set = config_sub.add_parser("set", help="Set a config value")
@@ -3043,6 +3150,8 @@ def main():
         from supervisor.operator.tui import run_tui
         run_tui()
         sys.exit(0)
+    elif args.command == "a2a":
+        sys.exit(cmd_a2a(args))
     elif args.command == "config":
         if args.config_action == "set":
             sys.exit(cmd_config_set(args))

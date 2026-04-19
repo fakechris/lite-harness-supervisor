@@ -88,6 +88,39 @@ def test_system_timeline_event_round_trip():
     assert d["payload"] == {"pid": 4321}
 
 
+def test_a2a_events_render_with_listener_info():
+    """``a2a_started`` events must tell the operator where the listener
+    is and whether auth is enforced — the whole point of exposing it in
+    ``overview`` is to surface that state at a glance."""
+    from supervisor.operator.system_overview import _timeline_summary
+
+    started_auth = _timeline_summary(
+        "a2a_started",
+        {"host": "127.0.0.1", "port": 8081, "auth_required": True},
+    )
+    assert "127.0.0.1:8081" in started_auth
+    assert "auth-required" in started_auth
+
+    started_local = _timeline_summary(
+        "a2a_started",
+        {"host": "0.0.0.0", "port": 9000, "auth_required": False},
+    )
+    assert "localhost-only" in started_local
+
+    stopped = _timeline_summary("a2a_stopped", {"host": "127.0.0.1", "port": 8081})
+    assert "stopped" in stopped.lower()
+    assert "127.0.0.1:8081" in stopped
+
+
+def test_a2a_events_pass_system_events_allowlist():
+    """``a2a_started`` / ``a2a_stopped`` must be persisted by
+    ``append_system_event`` (v1 allowlist), not silently dropped."""
+    from supervisor.storage.system_events import should_log_system_event
+
+    assert should_log_system_event("a2a_started", {"host": "127.0.0.1", "port": 8081})
+    assert should_log_system_event("a2a_stopped", {"host": "127.0.0.1", "port": 8081})
+
+
 def test_system_snapshot_round_trip():
     snapshot = SystemSnapshot(
         counts=SystemCounts(
