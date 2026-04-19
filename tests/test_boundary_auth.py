@@ -1,8 +1,10 @@
 """Tests for boundary auth.
 
 Rules:
-- No token configured → accept iff client_id is localhost (127.0.0.1, ::1,
-  or a UNIX-domain peer represented as empty / "local"). Otherwise reject.
+- No token configured → accept iff client_id is explicitly localhost
+  (127.0.0.1, ::1, "localhost", or a UNIX-domain peer canonicalised to
+  "local").  An empty / missing client_id is NOT treated as localhost —
+  callers that forget to populate it must be rejected.
 - Token configured → require ``Authorization: Bearer <token>`` exact
   match (constant-time). Any mismatch / missing header → reject.
 - ``Bearer`` prefix is case-insensitive (matches common HTTP practice).
@@ -31,6 +33,19 @@ def test_accepts_localhost_when_no_token_configured():
 def test_rejects_non_localhost_when_no_token_configured():
     cfg = InboundGuardConfig(auth_token="")
     res = check_auth(_req(client_id="10.0.0.1"), cfg)
+    assert not res.ok
+    assert res.stage == "auth"
+
+
+def test_rejects_empty_client_id_when_no_token_configured():
+    """A missing / empty client_id must not be silently treated as local.
+
+    Regression guard — the earlier ``_LOCALHOST_IDS`` set included ``""``
+    so any adapter forgetting to populate ``client_id`` would bypass
+    auth when no token was configured.
+    """
+    cfg = InboundGuardConfig(auth_token="")
+    res = check_auth(_req(client_id=""), cfg)
     assert not res.ok
     assert res.stage == "auth"
 

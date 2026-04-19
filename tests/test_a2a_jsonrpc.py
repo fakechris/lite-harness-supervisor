@@ -67,6 +67,30 @@ def test_parse_request_rejects_missing_method():
         raise AssertionError("expected JSONRPCParseError")
 
 
+def test_parse_request_rejects_missing_id():
+    """A2A does not support JSON-RPC notifications — a request without
+    ``id`` cannot be correlated with a response and must be rejected."""
+    body = json.dumps({"jsonrpc": "2.0", "method": "tasks/get", "params": {}}).encode()
+    try:
+        parse_request(body)
+    except JSONRPCParseError as exc:
+        assert "id" in str(exc).lower()
+    else:
+        raise AssertionError("expected JSONRPCParseError for missing id")
+
+
+def test_parse_request_rejects_null_id():
+    """``id: null`` is how JSON-RPC signals a notification-shaped error
+    response; A2A requests must carry a real (string/number) id."""
+    body = json.dumps({"jsonrpc": "2.0", "id": None, "method": "tasks/get"}).encode()
+    try:
+        parse_request(body)
+    except JSONRPCParseError as exc:
+        assert "id" in str(exc).lower()
+    else:
+        raise AssertionError("expected JSONRPCParseError for null id")
+
+
 def test_build_response_shape():
     msg = build_response(rpc_id="1", result={"id": "req_x", "status": {"state": "queued"}})
     assert msg == {

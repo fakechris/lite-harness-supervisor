@@ -40,7 +40,13 @@ def parse_request(body: bytes) -> tuple[str, dict, Any]:
     params = payload.get("params") or {}
     if not isinstance(params, dict):
         raise JSONRPCParseError("params must be an object")
-    rpc_id = payload.get("id")
+    # A2A does not support JSON-RPC notifications — every request must
+    # carry an id so the caller can correlate the response.  Distinguish
+    # "missing" from "explicitly null": the latter would still land as a
+    # notification-shaped request on the wire, so reject both.
+    if "id" not in payload or payload.get("id") is None:
+        raise JSONRPCParseError("id is required (notifications not supported)")
+    rpc_id = payload["id"]
     return method, params, rpc_id
 
 

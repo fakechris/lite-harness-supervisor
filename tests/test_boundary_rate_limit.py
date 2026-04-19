@@ -1,9 +1,9 @@
 """Tests for the sliding-window rate limiter.
 
 Contract:
-- ``RateLimiter(per_minute).check(client_id)`` returns True if the call
-  is within budget; False otherwise. The call that exhausts the budget
-  still returns False (i.e. the Nth call after the limit is rejected).
+- ``RateLimiter(per_minute).check(client_id)`` returns True while the
+  call is within budget; False once the budget is exhausted. For a
+  limit of N, calls 1..N are admitted and call N+1 is rejected.
 - Window is a sliding 60-second window anchored on the most recent
   batch of call timestamps. We prune timestamps older than 60s on
   every check, then compare count against ``per_minute``.

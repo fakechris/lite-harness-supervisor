@@ -160,11 +160,17 @@ class _A2AHandler(BaseHTTPRequestHandler):
         parts = message.get("parts") or []
         if not isinstance(parts, list):
             return ""
-        return "".join(
-            str(part.get("text", ""))
-            for part in parts
-            if isinstance(part, dict) and part.get("type") == "text"
-        )
+        chunks: list[str] = []
+        for part in parts:
+            if not isinstance(part, dict) or part.get("type") != "text":
+                continue
+            text = part.get("text", "")
+            # Only real strings contribute. Guard against null / numeric
+            # payloads that would otherwise be coerced to "None"/"1" and
+            # silently feed the injection scanner garbage.
+            if isinstance(text, str):
+                chunks.append(text)
+        return "".join(chunks)
 
     def _write_json(self, status: int, body: dict) -> None:
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")

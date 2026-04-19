@@ -32,6 +32,27 @@ def test_redacts_github_token():
     assert "[REDACTED:github_token]" in out
 
 
+def test_redacts_all_github_short_prefixes():
+    """GitHub ships five short-prefix token families (ghp_, gho_, ghu_,
+    ghs_, ghr_) — each is a distinct credential type and all must be
+    redacted, not just the classic PAT prefix."""
+    tail = "abcdefghijklmnopqrstuvwxyz1234567890"
+    for prefix in ("ghp", "gho", "ghu", "ghs", "ghr"):
+        token = f"{prefix}_{tail}"
+        out = redact(f"token {token} end")
+        assert token not in out, prefix
+        assert "[REDACTED:github_token]" in out, prefix
+
+
+def test_redacts_github_fine_grained_pat():
+    """``github_pat_`` is GitHub's fine-grained PAT prefix — longer than
+    the short-prefix family and must match before ``ghp_`` swallows it."""
+    token = "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz1234567890ABCDEFG"
+    out = redact(f"auth {token} here")
+    assert token not in out
+    assert "[REDACTED:github_fine_pat]" in out
+
+
 def test_redacts_aws_access_key():
     out = redact("aws=AKIAIOSFODNN7EXAMPLE")
     assert "AKIAIOSFODNN7EXAMPLE" not in out

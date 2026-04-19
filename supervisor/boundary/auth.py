@@ -2,9 +2,11 @@
 
 Two modes:
 
-1. ``config.auth_token`` empty → accept iff the client_id is local
-   (127.0.0.1, ::1, or a UNIX-socket peer which we canonicalise to
-   "local"/""). Non-local callers are rejected.
+1. ``config.auth_token`` empty → accept iff the client_id is explicitly
+   local (127.0.0.1, ::1, "localhost", or a UNIX-socket peer which the
+   transport must canonicalise to "local" before calling us). An empty
+   client_id is NOT treated as localhost — any adapter that forgets to
+   populate it is rejected rather than silently granted access.
 2. ``config.auth_token`` set → require ``Authorization: Bearer <token>``
    with constant-time comparison. Localhost callers do **not** bypass
    the token — if you configure auth, you mean it.
@@ -15,7 +17,7 @@ import hmac
 
 from .models import GuardResult, InboundGuardConfig, InboundRequest
 
-_LOCALHOST_IDS = frozenset({"127.0.0.1", "::1", "localhost", "local", ""})
+_LOCALHOST_IDS = frozenset({"127.0.0.1", "::1", "localhost", "local"})
 
 
 def _lookup_header(headers: dict, name: str) -> str:

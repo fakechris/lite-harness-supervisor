@@ -56,18 +56,6 @@ class A2AGetError(Exception):
         self.code = code
 
 
-def _extract_text(params: dict) -> str:
-    message = params.get("message") or {}
-    parts = message.get("parts") or []
-    if not isinstance(parts, list):
-        return ""
-    chunks = []
-    for part in parts:
-        if isinstance(part, dict) and part.get("type") == "text":
-            chunks.append(str(part.get("text", "")))
-    return "".join(chunks)
-
-
 def handle_tasks_send(
     *,
     params: dict,
@@ -79,8 +67,10 @@ def handle_tasks_send(
     if not session_id or not isinstance(session_id, str):
         raise A2ASendError("session_id (string) is required in params")
 
-    text = _extract_text(params)
-    if not text.strip():
+    # ``inbound.text`` was already extracted by the HTTP layer using the
+    # same rules — reuse it instead of re-walking ``params.message.parts``
+    # so the guard and this check see identical input.
+    if not inbound.text.strip():
         raise A2ASendError("message must contain at least one non-empty text part")
 
     guard_result = guard.check(inbound)

@@ -15,7 +15,12 @@ import re
 
 _RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("jwt", re.compile(r"\bey[A-Za-z0-9_-]{10,}\.ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\b")),
-    ("github_token", re.compile(r"\bghp_[A-Za-z0-9]{30,}\b")),
+    # GitHub ships six token prefixes (ghp_ classic PAT, github_pat_ fine-
+    # grained PAT, gho_ OAuth, ghu_ user-to-server, ghs_ server-to-server,
+    # ghr_ refresh).  Match the fine-grained one first (it is longer) so
+    # the short-prefix rule does not swallow a shared substring.
+    ("github_fine_pat", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{30,}\b")),
+    ("github_token", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}\b")),
     ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
     ("aws_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
     ("api_key", re.compile(r"\bsk-[A-Za-z0-9]{20,}\b")),

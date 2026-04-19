@@ -2391,14 +2391,34 @@ def cmd_a2a(args):
         f"rate_limit={rate_limit}/min)"
     )
 
+    # ``BaseServer.shutdown()`` deadlocks if called from the thread
+    # currently executing ``serve_forever()`` (it sets a flag and then
+    # waits for the serve loop to notice, but that loop is the very
+    # thread that got interrupted by the signal).  Run the serve loop
+    # on a daemon worker thread and keep the main thread parked on an
+    # ``Event`` so the signal handler can cleanly tear the server down.
+    import threading
+
+    stop = threading.Event()
+    serve_thread = threading.Thread(
+        target=server.serve_forever, name="a2a-serve", daemon=True
+    )
+    serve_thread.start()
+
     def _graceful(*_a):
-        server.shutdown()
+        stop.set()
 
     signal.signal(signal.SIGTERM, _graceful)
     signal.signal(signal.SIGINT, _graceful)
     try:
-        server.serve_forever()
+        try:
+            stop.wait()
+        except KeyboardInterrupt:
+            stop.set()
     finally:
+        server.shutdown()
+        server.server_close()
+        serve_thread.join(timeout=5.0)
         append_system_event(
             runtime_root,
             "a2a_stopped",

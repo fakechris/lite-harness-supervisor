@@ -12,6 +12,7 @@ Components (each independently toggleable via ``InboundGuardConfig``):
 point. Consumers today: the A2A adapter (``supervisor/adapters/a2a``).
 Future consumers (webhooks, HTTP CLI) share the same chain.
 """
+from .guard import InboundGuard
 from .models import GuardResult, InboundGuardConfig, InboundRequest
 
-__all__ = ["GuardResult", "InboundGuardConfig", "InboundRequest"]
+__all__ = ["GuardResult", "InboundGuard", "InboundGuardConfig", "InboundRequest"]
