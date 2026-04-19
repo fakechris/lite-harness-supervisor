@@ -69,12 +69,21 @@ def _session_exists(runtime_root: Path, session_id: str) -> bool:
     Closed sessions still count — the caller can legitimately re-target
     a closed session for audit / replay and should not be forced to
     reopen it just to submit a task.
+
+    A missing log file is a legitimate "no sessions yet" state and
+    returns ``False``.  Any other ``OSError`` (permission denied, disk
+    failure, …) is an operational problem, not a "wrong session id" —
+    we let it propagate so the handler maps it to ``Internal server
+    error`` instead of falsely surfacing ``A2A_NOT_FOUND``.
+
+    Reads the log line-by-line rather than slurping it into memory;
+    ``sessions.jsonl`` is append-only and can grow without bound.
     """
     path = runtime_root / "shared" / "sessions.jsonl"
     if not path.exists():
         return False
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
             if not line.strip():
                 continue
             try:
@@ -83,8 +92,6 @@ def _session_exists(runtime_root: Path, session_id: str) -> bool:
                 continue
             if record.get("session_id") == session_id:
                 return True
-    except OSError:
-        return False
     return False
 
 

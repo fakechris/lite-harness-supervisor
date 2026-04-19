@@ -218,6 +218,36 @@ def test_unknown_session_refused_without_queuing(tmp_path):
     assert ingest.store.list_mailbox_items("nope") == []
 
 
+def test_guard_internal_failure_also_scrubbed(tmp_path):
+    """Exceptions raised from within the guard itself (e.g. audit I/O
+    failure, redaction bug) must be scrubbed by the same catch-all that
+    handles post-dispatch exceptions — otherwise a malformed guard can
+    leak raw tracebacks to A2A peers."""
+    server, port, _, thread = _start_server(tmp_path)
+    try:
+        class _ExplodingGuard:
+            def check(self, _req):
+                raise RuntimeError("/tmp/secret-audit-path kaboom")
+        server.guard = _ExplodingGuard()  # type: ignore[assignment]
+        payload = {
+            "jsonrpc": "2.0", "id": 11, "method": "tasks/send",
+            "params": {
+                "session_id": "s1",
+                "message": {"role": "user", "parts": [{"type": "text", "text": "hi"}]},
+            },
+        }
+        conn = _http(port)
+        conn.request("POST", "/", body=json.dumps(payload),
+                     headers={"Content-Type": "application/json"})
+        body = json.loads(conn.getresponse().read())
+        assert body["error"]["code"] == -32603
+        assert body["error"]["message"] == "Internal server error"
+        assert "secret-audit-path" not in body["error"]["message"]
+        conn.close()
+    finally:
+        _stop(server, thread)
+
+
 def test_internal_error_does_not_leak_details(tmp_path):
     """Unexpected exceptions in the handler must return a generic wire
     message; full context stays in the logger."""

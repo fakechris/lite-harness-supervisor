@@ -102,26 +102,27 @@ class _A2AHandler(BaseHTTPRequestHandler):
             headers=headers,
         )
 
-        # Run the boundary guard BEFORE method dispatch so every POST —
-        # including unknown methods, malformed params, and empty-text
-        # sends — is subject to auth, rate-limit, injection scan,
-        # redaction, and audit.  Previously the guard was scoped inside
-        # each method branch, so validation short-circuits (missing
-        # session_id, empty text) or unknown-method responses could be
-        # probed without any rate-limit or audit accounting.
-        guard_result = self.server.guard.check(inbound)
-        if not guard_result.ok:
-            self._write_json(
-                200,
-                build_error(
-                    rpc_id=rpc_id,
-                    code=A2A_GUARD_REJECT,
-                    message=f"guard rejected: stage={guard_result.stage} reason={guard_result.reason}",
-                ),
-            )
-            return
-
         try:
+            # Run the boundary guard BEFORE method dispatch so every POST
+            # — including unknown methods, malformed params, and empty-
+            # text sends — is subject to auth, rate-limit, injection
+            # scan, redaction, and audit.  The call is inside the try
+            # block so that unexpected failures in audit / rate-limit /
+            # redaction code paths surface as a scrubbed internal error
+            # instead of propagating raw tracebacks through the HTTP
+            # layer.
+            guard_result = self.server.guard.check(inbound)
+            if not guard_result.ok:
+                self._write_json(
+                    200,
+                    build_error(
+                        rpc_id=rpc_id,
+                        code=A2A_GUARD_REJECT,
+                        message=f"guard rejected: stage={guard_result.stage} reason={guard_result.reason}",
+                    ),
+                )
+                return
+
             if method == "tasks/send":
                 result = handle_tasks_send(
                     params=params,

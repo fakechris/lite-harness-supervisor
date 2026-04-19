@@ -141,6 +141,45 @@ def test_tasks_send_writes_redacted_text_from_normalized_input(tmp_path):
     assert items[0].payload["text"] == "please review key [REDACTED:api_key]"
 
 
+def test_session_exists_missing_file_is_unknown_session(tmp_path):
+    """A ``sessions.jsonl`` that has never been created is a legitimate
+    'no sessions yet' state — treat it as 'unknown session', not as
+    an I/O error."""
+    from supervisor.adapters.a2a.task_mapper import _session_exists
+    assert _session_exists(tmp_path, "any") is False
+
+
+def test_session_exists_operational_error_propagates(tmp_path, monkeypatch):
+    """An ``OSError`` opening ``sessions.jsonl`` (permission denied,
+    disk failure, …) is operational, not 'wrong session id'.  It must
+    propagate so the HTTP layer maps it to a scrubbed INTERNAL_ERROR
+    instead of falsely returning A2A_NOT_FOUND."""
+    from pathlib import Path
+
+    from supervisor.adapters.a2a.task_mapper import _session_exists
+
+    # Create the file so the existence check passes; then make Path.open
+    # raise when called on it.
+    target = tmp_path / "shared" / "sessions.jsonl"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('{"session_id": "s1"}\n', encoding="utf-8")
+
+    original_open = Path.open
+
+    def boom(self, *a, **kw):
+        if self == target:
+            raise PermissionError("simulated permission denied")
+        return original_open(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "open", boom)
+    try:
+        _session_exists(tmp_path, "s1")
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError("OSError from sessions.jsonl must propagate, not become False")
+
+
 def test_tasks_send_survives_store_restart(tmp_path):
     ingest = _ingest(tmp_path)
     result = handle_tasks_send(
