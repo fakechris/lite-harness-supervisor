@@ -21,10 +21,23 @@ from supervisor.event_plane.ingest import EventPlaneIngest
 from supervisor.event_plane.store import EventPlaneStore
 
 
-def _start_server(tmp_path, *, guard_config: InboundGuardConfig | None = None) -> tuple[A2AServer, int, EventPlaneIngest, threading.Thread]:
+def _start_server(
+    tmp_path,
+    *,
+    guard_config: InboundGuardConfig | None = None,
+    seed_sessions: tuple[str, ...] = ("s1",),
+) -> tuple[A2AServer, int, EventPlaneIngest, threading.Thread]:
     runtime_root = tmp_path / "runtime"
     store = EventPlaneStore(str(runtime_root))
     ingest = EventPlaneIngest(store)
+    # Seed sessions so tasks/send passes the existence check.  Each test
+    # that wants a specific session to look "unknown" can override
+    # ``seed_sessions``.
+    shared = runtime_root / "shared"
+    shared.mkdir(parents=True, exist_ok=True)
+    with (shared / "sessions.jsonl").open("a", encoding="utf-8") as f:
+        for sid in seed_sessions:
+            f.write(json.dumps({"session_id": sid, "status": "active"}) + "\n")
     cfg = guard_config or InboundGuardConfig(
         enable_auth=False, audit_path=tmp_path / "audit.jsonl"
     )
@@ -37,6 +50,7 @@ def _start_server(tmp_path, *, guard_config: InboundGuardConfig | None = None) -
 def _stop(server: A2AServer, thread: threading.Thread) -> None:
     server.shutdown()
     thread.join(timeout=2.0)
+    server.server_close()
 
 
 def _http(port: int) -> http.client.HTTPConnection:
@@ -145,6 +159,119 @@ def test_unknown_method_returns_method_not_found(tmp_path):
         assert resp.status == 200  # JSON-RPC errors still use 200 by convention
         body = json.loads(resp.read())
         assert body["error"]["code"] == -32601
+        conn.close()
+    finally:
+        _stop(server, thread)
+
+
+def test_unknown_method_still_runs_the_guard(tmp_path):
+    """An attacker probing unknown method names must not bypass auth /
+    audit / rate-limit.  Previously the guard lived inside the tasks/*
+    branches so unknown methods fell through ungated."""
+    cfg = InboundGuardConfig(auth_token="s3cret", audit_path=tmp_path / "audit.jsonl")
+    server, port, _, thread = _start_server(tmp_path, guard_config=cfg)
+    try:
+        payload = {"jsonrpc": "2.0", "id": 9, "method": "tasks/nope", "params": {}}
+        conn = _http(port)
+        conn.request(
+            "POST", "/",
+            body=json.dumps(payload),
+            headers={"Content-Type": "application/json"},  # no Authorization
+        )
+        body = json.loads(conn.getresponse().read())
+        # Guard fires BEFORE the method-not-found branch, so the error we
+        # see is the guard rejection (A2A_GUARD_REJECT = -32003), not
+        # METHOD_NOT_FOUND (-32601).
+        assert body["error"]["code"] == -32003
+        conn.close()
+    finally:
+        _stop(server, thread)
+
+    # Audit line recorded for the unauthenticated probe.
+    audit_lines = (tmp_path / "audit.jsonl").read_text().splitlines()
+    assert any('"ok": false' in line and '"stage": "auth"' in line for line in audit_lines)
+
+
+def test_unknown_session_refused_without_queuing(tmp_path):
+    """A caller targeting a non-existent session must NOT get a task
+    created — otherwise a typo produces a permanently stuck task."""
+    server, port, ingest, thread = _start_server(tmp_path, seed_sessions=("s1",))
+    try:
+        payload = {
+            "jsonrpc": "2.0", "id": 5, "method": "tasks/send",
+            "params": {
+                "session_id": "nope",
+                "message": {"role": "user", "parts": [{"type": "text", "text": "hi"}]},
+            },
+        }
+        conn = _http(port)
+        conn.request("POST", "/", body=json.dumps(payload),
+                     headers={"Content-Type": "application/json"})
+        body = json.loads(conn.getresponse().read())
+        assert body["error"]["code"] == -32002  # A2A_NOT_FOUND
+        conn.close()
+    finally:
+        _stop(server, thread)
+
+    # Nothing persisted for the bad session.
+    assert ingest.store.list_requests_by_session("nope") == []
+    assert ingest.store.list_mailbox_items("nope") == []
+
+
+def test_guard_internal_failure_also_scrubbed(tmp_path):
+    """Exceptions raised from within the guard itself (e.g. audit I/O
+    failure, redaction bug) must be scrubbed by the same catch-all that
+    handles post-dispatch exceptions — otherwise a malformed guard can
+    leak raw tracebacks to A2A peers."""
+    server, port, _, thread = _start_server(tmp_path)
+    try:
+        class _ExplodingGuard:
+            def check(self, _req):
+                raise RuntimeError("/tmp/secret-audit-path kaboom")
+        server.guard = _ExplodingGuard()  # type: ignore[assignment]
+        payload = {
+            "jsonrpc": "2.0", "id": 11, "method": "tasks/send",
+            "params": {
+                "session_id": "s1",
+                "message": {"role": "user", "parts": [{"type": "text", "text": "hi"}]},
+            },
+        }
+        conn = _http(port)
+        conn.request("POST", "/", body=json.dumps(payload),
+                     headers={"Content-Type": "application/json"})
+        body = json.loads(conn.getresponse().read())
+        assert body["error"]["code"] == -32603
+        assert body["error"]["message"] == "Internal server error"
+        assert "secret-audit-path" not in body["error"]["message"]
+        conn.close()
+    finally:
+        _stop(server, thread)
+
+
+def test_internal_error_does_not_leak_details(tmp_path):
+    """Unexpected exceptions in the handler must return a generic wire
+    message; full context stays in the logger."""
+    server, port, ingest, thread = _start_server(tmp_path)
+    try:
+        class _Boom:
+            runtime_root = ingest.store.runtime_root
+            def __getattr__(self, name):
+                raise RuntimeError(f"/etc/secret/path internal detail {name}")
+        server.ingest = _Boom()  # type: ignore[assignment]
+        payload = {
+            "jsonrpc": "2.0", "id": 7, "method": "tasks/send",
+            "params": {
+                "session_id": "s1",
+                "message": {"role": "user", "parts": [{"type": "text", "text": "x"}]},
+            },
+        }
+        conn = _http(port)
+        conn.request("POST", "/", body=json.dumps(payload),
+                     headers={"Content-Type": "application/json"})
+        body = json.loads(conn.getresponse().read())
+        assert body["error"]["code"] == -32603
+        assert body["error"]["message"] == "Internal server error"
+        assert "/etc/secret/path" not in body["error"]["message"]
         conn.close()
     finally:
         _stop(server, thread)

@@ -2,32 +2,36 @@
 
 ``tasks/send`` is the load-bearing method:
 
-1. Pull text from the A2A ``message.parts`` array (concatenate all
-   ``type=text`` parts).
-2. Run the InboundGuard — any failure short-circuits with an
-   ``A2ASendError``; NO event-plane writes happen in that branch.
-3. ``register_request(provider="a2a", target_ref=<caller's rpc id or
+1. Validate ``session_id`` matches a known supervisor session.  An
+   unknown / typo'd / stale id is rejected with ``A2A_NOT_FOUND`` rather
+   than silently queued against a session that will never consume it.
+2. ``register_request(provider="a2a", target_ref=<caller's rpc id or
    provided task ref>)`` creates the ``ExternalTaskRequest`` +
    companion ``SessionWait``.
-4. Seed a ``SessionMailboxItem`` with the normalized (redacted) text as
-   summary + the a2a metadata in payload, so the session sees content
-   on wake. ``delivery_status="new"`` — wake policy decides what
-   happens next.
+3. Seed a ``SessionMailboxItem`` with the guard-normalized (redacted)
+   text as summary + the a2a metadata in payload, so the session sees
+   content on wake. ``delivery_status="new"`` — wake policy decides
+   what happens next.
 
 Design notes:
 
+- The HTTP layer is expected to have already run the InboundGuard
+  before calling into this module; we receive ``normalized_text``
+  (post-redaction) as a plain argument.  This keeps the guard on the
+  outermost edge of the ingress path so auth/rate-limit/audit apply
+  uniformly to every inbound frame, including malformed sends whose
+  validation would otherwise short-circuit guard invocation.
 - We return the stored ``request_id`` as the A2A ``task.id``. This is
   the durability story: task_id survives adapter + daemon restart.
 - ``session_id`` is required in params. v1 does not auto-assign sessions;
   callers are expected to have discovered one already (via another
   surface like ``overview --json``).
-- Guard rejection raises ``A2ASendError`` so the HTTP layer can map it
-  to a proper JSON-RPC error. Audit was already written by the guard.
 """
 from __future__ import annotations
 
-from supervisor.boundary.guard import InboundGuard
-from supervisor.boundary.models import InboundRequest
+import json
+from pathlib import Path
+
 from supervisor.event_plane.ingest import EventPlaneIngest
 from supervisor.event_plane.models import SessionMailboxItem
 from supervisor.event_plane.store import EventPlaneStore
@@ -56,29 +60,72 @@ class A2AGetError(Exception):
         self.code = code
 
 
+def _session_exists(runtime_root: Path, session_id: str) -> bool:
+    """Return True iff ``shared/sessions.jsonl`` contains a record for
+    ``session_id``.  Matches the semantics of ``StateStore.load_session``
+    without taking on a full ``StateStore`` dependency: we just need to
+    know the session has been registered at least once.
+
+    Closed sessions still count — the caller can legitimately re-target
+    a closed session for audit / replay and should not be forced to
+    reopen it just to submit a task.
+
+    A missing log file is a legitimate "no sessions yet" state and
+    returns ``False``.  Any other ``OSError`` (permission denied, disk
+    failure, …) is an operational problem, not a "wrong session id" —
+    we let it propagate so the handler maps it to ``Internal server
+    error`` instead of falsely surfacing ``A2A_NOT_FOUND``.
+
+    We drive off ``open()`` rather than ``Path.exists()`` because
+    ``exists()`` swallows ``PermissionError`` from the underlying
+    ``stat`` call and returns ``False``.  That would collapse a real
+    permission failure into "no such session" and silently bypass the
+    contract above.  Reads the log line-by-line rather than slurping
+    it into memory; ``sessions.jsonl`` is append-only and can grow
+    without bound.
+    """
+    path = runtime_root / "shared" / "sessions.jsonl"
+    try:
+        f = path.open("r", encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    with f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("session_id") == session_id:
+                return True
+    return False
+
+
 def handle_tasks_send(
     *,
     params: dict,
     ingest: EventPlaneIngest,
-    guard: InboundGuard,
-    inbound: InboundRequest,
+    normalized_text: str,
+    client_id: str,
 ) -> dict:
     session_id = params.get("session_id")
     if not session_id or not isinstance(session_id, str):
         raise A2ASendError("session_id (string) is required in params")
 
-    # ``inbound.text`` was already extracted by the HTTP layer using the
-    # same rules — reuse it instead of re-walking ``params.message.parts``
-    # so the guard and this check see identical input.
-    if not inbound.text.strip():
+    # ``normalized_text`` came from the boundary guard in the HTTP layer.
+    # An empty body after normalization means the caller submitted
+    # nothing to act on — validation must happen AFTER the guard has
+    # already audited + rate-limited the request.
+    if not normalized_text.strip():
         raise A2ASendError("message must contain at least one non-empty text part")
 
-    guard_result = guard.check(inbound)
-    if not guard_result.ok:
-        raise A2ASendError(
-            f"guard rejected request at stage={guard_result.stage!r} reason={guard_result.reason!r}",
-            code=-32003,
-        )
+    if not _session_exists(ingest.store.runtime_root, session_id):
+        # Unknown session → refuse up front instead of creating a request /
+        # wait / mailbox item that no run will ever drain.  Returning
+        # A2A_NOT_FOUND lets A2A clients distinguish "wrong id" from
+        # "bad params".
+        raise A2ASendError(f"unknown session_id: {session_id}", code=-32002)
 
     target_ref = str(params.get("task_ref") or params.get("id") or "a2a_inbound")
     task_kind = str(params.get("task_kind") or "external_review")
@@ -104,14 +151,14 @@ def handle_tasks_send(
         session_id=session_id,
         request_id=request_id,
         source_kind="a2a_inbound",
-        summary=guard_result.normalized_text[:500],
+        summary=normalized_text[:500],
         payload={
             "a2a": {
-                "client_id": inbound.client_id,
+                "client_id": client_id,
                 "target_ref": target_ref,
                 "task_kind": task_kind,
             },
-            "text": guard_result.normalized_text,
+            "text": normalized_text,
         },
         delivery_status="new",
     )
