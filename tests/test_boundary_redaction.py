@@ -20,6 +20,27 @@ def test_redacts_openai_style_key():
     assert "[REDACTED:api_key]" in out
 
 
+def test_redacts_openai_project_key():
+    """OpenAI's project-scoped keys (``sk-proj-...``), service-account
+    keys (``sk-svcacct-...``), and admin keys (``sk-admin-...``) all
+    carry hyphens and underscores in their body.  The earlier classic-
+    only rule stopped at the first ``-`` and left the real secret
+    visible from the second segment onward."""
+    for prefix in ("sk-proj-", "sk-svcacct-", "sk-admin-"):
+        token = prefix + "Abc123_defGHI456-jklMNO789"
+        out = redact(f"key={token} rest")
+        assert token not in out, prefix
+        assert "[REDACTED:api_key]" in out, prefix
+
+
+def test_does_not_over_redact_short_sk_prose():
+    """``sk-`` prose that is clearly too short to be a key passes
+    through — we need enough body characters to avoid matching
+    innocuous strings like ``sk-foo``."""
+    out = redact("commit sk-ok done")
+    assert out == "commit sk-ok done"
+
+
 def test_redacts_slack_token():
     out = redact("token=xoxb-1234567890-abcdefg-xyz")
     assert "xoxb-1234567890-abcdefg-xyz" not in out

@@ -102,30 +102,36 @@ class _A2AHandler(BaseHTTPRequestHandler):
             headers=headers,
         )
 
+        # Run the boundary guard BEFORE method dispatch so every POST —
+        # including unknown methods, malformed params, and empty-text
+        # sends — is subject to auth, rate-limit, injection scan,
+        # redaction, and audit.  Previously the guard was scoped inside
+        # each method branch, so validation short-circuits (missing
+        # session_id, empty text) or unknown-method responses could be
+        # probed without any rate-limit or audit accounting.
+        guard_result = self.server.guard.check(inbound)
+        if not guard_result.ok:
+            self._write_json(
+                200,
+                build_error(
+                    rpc_id=rpc_id,
+                    code=A2A_GUARD_REJECT,
+                    message=f"guard rejected: stage={guard_result.stage} reason={guard_result.reason}",
+                ),
+            )
+            return
+
         try:
             if method == "tasks/send":
                 result = handle_tasks_send(
                     params=params,
                     ingest=self.server.ingest,
-                    guard=self.server.guard,
-                    inbound=inbound,
+                    normalized_text=guard_result.normalized_text,
+                    client_id=client_id,
                 )
                 self._write_json(200, build_response(rpc_id=rpc_id, result=result))
                 return
             if method == "tasks/get":
-                # Reads are cheap — still go through guard for rate limiting
-                # and audit, but guard failures still map to -32003.
-                guard_result = self.server.guard.check(inbound)
-                if not guard_result.ok:
-                    self._write_json(
-                        200,
-                        build_error(
-                            rpc_id=rpc_id,
-                            code=A2A_GUARD_REJECT,
-                            message=f"guard rejected: stage={guard_result.stage} reason={guard_result.reason}",
-                        ),
-                    )
-                    return
                 result = handle_tasks_get(params=params, store=self.server.ingest.store)
                 self._write_json(200, build_response(rpc_id=rpc_id, result=result))
                 return
@@ -138,9 +144,15 @@ class _A2AHandler(BaseHTTPRequestHandler):
             self._write_json(200, build_error(rpc_id=rpc_id, code=exc.code, message=str(exc)))
         except ValueError as exc:
             self._write_json(200, build_error(rpc_id=rpc_id, code=INVALID_PARAMS, message=str(exc)))
-        except Exception as exc:  # noqa: BLE001 — any leak becomes a 500 to the caller
+        except Exception:  # noqa: BLE001 — boundary between untrusted peer and us
+            # Do not leak ``str(exc)`` — unexpected exceptions can carry
+            # filesystem paths, SQL fragments, or internal identifiers
+            # that should stay server-side.  Full context is in the log.
             logger.exception("A2A handler internal error")
-            self._write_json(200, build_error(rpc_id=rpc_id, code=INTERNAL_ERROR, message=str(exc)))
+            self._write_json(
+                200,
+                build_error(rpc_id=rpc_id, code=INTERNAL_ERROR, message="Internal server error"),
+            )
 
     # ------------------------------------------------------------------
     # helpers
