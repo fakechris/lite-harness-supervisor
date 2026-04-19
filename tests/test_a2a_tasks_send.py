@@ -153,13 +153,19 @@ def test_session_exists_operational_error_propagates(tmp_path, monkeypatch):
     """An ``OSError`` opening ``sessions.jsonl`` (permission denied,
     disk failure, …) is operational, not 'wrong session id'.  It must
     propagate so the HTTP layer maps it to a scrubbed INTERNAL_ERROR
-    instead of falsely returning A2A_NOT_FOUND."""
+    instead of falsely returning A2A_NOT_FOUND.
+
+    Uses ``Path.open`` as the seam because ``Path.exists`` itself
+    swallows PermissionError from stat and returns False — so any
+    implementation that guards with ``exists()`` first would silently
+    collapse a permission failure into 'unknown session'.  The only
+    FileNotFoundError branch (file genuinely missing) is exercised by
+    ``test_session_exists_missing_file_is_unknown_session``.
+    """
     from pathlib import Path
 
     from supervisor.adapters.a2a.task_mapper import _session_exists
 
-    # Create the file so the existence check passes; then make Path.open
-    # raise when called on it.
     target = tmp_path / "shared" / "sessions.jsonl"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text('{"session_id": "s1"}\n', encoding="utf-8")

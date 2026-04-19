@@ -76,13 +76,20 @@ def _session_exists(runtime_root: Path, session_id: str) -> bool:
     we let it propagate so the handler maps it to ``Internal server
     error`` instead of falsely surfacing ``A2A_NOT_FOUND``.
 
-    Reads the log line-by-line rather than slurping it into memory;
-    ``sessions.jsonl`` is append-only and can grow without bound.
+    We drive off ``open()`` rather than ``Path.exists()`` because
+    ``exists()`` swallows ``PermissionError`` from the underlying
+    ``stat`` call and returns ``False``.  That would collapse a real
+    permission failure into "no such session" and silently bypass the
+    contract above.  Reads the log line-by-line rather than slurping
+    it into memory; ``sessions.jsonl`` is append-only and can grow
+    without bound.
     """
     path = runtime_root / "shared" / "sessions.jsonl"
-    if not path.exists():
+    try:
+        f = path.open("r", encoding="utf-8")
+    except FileNotFoundError:
         return False
-    with path.open("r", encoding="utf-8") as f:
+    with f:
         for line in f:
             if not line.strip():
                 continue
