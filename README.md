@@ -18,8 +18,10 @@ thin-supervisor fixes this. It's an acceptance-centered run supervisor that sits
 > - [docs/reviews/2026-04-11-deep-code-review.md](docs/reviews/2026-04-11-deep-code-review.md) — latest deep code review log and remaining-risk audit
 > - [docs/reviews/2026-04-12-amp-supervisor-capability-review.md](docs/reviews/2026-04-12-amp-supervisor-capability-review.md) — Amp-vs-thin-supervisor capability review and oracle-layer roadmap
 
-## Current Status (0.3.4)
+## Current Status (0.3.5)
 
+- **JSONL runs close the loop via Stop hook.** `thin-supervisor hook install` wires a Claude Code / Codex Stop hook that reads the supervisor's per-session handoff file, returns the next instruction as the agent's stop `reason`, and writes an ACK so the supervisor can confirm delivery. Observation-only runs no longer dead-end at "pause for human" when nothing else is wrong.
+- **A2A inbound is live.** `thin-supervisor a2a serve` exposes a stdlib-only Google A2A JSON-RPC listener (`tasks/send` / `tasks/get`) behind a shared inbound boundary guard — bearer auth with localhost fallback, per-IP rate-limit, injection scan, and secret redaction with SHA-256 audit hashes. `task_id` equals the client `request_id`, so task identity survives adapter and daemon restarts.
 - **Layered system observability is live.** `thin-supervisor overview` (with `--json` / `--watch`) renders a whole-system view — daemon counts, live/orphaned/completed sessions, event-plane backlog, actionable alerts, and a cross-run timeline — that stays consistent with `status`, `observe`, and the TUI global mode (`g` to toggle).
 - **Session-first deferred review plumbing is live.** Sessions now persist as first-class cross-run identities, external review requests/results land in a shared event-plane store, and operator surfaces can inspect mailbox items and outstanding waits by `session_id`.
 - **Post-merge review hardening landed.** Event-plane request/result ingest now has tighter validation, wake-policy bookkeeping is recorded deterministically, and session/history export includes the deferred-work timeline for audit and replay.

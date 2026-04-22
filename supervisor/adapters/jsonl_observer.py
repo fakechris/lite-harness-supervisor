@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 
 
+from supervisor import hook as _hook
 from supervisor.domain.enums import DeliveryState
 
 
@@ -103,26 +104,52 @@ class JsonlObserver:
 
     @property
     def is_observation_only(self) -> bool:
-        """JSONL mode is observation-only — no reliable inject path without hooks."""
+        """JSONL mode relies on the agent Stop hook for delivery.
+
+        From the loop's perspective it is still an observation-only surface
+        (no synchronous inject), but `inject_with_id` + `poll_delivery` turn
+        it into an ACK-based delivery surface when the hook is wired.
+        """
         return True
 
     def inject(self, text: str) -> None:
-        """Write instruction to file — but no hook is wired to deliver it.
+        """Back-compat plain-text inject (no ACK tracking).
 
-        JSONL observation mode requires Stop hook integration for closed-loop
-        injection. Until then, instruction is written to a file that the
-        agent's Skill can optionally check, but delivery is NOT guaranteed.
+        Prefer ``inject_with_id`` — it records an instruction_id so the loop
+        can correlate with the Stop-hook ACK file. This shim remains for
+        callers that still pass raw text.
         """
-        import logging
-        logging.getLogger(__name__).warning(
-            "JSONL mode is observation-only; instruction written to file "
-            "but no hook is wired to deliver it to the agent"
-        )
+        import hashlib
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        self.inject_with_id(text, instruction_id=f"legacy-{digest}")
+
+    def inject_with_id(
+        self,
+        text: str,
+        *,
+        instruction_id: str,
+        run_id: str = "",
+        node_id: str = "",
+    ) -> None:
+        """Write a pending instruction for the Stop hook to deliver."""
         sid = self.session_id() or "default"
-        runtime_dir = Path(".supervisor/runtime/instructions")
-        runtime_dir.mkdir(parents=True, exist_ok=True)
-        instruction_file = runtime_dir / f"{sid}.txt"
-        instruction_file.write_text(text, encoding="utf-8")
+        _hook.write_instruction(
+            sid,
+            instruction_id=instruction_id,
+            content=text,
+            run_id=run_id,
+            node_id=node_id,
+        )
+
+    def poll_delivery(self, instruction_id: str) -> bool:
+        """Return True iff the Stop hook has ACKed this instruction_id."""
+        if not instruction_id:
+            return False
+        sid = self.session_id() or "default"
+        ack = _hook.read_ack(sid)
+        if not ack:
+            return False
+        return ack.get("instruction_id") == instruction_id
 
     def current_cwd(self) -> str:
         """Return cwd from JSONL metadata or constructor override."""

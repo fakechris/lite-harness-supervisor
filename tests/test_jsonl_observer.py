@@ -125,14 +125,37 @@ class TestJsonlObserverDoctor:
 
 
 class TestJsonlObserverInject:
-    def test_inject_writes_file(self, tmp_path, monkeypatch):
+    def test_inject_writes_instruction_json(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         jsonl = tmp_path / "test.jsonl"
         jsonl.write_text("")
         obs = JsonlObserver(str(jsonl), session_id_override="test-sess")
         obs.inject("do the next step")
-        inst = (tmp_path / ".supervisor" / "runtime" / "instructions" / "test-sess.txt").read_text()
-        assert inst == "do the next step"
+        inst_path = tmp_path / ".supervisor" / "runtime" / "instructions" / "test-sess.json"
+        data = json.loads(inst_path.read_text())
+        assert data["content"] == "do the next step"
+        assert data["schema"] == "instruction.v1"
+        assert data["instruction_id"].startswith("legacy-")
+
+    def test_inject_with_id_and_poll_delivery(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        jsonl = tmp_path / "test.jsonl"
+        jsonl.write_text("")
+        obs = JsonlObserver(str(jsonl), session_id_override="sid-1")
+        obs.inject_with_id("next step", instruction_id="i1", run_id="r1", node_id="n1")
+
+        # No ACK yet.
+        assert obs.poll_delivery("i1") is False
+
+        # Simulate the Stop hook by running the real hook handler.
+        from supervisor import hook
+        result = hook.run_stop_hook("sid-1")
+        assert result.exit_code == 2
+        assert result.stderr == "next step"
+
+        assert obs.poll_delivery("i1") is True
+        # Mismatched instruction_id returns False (ACK is for i1).
+        assert obs.poll_delivery("i2") is False
 
 
 class TestSurfaceFactory:

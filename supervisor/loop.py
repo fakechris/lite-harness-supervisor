@@ -47,6 +47,12 @@ logger = logging.getLogger(__name__)
 MIN_POLL_SLEEP_SEC = 0.01
 ZERO_POLL_IDLE_TIMEOUT_SEC = 0.5
 
+# How long to wait for a Stop-hook ACK on an observation-only (JSONL) surface
+# before falling back to the pause-for-human path. The hook only fires when the
+# agent chooses to stop, so this window needs to tolerate a long-running turn.
+OBSERVATION_HOOK_ACK_TIMEOUT_SEC = 600  # 10 minutes
+OBSERVATION_HOOK_POLL_INTERVAL_SEC = 1.0
+
 
 def build_context(spec, state) -> dict:
     return {
@@ -1360,20 +1366,50 @@ class SupervisorLoop:
 
         return True, ""
 
-    def _inject_or_pause(self, state, terminal, instruction, *, spec=None) -> bool:
-        # Observation-only surfaces (e.g., JSONL) — write instruction but don't
-        # pretend delivery succeeded. Record the undelivered instruction and
-        # pause so a human/operator can move the run onto a delivery-capable
-        # surface or wire the required hook.
-        if getattr(terminal, "is_observation_only", False):
-            self._set_delivery_state(state, DeliveryState.INJECTED, reason="observation-only attempt")
-            try:
-                terminal.inject(instruction.content)  # writes file, logs warning
-            except Exception as exc:
-                logger.warning("observation-only inject failed: %s", exc)
-            self._set_delivery_state(state, DeliveryState.FAILED, reason="observation-only surface")
-            self.store.append_session_event(
-                state.run_id, "injection_observation_only", instruction.to_dict()
+    def _inject_via_hook_handoff(self, state, terminal, instruction) -> bool:
+        """Write instruction to the hook-handoff file and wait for the Stop-hook ACK.
+
+        Returns True when the ACK was observed within the timeout; False when
+        the run was paused for human attention.
+        """
+        inject_with_id = getattr(terminal, "inject_with_id", None)
+        poll_delivery = getattr(terminal, "poll_delivery", None)
+        self._set_delivery_state(state, DeliveryState.INJECTED, reason="hook handoff written")
+
+        try:
+            if callable(inject_with_id):
+                inject_with_id(
+                    instruction.content,
+                    instruction_id=instruction.instruction_id,
+                    run_id=state.run_id,
+                    node_id=state.current_node_id,
+                )
+            else:
+                terminal.inject(instruction.content)
+        except Exception as exc:
+            logger.warning("observation-only inject failed: %s", exc)
+            self._set_delivery_state(
+                state, DeliveryState.FAILED, reason=f"inject failed: {exc}"
+            )
+            self._pause_for_human(state, {
+                "reason": f"failed to write instruction handoff file: {exc}",
+                "node_id": state.current_node_id,
+                "instruction_id": instruction.instruction_id,
+                "pause_class": "recovery",
+                "reason_code": REC_INJECT_FAILED,
+            })
+            self.store.save(state)
+            return False
+
+        self.store.append_session_event(
+            state.run_id, "injection_hook_handoff", instruction.to_dict()
+        )
+
+        if not callable(poll_delivery):
+            # Adapter doesn't expose a delivery poll — same degraded behaviour
+            # as before: pause so the operator knows delivery is unconfirmed.
+            self._set_delivery_state(
+                state, DeliveryState.FAILED, reason="surface lacks poll_delivery"
             )
             self._pause_for_human(state, {
                 "reason": (
@@ -1387,6 +1423,58 @@ class SupervisorLoop:
             })
             self.store.save(state)
             return False
+
+        deadline = time.monotonic() + OBSERVATION_HOOK_ACK_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            try:
+                if poll_delivery(instruction.instruction_id):
+                    self._set_delivery_state(
+                        state, DeliveryState.ACKNOWLEDGED, reason="stop hook ACK"
+                    )
+                    self.store.append_session_event(
+                        state.run_id,
+                        "injection_hook_ack",
+                        {
+                            "instruction_id": instruction.instruction_id,
+                            "node_id": state.current_node_id,
+                        },
+                    )
+                    self.store.save(state)
+                    return True
+            except Exception as exc:
+                logger.warning("poll_delivery raised: %s", exc)
+            time.sleep(OBSERVATION_HOOK_POLL_INTERVAL_SEC)
+
+        # No ACK within the window.
+        self._set_delivery_state(
+            state, DeliveryState.TIMED_OUT, reason="stop hook ACK timeout"
+        )
+        payload = {
+            "reason": (
+                "observation-only surface waited for the Stop-hook ACK but it "
+                f"did not arrive within {OBSERVATION_HOOK_ACK_TIMEOUT_SEC}s; "
+                "confirm the agent has the `thin-supervisor hook stop` hook wired"
+            ),
+            "node_id": state.current_node_id,
+            "instruction_id": instruction.instruction_id,
+            "pause_class": "recovery",
+            "reason_code": REC_INJECT_FAILED,
+        }
+        self.store.append_session_event(
+            state.run_id, "injection_hook_ack_timeout", payload
+        )
+        self._pause_for_human(state, payload)
+        self.store.save(state)
+        return False
+
+    def _inject_or_pause(self, state, terminal, instruction, *, spec=None) -> bool:
+        # Observation-only surfaces (e.g., JSONL): write the instruction to the
+        # hook-handoff file and poll for the Stop-hook ACK before proceeding.
+        # If no ACK arrives within the window, fall through to pause-for-human
+        # so an operator can move the run to an interactive surface or wire
+        # the hook.
+        if getattr(terminal, "is_observation_only", False):
+            return self._inject_via_hook_handoff(state, terminal, instruction)
 
         ready, readiness_reason = self._wait_for_injection_window(
             state, terminal, instruction_id=instruction.instruction_id
