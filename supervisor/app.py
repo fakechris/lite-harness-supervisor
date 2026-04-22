@@ -2337,6 +2337,68 @@ def _render_overview_text(snapshot, *, cwd: str) -> str:
     return "\n".join(lines)
 
 
+def cmd_hook(args):
+    """Agent-side hook handler + installer for observation-only surfaces."""
+    action = getattr(args, "hook_action", None)
+    if action == "stop":
+        return _cmd_hook_stop(args)
+    if action == "install":
+        return _cmd_hook_install(args)
+    if action == "uninstall":
+        return _cmd_hook_uninstall(args)
+    print("Usage: thin-supervisor hook {stop|install|uninstall}")
+    return 1
+
+
+def _cmd_hook_stop(args):
+    from supervisor import hook as hook_mod
+    from supervisor.session_detect import detect_agent, detect_session_id
+
+    sid = (getattr(args, "session_id", "") or "").strip()
+    if not sid:
+        sid = detect_session_id(detect_agent()) or ""
+
+    result = hook_mod.run_stop_hook(sid)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
+    return int(result.exit_code)
+
+
+def _cmd_hook_install(args):
+    from supervisor.hook_install import install_stop_hook, resolve_targets
+
+    agent = str(getattr(args, "agent", "both") or "both")
+    targets = resolve_targets(agent)
+    if not targets:
+        print(f"No agent home directories found for --agent {agent}.")
+        print("Create ~/.claude and/or ~/.codex first, or install the agent CLI.")
+        return 1
+
+    any_changed = False
+    for t in targets:
+        changed, msg = install_stop_hook(t.settings_path)
+        print(f"[{t.label}] {msg}")
+        any_changed = any_changed or changed
+    if not any_changed:
+        print("Nothing to do — hooks already installed.")
+    return 0
+
+
+def _cmd_hook_uninstall(args):
+    from supervisor.hook_install import resolve_targets, uninstall_stop_hook
+
+    agent = str(getattr(args, "agent", "both") or "both")
+    targets = resolve_targets(agent)
+    if not targets:
+        print(f"No agent home directories found for --agent {agent}.")
+        return 1
+
+    for t in targets:
+        changed, msg = uninstall_stop_hook(t.settings_path)
+        print(f"[{t.label}] {msg}")
+    return 0
+
+
 def cmd_a2a(args):
     """Run the A2A HTTP adapter.
 
@@ -2988,6 +3050,42 @@ def build_runtime_parser() -> argparse.ArgumentParser:
     sub.add_parser("dashboard", help="Interactive run dashboard — numbered list with drill-in")
     sub.add_parser("tui", help="Operator TUI — three-pane view with explain/drift/pause")
 
+    p_hook = sub.add_parser(
+        "hook",
+        help="Agent-side hook handlers (Stop hook for observation-only surfaces)",
+    )
+    hook_sub = p_hook.add_subparsers(dest="hook_action")
+    p_hook_stop = hook_sub.add_parser(
+        "stop",
+        help="Deliver the pending supervisor instruction to the agent on stop",
+    )
+    p_hook_stop.add_argument(
+        "--session-id",
+        dest="session_id",
+        default="",
+        help="Override session ID (defaults to auto-detect)",
+    )
+    p_hook_install = hook_sub.add_parser(
+        "install",
+        help="Register the Stop hook in Claude Code / Codex settings",
+    )
+    p_hook_install.add_argument(
+        "--agent",
+        choices=("claude", "codex", "both"),
+        default="both",
+        help="Which agent(s) to configure (default both)",
+    )
+    p_hook_uninstall = hook_sub.add_parser(
+        "uninstall",
+        help="Remove the Stop hook from Claude Code / Codex settings",
+    )
+    p_hook_uninstall.add_argument(
+        "--agent",
+        choices=("claude", "codex", "both"),
+        default="both",
+        help="Which agent(s) to clean up (default both)",
+    )
+
     p_a2a = sub.add_parser("a2a", help="A2A (Agent-to-Agent) inbound protocol adapter")
     a2a_sub = p_a2a.add_subparsers(dest="a2a_action")
     p_a2a_serve = a2a_sub.add_parser("serve", help="Run the A2A HTTP server")
@@ -3150,6 +3248,8 @@ def main():
         from supervisor.operator.tui import run_tui
         run_tui()
         sys.exit(0)
+    elif args.command == "hook":
+        sys.exit(cmd_hook(args))
     elif args.command == "a2a":
         sys.exit(cmd_a2a(args))
     elif args.command == "config":

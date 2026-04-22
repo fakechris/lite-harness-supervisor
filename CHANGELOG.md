@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.3.5 (2026-04-21)
+
+### JSONL injection via Stop hook
+
+- Added `thin-supervisor hook stop` — the agent-side Stop-hook handler that reads a pending `.supervisor/runtime/instructions/<session_id>.json` handoff, writes a `.delivered.json` ACK atomically, and prints the content to stderr with exit 2 so Claude Code / Codex treat it as the next `reason`. Falls back to a generic "run is active" message when no instruction is pending but a supervisor run is still live.
+- Added `thin-supervisor hook install` / `hook uninstall` to idempotently merge the Stop hook into `~/.claude/settings.json` and `~/.codex/hooks.json`. Existing user hooks are preserved; only the supervisor entry is added or removed.
+- Upgraded `JsonlObserver` with `inject_with_id` (atomic JSON handoff file with instruction_id + content hash) and `poll_delivery` (ACK tail). Observation-only runs now wait for the Stop-hook ACK instead of immediately pausing — the delivery state transitions `INJECTED -> ACKNOWLEDGED` on ACK, `TIMED_OUT` after `OBSERVATION_HOOK_ACK_TIMEOUT_SEC` (10 min default) so stalled runs still surface to a human.
+
 ### A2A inbound adapter + boundary guard
 
 - Added `supervisor/boundary/`: a transport-agnostic ingress safety layer with independently-toggleable auth (bearer + localhost fallback), sliding-window per-IP rate-limit, 8-pattern injection scan, JWT / GitHub / Slack / AWS / OpenAI-key redaction, and an append-only audit log that stores SHA-256 text hashes instead of raw bodies.
