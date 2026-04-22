@@ -29,12 +29,18 @@ from typing import Any
 
 INSTRUCTION_DIR = Path(".supervisor/runtime/instructions")
 STATE_FILE = Path(".supervisor/runtime/state.json")
+RUNS_DIR = Path(".supervisor/runtime/runs")
 PID_FILE = Path(".supervisor/runtime/supervisor.pid")
 
 INSTRUCTION_SCHEMA = "instruction.v1"
 ACK_SCHEMA = "instruction_ack.v1"
 
 TERMINAL_STATES = frozenset({"COMPLETED", "FAILED", "ABORTED"})
+
+_CONTINUE_MESSAGE = (
+    "Supervisor run is active. Continue working on the current step; "
+    "the supervisor will emit the next instruction when ready."
+)
 
 
 def _sha256(text: str) -> str:
@@ -166,17 +172,33 @@ class HookResult:
     delivered_instruction_id: str = ""
 
 
+def _state_is_active(state_file: Path) -> bool:
+    """Return True iff ``state_file`` contains a non-terminal top_state."""
+    if not state_file.exists():
+        return False
+    try:
+        with state_file.open("r", encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(state, dict):
+        return False
+    top_state = str(state.get("top_state", "")).upper()
+    return bool(top_state) and top_state not in TERMINAL_STATES
+
+
 def _supervisor_active(root: Path | None = None) -> bool:
     """Best-effort check: is a supervisor run active in this worktree.
 
-    Mirrors the legacy `check-active.sh` logic: daemon alive + state.json
-    exists + top_state is non-terminal.
+    Requires daemon alive AND at least one active run. Active runs are
+    discovered from the per-run state files under
+    ``.supervisor/runtime/runs/*/state.json`` (the canonical layout) and
+    also the legacy single-run ``.supervisor/runtime/state.json`` so
+    pre-daemon worktrees keep working.
     """
     base = root or Path.cwd()
     pid_file = base / PID_FILE
-    state_file = base / STATE_FILE
-
-    if not pid_file.exists() or not state_file.exists():
+    if not pid_file.exists():
         return False
 
     try:
@@ -191,16 +213,28 @@ def _supervisor_active(root: Path | None = None) -> bool:
     except (OSError, ProcessLookupError):
         return False
 
-    try:
-        with state_file.open("r", encoding="utf-8") as f:
-            state = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return False
+    # Per-run state files (canonical multi-run layout).
+    runs_dir = base / RUNS_DIR
+    if runs_dir.is_dir():
+        try:
+            iterator = runs_dir.iterdir()
+        except OSError:
+            iterator = iter(())
+        for run_dir in iterator:
+            if not run_dir.is_dir():
+                continue
+            if _state_is_active(run_dir / "state.json"):
+                return True
 
-    top_state = str(state.get("top_state", "")).upper()
-    if not top_state or top_state in TERMINAL_STATES:
-        return False
-    return True
+    # Legacy single-run layout (pre-daemon worktrees).
+    if _state_is_active(base / STATE_FILE):
+        return True
+
+    return False
+
+
+def _continue_result() -> HookResult:
+    return HookResult(exit_code=2, stderr=_CONTINUE_MESSAGE)
 
 
 def run_stop_hook(session_id: str, root: Path | None = None) -> HookResult:
@@ -209,44 +243,46 @@ def run_stop_hook(session_id: str, root: Path | None = None) -> HookResult:
     Returns a HookResult. The CLI is responsible for translating it into
     stderr/exit code.
     """
-    if not session_id:
-        return HookResult(exit_code=0, stderr="")
+    if session_id:
+        pending = read_instruction(session_id, root=root)
+        if pending:
+            instruction_id = str(pending.get("instruction_id") or "")
+            content = str(pending.get("content") or "")
+            # Always recompute the content hash; if the payload's declared
+            # sha disagrees, treat the instruction as corrupt and refuse to
+            # deliver (otherwise we'd ACK arbitrary text the agent did not
+            # author). Fall through to the "active?" check so the agent
+            # still keeps going.
+            computed_hash = _sha256(content)
+            declared_hash = pending.get("content_sha256")
+            if declared_hash is not None and declared_hash != computed_hash:
+                if _supervisor_active(root=root):
+                    return _continue_result()
+                return HookResult(exit_code=0, stderr="")
 
-    pending = read_instruction(session_id, root=root)
-    if pending:
-        instruction_id = str(pending.get("instruction_id") or "")
-        content = str(pending.get("content") or "")
-        content_hash = str(pending.get("content_sha256") or _sha256(content))
-
-        ack = read_ack(session_id, root=root)
-        already_delivered = (
-            ack is not None
-            and ack.get("instruction_id") == instruction_id
-            and ack.get("content_sha256") == content_hash
-        )
-
-        if not already_delivered:
-            write_ack(
-                session_id,
-                instruction_id=instruction_id,
-                content_sha256=content_hash,
-                root=root,
+            ack = read_ack(session_id, root=root)
+            already_delivered = (
+                ack is not None
+                and ack.get("instruction_id") == instruction_id
+                and ack.get("content_sha256") == computed_hash
             )
-            return HookResult(
-                exit_code=2,
-                stderr=content,
-                delivered_instruction_id=instruction_id,
-            )
-        # Already delivered: fall through to "run active?" check below so we
-        # don't spam the same instruction every time the agent stops.
+
+            if not already_delivered:
+                write_ack(
+                    session_id,
+                    instruction_id=instruction_id,
+                    content_sha256=computed_hash,
+                    root=root,
+                )
+                return HookResult(
+                    exit_code=2,
+                    stderr=content,
+                    delivered_instruction_id=instruction_id,
+                )
+            # Already delivered: fall through to "run active?" check below
+            # so we don't spam the same instruction every time the agent stops.
 
     if _supervisor_active(root=root):
-        return HookResult(
-            exit_code=2,
-            stderr=(
-                "Supervisor run is active. Continue working on the current step; "
-                "the supervisor will emit the next instruction when ready."
-            ),
-        )
+        return _continue_result()
 
     return HookResult(exit_code=0, stderr="")

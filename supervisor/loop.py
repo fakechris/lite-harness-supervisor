@@ -98,6 +98,9 @@ class SupervisorLoop:
         self.worker_profile = worker_profile or WorkerProfile()
         self.notification_manager = notification_manager or NotificationManager()
         self.auto_intervention_manager = auto_intervention_manager or AutoInterventionManager(mode="notify_only")
+        # Set while a sidecar loop is active; consulted by helpers that need
+        # to cooperate with daemon stop_event / SIGTERM.
+        self._interrupted_ref = None
 
     def handle_event(self, state, event):
         state.last_event = event
@@ -861,6 +864,10 @@ class SupervisorLoop:
                 prev_handler = None  # not main thread
             interrupted_ref = lambda: interrupted
 
+        # Expose the interrupt predicate to helpers (e.g. hook-handoff poll
+        # loop) that need to cooperate with stop_event / SIGTERM without
+        # threading the ref through every call site.
+        self._interrupted_ref = interrupted_ref
         try:
             self._run_sidecar_inner(
                 spec, state, terminal, adapter, surface_id,
@@ -874,6 +881,7 @@ class SupervisorLoop:
             self.store.save(state)
             raise
         finally:
+            self._interrupted_ref = None
             if stop_event is None and prev_handler is not None:
                 try:
                     signal.signal(signal.SIGTERM, prev_handler)
@@ -1424,10 +1432,31 @@ class SupervisorLoop:
             self.store.save(state)
             return False
 
+        interrupted_ref = getattr(self, "_interrupted_ref", None)
         deadline = time.monotonic() + OBSERVATION_HOOK_ACK_TIMEOUT_SEC
+        consecutive_errors = 0
+        MAX_CONSECUTIVE_ERRORS = 5
+        last_error: Exception | None = None
         while time.monotonic() < deadline:
+            # Respect daemon stop / SIGTERM without waiting out the 10-min ACK
+            # window. Persist the current state and bail cleanly.
+            if interrupted_ref is not None and interrupted_ref():
+                self.store.save(state)
+                return False
             try:
-                if poll_delivery(instruction.instruction_id):
+                delivered = poll_delivery(instruction.instruction_id)
+            except Exception as exc:  # noqa: BLE001 — adapter contract is loose
+                consecutive_errors += 1
+                last_error = exc
+                logger.warning(
+                    "poll_delivery raised (%d/%d): %s",
+                    consecutive_errors, MAX_CONSECUTIVE_ERRORS, exc,
+                )
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    break
+            else:
+                consecutive_errors = 0
+                if delivered:
                     self._set_delivery_state(
                         state, DeliveryState.ACKNOWLEDGED, reason="stop hook ACK"
                     )
@@ -1441,9 +1470,29 @@ class SupervisorLoop:
                     )
                     self.store.save(state)
                     return True
-            except Exception as exc:
-                logger.warning("poll_delivery raised: %s", exc)
             time.sleep(OBSERVATION_HOOK_POLL_INTERVAL_SEC)
+
+        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+            self._set_delivery_state(
+                state, DeliveryState.FAILED,
+                reason=f"poll_delivery error cap: {last_error}",
+            )
+            payload = {
+                "reason": (
+                    f"observation-only surface poll_delivery failed "
+                    f"{consecutive_errors} times in a row: {last_error}"
+                ),
+                "node_id": state.current_node_id,
+                "instruction_id": instruction.instruction_id,
+                "pause_class": "recovery",
+                "reason_code": REC_INJECT_FAILED,
+            }
+            self.store.append_session_event(
+                state.run_id, "injection_hook_poll_errors", payload
+            )
+            self._pause_for_human(state, payload)
+            self.store.save(state)
+            return False
 
         # No ACK within the window.
         self._set_delivery_state(

@@ -117,11 +117,15 @@ class JsonlObserver:
 
         Prefer ``inject_with_id`` — it records an instruction_id so the loop
         can correlate with the Stop-hook ACK file. This shim remains for
-        callers that still pass raw text.
+        callers that still pass raw text. A per-call nonce keeps the
+        instruction_id unique across identical-text calls so a previous ACK
+        file doesn't falsely mark the new inject as already delivered.
         """
         import hashlib
+        import uuid
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-        self.inject_with_id(text, instruction_id=f"legacy-{digest}")
+        nonce = uuid.uuid4().hex[:8]
+        self.inject_with_id(text, instruction_id=f"legacy-{digest}-{nonce}")
 
     def inject_with_id(
         self,

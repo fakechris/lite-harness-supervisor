@@ -34,15 +34,32 @@ def codex_hooks_path(home: Path | None = None) -> Path:
     return (home or Path.home()) / ".codex" / "hooks.json"
 
 
+class SettingsError(RuntimeError):
+    """Raised when an existing settings file is unreadable or malformed.
+
+    We never silently overwrite a malformed settings file — the user likely
+    has hand-edited config there and we don't want to clobber it.
+    """
+
+
 def _load_settings(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    except OSError as exc:
+        raise SettingsError(f"{path}: cannot read settings file: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise SettingsError(
+            f"{path}: settings file is not valid JSON ({exc}); "
+            "refusing to overwrite"
+        ) from exc
+    if not isinstance(data, dict):
+        raise SettingsError(
+            f"{path}: settings root is not an object; refusing to overwrite"
+        )
+    return data
 
 
 def _atomic_write_json(path: Path, data: dict) -> None:
@@ -87,7 +104,10 @@ def install_stop_hook(
 
     Returns (changed, message).
     """
-    data = _load_settings(settings_path)
+    try:
+        data = _load_settings(settings_path)
+    except SettingsError as exc:
+        return False, str(exc)
     hooks = data.setdefault("hooks", {})
     if not isinstance(hooks, dict):
         return False, f"{settings_path}: `hooks` field is not an object; refusing to merge"
@@ -111,7 +131,10 @@ def uninstall_stop_hook(
     if not settings_path.exists():
         return False, f"{settings_path}: no settings file to modify"
 
-    data = _load_settings(settings_path)
+    try:
+        data = _load_settings(settings_path)
+    except SettingsError as exc:
+        return False, str(exc)
     hooks = data.get("hooks")
     if not isinstance(hooks, dict):
         return False, f"{settings_path}: no `hooks` section"

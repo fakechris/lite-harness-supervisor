@@ -73,6 +73,22 @@ class TestInstallStopHook:
         assert changed is False
         assert "not a list" in msg
 
+    def test_refuses_when_settings_is_malformed_json(self, tmp_path):
+        target = tmp_path / "settings.json"
+        target.write_text("{ not valid json", encoding="utf-8")
+        changed, msg = hook_install.install_stop_hook(target)
+        assert changed is False
+        assert "not valid json" in msg.lower() or "refusing to overwrite" in msg
+        # File must be untouched.
+        assert target.read_text() == "{ not valid json"
+
+    def test_refuses_when_settings_root_is_not_object(self, tmp_path):
+        target = tmp_path / "settings.json"
+        target.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+        changed, msg = hook_install.install_stop_hook(target)
+        assert changed is False
+        assert "not an object" in msg
+
 
 class TestUninstallStopHook:
     def test_removes_our_entry_only(self, tmp_path):

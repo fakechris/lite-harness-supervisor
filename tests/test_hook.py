@@ -142,3 +142,62 @@ class TestRunStopHook:
 
         r = hook.run_stop_hook("sid", root=tmp_path)
         assert r.exit_code == 0
+
+    def test_empty_session_still_blocks_when_run_active(self, tmp_path):
+        # Even if the hook can't resolve a session_id, a live supervisor run
+        # in the cwd must still block exit so the agent keeps working.
+        state_file = tmp_path / hook.STATE_FILE
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(json.dumps({"top_state": "RUNNING"}), encoding="utf-8")
+        (tmp_path / hook.PID_FILE).write_text(str(os.getpid()), encoding="utf-8")
+
+        r = hook.run_stop_hook("", root=tmp_path)
+        assert r.exit_code == 2
+        assert "Supervisor run is active" in r.stderr
+
+    def test_per_run_state_file_counts_as_active(self, tmp_path):
+        # Daemon layout: .supervisor/runtime/runs/<run_id>/state.json
+        run_dir = tmp_path / hook.RUNS_DIR / "run-abc"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "state.json").write_text(
+            json.dumps({"top_state": "RUNNING"}), encoding="utf-8"
+        )
+        (tmp_path / hook.PID_FILE).write_text(str(os.getpid()), encoding="utf-8")
+
+        r = hook.run_stop_hook("", root=tmp_path)
+        assert r.exit_code == 2
+        assert "Supervisor run is active" in r.stderr
+
+    def test_per_run_state_all_terminal_means_no_block(self, tmp_path):
+        run_dir = tmp_path / hook.RUNS_DIR / "run-done"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "state.json").write_text(
+            json.dumps({"top_state": "COMPLETED"}), encoding="utf-8"
+        )
+        (tmp_path / hook.PID_FILE).write_text(str(os.getpid()), encoding="utf-8")
+
+        r = hook.run_stop_hook("", root=tmp_path)
+        assert r.exit_code == 0
+
+    def test_content_hash_mismatch_refuses_to_deliver(self, tmp_path):
+        # Hand-craft a corrupted instruction file whose declared content_sha256
+        # disagrees with the actual content. The hook must refuse to ACK it.
+        p = hook.instruction_path("sid", root=tmp_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            json.dumps(
+                {
+                    "schema": hook.INSTRUCTION_SCHEMA,
+                    "instruction_id": "i1",
+                    "content": "real content",
+                    "content_sha256": "deadbeef",  # wrong hash
+                }
+            ),
+            encoding="utf-8",
+        )
+        r = hook.run_stop_hook("sid", root=tmp_path)
+        # No delivery, no ACK written.
+        assert r.delivered_instruction_id == ""
+        assert hook.read_ack("sid", root=tmp_path) is None
+        # With no active supervisor, exit 0; otherwise continue message.
+        assert r.exit_code == 0
