@@ -986,6 +986,8 @@ class DaemonServer:
         escalation_threshold = self.config.clarification_escalation_confidence
 
         def _job():
+            from supervisor.operator.clarification import finalize_clarification
+
             _write_event("clarification_request", {
                 "question": question, "language": language,
             })
@@ -994,34 +996,12 @@ class DaemonServer:
             ctx["question"] = question
             result = self._explainer.request_clarification(ctx)
 
-            confidence = result.get("confidence")
-            try:
-                conf_value = float(confidence) if confidence is not None else None
-            except (TypeError, ValueError):
-                conf_value = None
-            escalate = conf_value is not None and conf_value < escalation_threshold
-            result["escalation_recommended"] = escalate
-
-            _write_event("explainer_answer", {
-                "source": "explainer",
-                "question": question,
-                "answer": result.get("answer", ""),
-                "confidence": confidence,
-            })
-            _write_event("clarification_response", {
-                "question": question,
-                "answer": result.get("answer", ""),
-                "confidence": confidence,
-                "source": "explainer",
-                "escalation_recommended": escalate,
-            })
-            if escalate:
-                _write_event("clarification_escalation_recommended", {
-                    "question": question,
-                    "confidence": confidence,
-                    "threshold": escalation_threshold,
-                })
-            return result
+            return finalize_clarification(
+                result,
+                question=question,
+                escalation_threshold=escalation_threshold,
+                write_event=_write_event,
+            )
 
         job_id = self._job_tracker.submit("clarification", _job)
         return {"ok": True, "job_id": job_id}

@@ -124,7 +124,10 @@ class ExplainerClient:
         except FileNotFoundError:
             logger.warning("assess_drift prompt not found, falling back to stub")
             return fallback
-        if self.deep_model is not None:
+        # Use falsy check (not `is not None`) so an empty-string
+        # ``SUPERVISOR_DEEP_EXPLAINER_MODEL=`` env var falls through to
+        # the routine model without keeping deep_temperature/deep_max_tokens.
+        if self.deep_model:
             return self._call(
                 prompt, context,
                 fallback=fallback,

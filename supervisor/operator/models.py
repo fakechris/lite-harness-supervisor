@@ -10,6 +10,21 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+def coerce_confidence(value: Any) -> float | None:
+    """Parse a confidence value from raw explainer/IPC payloads.
+
+    Returns ``None`` for missing, non-numeric, or unparseable values.
+    Shared by ``ExchangeView``, ``DriftAssessment``, and the clarification
+    pipeline so every consumer applies the same coercion rule.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class RunSnapshot:
     """Current state of a run for operator display.
@@ -222,12 +237,7 @@ class ExchangeView:
         ``last_instruction_summary``) and the post-explainer shape
         (``explanation``, ``confidence``, …).
         """
-        conf = data.get("confidence")
-        if conf is not None:
-            try:
-                conf = float(conf)
-            except (TypeError, ValueError):
-                conf = None
+        conf = coerce_confidence(data.get("confidence"))
         return cls(
             run_id=str(data.get("run_id") or run_id or ""),
             window_start=str(data.get("window_start", "")),
@@ -284,12 +294,7 @@ class DriftAssessment:
         status = str(data.get("status", "") or "").strip().lower()
         if status not in _DRIFT_STATUSES:
             status = "watch"  # unknown → conservative bucket
-        conf = data.get("confidence")
-        if conf is not None:
-            try:
-                conf = float(conf)
-            except (TypeError, ValueError):
-                conf = None
+        conf = coerce_confidence(data.get("confidence"))
         return cls(
             run_id=str(data.get("run_id") or run_id or ""),
             status=status,

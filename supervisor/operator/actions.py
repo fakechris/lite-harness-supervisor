@@ -404,62 +404,25 @@ def submit_clarification(ctx: RunContext, question: str, *,
 
     def _job() -> dict:
         from supervisor.operator.api import append_timeline_event
+        from supervisor.operator.clarification import finalize_clarification
 
-        # Record the question in the timeline
-        append_timeline_event(
-            ctx.session_log_path, ctx.run_id,
-            "clarification_request",
-            {"question": question, "language": language},
-        )
+        def _write(event_type: str, payload: dict[str, Any]) -> None:
+            append_timeline_event(
+                ctx.session_log_path, ctx.run_id, event_type, payload,
+            )
+
+        _write("clarification_request", {"question": question, "language": language})
 
         context = build_explainer_context(ctx, language=language)
         context["question"] = question
         result = explainer.request_clarification(context)
 
-        confidence = result.get("confidence")
-        try:
-            conf_value = float(confidence) if confidence is not None else None
-        except (TypeError, ValueError):
-            conf_value = None
-        escalate = conf_value is not None and conf_value < escalation_threshold
-        result["escalation_recommended"] = escalate
-
-        # Emit explainer_answer — explicit source marker distinguishes
-        # this from a future worker-side response.
-        append_timeline_event(
-            ctx.session_log_path, ctx.run_id,
-            "explainer_answer",
-            {
-                "source": "explainer",
-                "question": question,
-                "answer": result.get("answer", ""),
-                "confidence": confidence,
-            },
+        return finalize_clarification(
+            result,
+            question=question,
+            escalation_threshold=escalation_threshold,
+            write_event=_write,
         )
-        # Record the answer in the timeline (legacy event kept for
-        # backward compatibility with existing consumers).
-        append_timeline_event(
-            ctx.session_log_path, ctx.run_id,
-            "clarification_response",
-            {
-                "question": question,
-                "answer": result.get("answer", ""),
-                "confidence": confidence,
-                "source": "explainer",
-                "escalation_recommended": escalate,
-            },
-        )
-        if escalate:
-            append_timeline_event(
-                ctx.session_log_path, ctx.run_id,
-                "clarification_escalation_recommended",
-                {
-                    "question": question,
-                    "confidence": confidence,
-                    "threshold": escalation_threshold,
-                },
-            )
-        return result
 
     job_id = _local_jobs.submit("clarification", _job)
     return OperatorJob(job_id=job_id, source="local")
