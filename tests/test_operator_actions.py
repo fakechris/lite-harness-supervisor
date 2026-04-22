@@ -438,6 +438,10 @@ class TestSubmitClarification:
                     explainer_model=None,
                     explainer_temperature=0.3,
                     explainer_max_tokens=1024,
+                    deep_explainer_model=None,
+                    deep_explainer_temperature=0.2,
+                    deep_explainer_max_tokens=2048,
+                    clarification_escalation_confidence=0.4,
                 )
                 job = submit_clarification(ctx, "what happened?", language="zh")
         assert job.source == "local"
@@ -452,16 +456,26 @@ class TestSubmitClarification:
         assert j.status == "completed"
         # Stub mode should include the question in the answer
         assert "what happened?" in j.result.get("answer", "")
+        # Stub confidence (0.1) is below default threshold (0.4) → escalation
+        assert j.result.get("escalation_recommended") is True
 
         # Verify clarification events written to session_log
         session_log = run_dir / "session_log.jsonl"
         assert session_log.exists()
         events = [json.loads(line) for line in session_log.read_text().strip().splitlines()]
-        assert len(events) == 2
-        assert events[0]["event_type"] == "clarification_request"
+        types = [e["event_type"] for e in events]
+        assert types == [
+            "clarification_request",
+            "explainer_answer",
+            "clarification_response",
+            "clarification_escalation_recommended",
+        ]
         assert events[0]["payload"]["question"] == "what happened?"
-        assert events[1]["event_type"] == "clarification_response"
+        assert events[1]["payload"]["source"] == "explainer"
         assert "what happened?" in events[1]["payload"]["answer"]
+        assert events[2]["payload"]["source"] == "explainer"
+        assert events[2]["payload"]["escalation_recommended"] is True
+        assert events[3]["payload"]["threshold"] == 0.4
 
 
 class TestClarificationSummarizers:

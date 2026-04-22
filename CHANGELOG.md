@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.3.6 (2026-04-22)
+
+### Operator Channel polish
+
+- Added `deep_explainer_model` (+ `deep_explainer_temperature`, `deep_explainer_max_tokens`) so `assess_drift` can opt into a heavier reasoner while routine `explain_run` / `explain_exchange` / `request_clarification` keep using the cheaper `explainer_model`. Falls back to the routine model, then to the structured stub, when the deep model is unset or the call fails.
+- Added frozen `DriftAssessment` and `ExchangeView` dataclasses (`supervisor.operator.models`) with `from_dict()` classmethods that accept both the legacy `last_*_summary` exchange shape and the post-explainer shape. Unknown drift statuses collapse to `watch`; non-numeric confidences collapse to `None`. Channel adapters can consume type-safe projections instead of stringifying raw dicts.
+- Emitted a dedicated `explainer_answer` timeline event alongside the existing `clarification_response`, tagged with `source="explainer"` so future worker-side clarification flows can be distinguished without touching existing consumers.
+- Added a confidence-gated escalation recommendation: when a clarification answer's confidence falls below `clarification_escalation_confidence` (default `0.4`), the result now carries `escalation_recommended=True` and a `clarification_escalation_recommended` event is written to the session log. Escalation is advisory — the operator still chooses whether to route the question to the worker.
+
 ## 0.3.5 (2026-04-21)
 
 ### JSONL injection via Stop hook

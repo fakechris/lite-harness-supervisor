@@ -160,6 +160,9 @@ class DaemonServer:
             model=self.config.explainer_model,
             temperature=self.config.explainer_temperature,
             max_tokens=self.config.explainer_max_tokens,
+            deep_model=self.config.deep_explainer_model,
+            deep_temperature=self.config.deep_explainer_temperature,
+            deep_max_tokens=self.config.deep_explainer_max_tokens,
         )
         self._job_tracker = JobTracker()
         # Command channels are per-credential-set singletons with
@@ -980,6 +983,8 @@ class DaemonServer:
                 from supervisor.operator.api import append_timeline_event
                 append_timeline_event(session_log, run_id, event_type, payload)
 
+        escalation_threshold = self.config.clarification_escalation_confidence
+
         def _job():
             _write_event("clarification_request", {
                 "question": question, "language": language,
@@ -989,11 +994,33 @@ class DaemonServer:
             ctx["question"] = question
             result = self._explainer.request_clarification(ctx)
 
+            confidence = result.get("confidence")
+            try:
+                conf_value = float(confidence) if confidence is not None else None
+            except (TypeError, ValueError):
+                conf_value = None
+            escalate = conf_value is not None and conf_value < escalation_threshold
+            result["escalation_recommended"] = escalate
+
+            _write_event("explainer_answer", {
+                "source": "explainer",
+                "question": question,
+                "answer": result.get("answer", ""),
+                "confidence": confidence,
+            })
             _write_event("clarification_response", {
                 "question": question,
                 "answer": result.get("answer", ""),
-                "confidence": result.get("confidence"),
+                "confidence": confidence,
+                "source": "explainer",
+                "escalation_recommended": escalate,
             })
+            if escalate:
+                _write_event("clarification_escalation_recommended", {
+                    "question": question,
+                    "confidence": confidence,
+                    "threshold": escalation_threshold,
+                })
             return result
 
         job_id = self._job_tracker.submit("clarification", _job)

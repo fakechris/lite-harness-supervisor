@@ -49,12 +49,18 @@ class ExplainerClient:
     Parameters
     ----------
     model : str | None
-        A LiteLLM model identifier for routine explanations.
-        Set to ``None`` for stub mode.
+        LiteLLM model identifier for routine explanations (explain_run,
+        explain_exchange, request_clarification). ``None`` → stub mode.
     temperature : float
         Sampling temperature (higher than judge — explanations are softer).
     max_tokens : int
         Max response tokens (larger than judge — explanations are longer).
+    deep_model : str | None
+        Optional heavier model used only for drift / codebase-aware analysis
+        (``assess_drift``). When ``None``, drift falls back to ``model``.
+        Lets operators pay for a stronger analysis only when it matters.
+    deep_temperature, deep_max_tokens
+        Sampling params applied when ``deep_model`` is used.
     """
 
     def __init__(
@@ -62,10 +68,17 @@ class ExplainerClient:
         model: str | None = None,
         temperature: float = 0.3,
         max_tokens: int = 1024,
+        *,
+        deep_model: str | None = None,
+        deep_temperature: float = 0.2,
+        deep_max_tokens: int = 2048,
     ):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.deep_model = deep_model
+        self.deep_temperature = deep_temperature
+        self.deep_max_tokens = deep_max_tokens
 
     # ------------------------------------------------------------------
     # Public methods
@@ -96,8 +109,14 @@ class ExplainerClient:
         return self._call(prompt, context, fallback=fallback)
 
     def assess_drift(self, context: dict[str, Any]) -> dict[str, Any]:
-        """Assess whether a run is drifting from its approved plan."""
-        if self.model is None:
+        """Assess whether a run is drifting from its approved plan.
+
+        Prefers ``deep_model`` when configured — drift assessment benefits
+        from the stronger reasoner. Falls back to the routine model, then
+        to the stub analysis.
+        """
+        model = self.deep_model or self.model
+        if model is None:
             return self._stub_assess_drift(context)
         fallback = self._stub_assess_drift(context)
         try:
@@ -105,6 +124,14 @@ class ExplainerClient:
         except FileNotFoundError:
             logger.warning("assess_drift prompt not found, falling back to stub")
             return fallback
+        if self.deep_model is not None:
+            return self._call(
+                prompt, context,
+                fallback=fallback,
+                model=self.deep_model,
+                temperature=self.deep_temperature,
+                max_tokens=self.deep_max_tokens,
+            )
         return self._call(prompt, context, fallback=fallback)
 
     def request_clarification(self, context: dict[str, Any]) -> dict[str, Any]:
@@ -129,6 +156,9 @@ class ExplainerClient:
         context: dict[str, Any],
         *,
         fallback: dict[str, Any],
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         try:
             import litellm
@@ -136,16 +166,20 @@ class ExplainerClient:
             logger.warning("litellm not installed, falling back to stub")
             return fallback
 
+        effective_model = model or self.model
+        effective_temperature = temperature if temperature is not None else self.temperature
+        effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
         ]
         try:
             response = litellm.completion(
-                model=self.model,
+                model=effective_model,
                 messages=messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
+                temperature=effective_temperature,
+                max_tokens=effective_max_tokens,
             )
             text = response.choices[0].message.content
             result = _parse_json(text)
