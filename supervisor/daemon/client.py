@@ -160,6 +160,31 @@ class DaemonClient:
             "language": language,
         })
 
+    def escalate_clarification(
+        self,
+        run_id: str,
+        question: str,
+        *,
+        language: str = "en",
+        reason: str = "operator_initiated",
+        operator: str = "",
+        confidence: float | None = None,
+    ) -> dict:
+        """Record an operator's decision to escalate a clarification.
+
+        Audit-only in 0.3.7; the actual side-instruction transport to the
+        worker is wired in 0.3.8. Returns ``{ok, escalation_id}``.
+        """
+        return self._request({
+            "action": "escalate_clarification",
+            "run_id": run_id,
+            "question": question,
+            "language": language,
+            "reason": reason,
+            "operator": operator,
+            "confidence": confidence,
+        })
+
     def get_job(self, job_id: str) -> dict:
         """Poll for async job result."""
         return self._request({"action": "get_job", "job_id": job_id})

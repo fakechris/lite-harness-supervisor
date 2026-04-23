@@ -973,6 +973,84 @@ class TestDaemonResume:
         assert "no persisted spec hash" in result["error"]
 
 
+class TestDaemonEscalateClarification:
+    """Daemon IPC for operator-initiated escalation (0.3.7)."""
+
+    def _server(self, tmp_path):
+        return DaemonServer(runs_dir=str(tmp_path / "runs"))
+
+    def _seed_run_state(self, tmp_path, run_id: str) -> None:
+        run_dir = Path(tmp_path) / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "state.json").write_text(json.dumps({"run_id": run_id}))
+
+    def test_writes_audit_event_and_returns_id(self, tmp_path):
+        server = self._server(tmp_path)
+        self._seed_run_state(tmp_path, "run_esc1")
+
+        resp = server._do_escalate_clarification({
+            "run_id": "run_esc1",
+            "question": "is this migration safe?",
+            "language": "zh",
+            "reason": "tui_low_confidence",
+            "operator": "op1",
+            "confidence": 0.12,
+        })
+        assert resp["ok"] is True
+        assert len(resp["escalation_id"]) == 16
+
+        log_path = Path(tmp_path) / "runs" / "run_esc1" / "session_log.jsonl"
+        assert log_path.exists()
+        events = [json.loads(line) for line in log_path.read_text().strip().splitlines()]
+        assert len(events) == 1
+        ev = events[0]
+        assert ev["event_type"] == "clarification_escalated_to_worker"
+        assert ev["payload"]["question"] == "is this migration safe?"
+        assert ev["payload"]["reason"] == "tui_low_confidence"
+        assert ev["payload"]["operator"] == "op1"
+        assert ev["payload"]["confidence"] == 0.12
+        assert ev["payload"]["language"] == "zh"
+        assert ev["payload"]["transport"] == "pending_0_3_8"
+        assert ev["payload"]["escalation_id"] == resp["escalation_id"]
+
+    def test_rejects_missing_run(self, tmp_path):
+        server = self._server(tmp_path)
+        resp = server._do_escalate_clarification({
+            "run_id": "run_ghost", "question": "q?",
+        })
+        assert resp["ok"] is False
+        assert "not found" in resp["error"]
+
+    def test_rejects_empty_question(self, tmp_path):
+        server = self._server(tmp_path)
+        self._seed_run_state(tmp_path, "run_esc2")
+        resp = server._do_escalate_clarification({
+            "run_id": "run_esc2", "question": "",
+        })
+        assert resp["ok"] is False
+        assert "question" in resp["error"]
+
+    def test_client_roundtrip(self, client, tmp_path):
+        # End-to-end: client.escalate_clarification → daemon → event on disk.
+        # Daemon fixture (see `daemon_server`) uses `tmp_path / "runs"`,
+        # so seeding state.json there exposes the run through
+        # `_resolve_run_store`'s on-disk fallback.
+        self._seed_run_state(tmp_path, "run_cli")
+
+        resp = client.escalate_clarification(
+            "run_cli", "what happened?",
+            language="en", reason="im_operator",
+            operator="op2", confidence=0.3,
+        )
+        assert resp["ok"] is True
+        assert resp["escalation_id"]
+
+        log_path = Path(tmp_path) / "runs" / "run_cli" / "session_log.jsonl"
+        events = [json.loads(line) for line in log_path.read_text().strip().splitlines()]
+        assert events[0]["event_type"] == "clarification_escalated_to_worker"
+        assert events[0]["payload"]["operator"] == "op2"
+
+
 class TestDaemonExternalTask:
     """Daemon IPC for event-plane request/result/mailbox (Task 3)."""
 

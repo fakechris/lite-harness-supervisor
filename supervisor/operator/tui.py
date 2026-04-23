@@ -19,6 +19,7 @@ from supervisor.operator.session_index import collect_sessions
 from supervisor.operator.actions import (
     ActionUnavailable,
     OperatorJob,
+    do_escalate_clarification,
     do_exchange,
     do_inspect,
     do_note_add,
@@ -213,6 +214,9 @@ def format_clarification(result: dict[str, Any]) -> list[str]:
     conf = result.get("confidence")
     if conf is not None:
         lines.append(f"  Confidence: {conf}")
+    if result.get("escalation_recommended"):
+        lines.append("")
+        lines.append("  ⚠  low confidence — press 'E' to escalate to worker")
     return lines
 
 
@@ -460,6 +464,11 @@ def _curses_main(stdscr):
     # Pending async job state (non-blocking)
     pending_job: dict[str, Any] | None = None  # {"job": OperatorJob, "ctx": RunContext, "label": ...}
 
+    # Last completed clarification (for 'E' escalate keybind).
+    # Shape: {"ctx": RunContext, "question": str, "confidence": float|None,
+    #         "escalation_recommended": bool, "language": str}
+    last_clarify: dict[str, Any] | None = None
+
     while True:
         h, w = stdscr.getmaxyx()
         if h < MIN_HEIGHT or w < MIN_WIDTH:
@@ -476,13 +485,25 @@ def _curses_main(stdscr):
             try:
                 result = poll_job(pending_job["ctx"], pending_job["job"])
                 if result.get("status") in ("completed", "failed"):
+                    status_msg = default_status
                     if result.get("status") == "failed":
                         right_lines = [f"Job failed: {result.get('error', 'unknown error')}"]
                     elif pending_job.get("label") == "clarification":
-                        right_lines = format_clarification(result.get("result", {}))
+                        payload = result.get("result", {}) or {}
+                        right_lines = format_clarification(payload)
+                        if payload.get("escalation_recommended"):
+                            last_clarify = {
+                                "ctx": pending_job["ctx"],
+                                "question": pending_job.get("question", ""),
+                                "confidence": payload.get("confidence"),
+                                "escalation_recommended": True,
+                                "language": pending_job.get("language", language),
+                            }
+                            status_msg = " Low-confidence answer — press 'E' to escalate to the worker "
+                        else:
+                            last_clarify = None
                     else:
                         right_lines = format_explanation(result.get("result", {}))
-                    status_msg = default_status
                     pending_job = None
                 # else: still pending, keep spinner
             except Exception as exc:
@@ -572,14 +593,25 @@ def _curses_main(stdscr):
             continue
 
         if key in (ord("j"), curses.KEY_DOWN) and runs:
+            prev_idx = selected_idx
             selected_idx = min(selected_idx + 1, len(runs) - 1)
             detail_lines = ["(loading...)"]
             right_lines = []
+            if selected_idx != prev_idx and last_clarify is not None:
+                # Escalation target is captured per-answer; clear the
+                # hint so the stale "press E" message doesn't survive
+                # a run change.
+                last_clarify = None
+                status_msg = default_status
 
         if key in (ord("k"), curses.KEY_UP) and runs:
+            prev_idx = selected_idx
             selected_idx = max(selected_idx - 1, 0)
             detail_lines = ["(loading...)"]
             right_lines = []
+            if selected_idx != prev_idx and last_clarify is not None:
+                last_clarify = None
+                status_msg = default_status
 
         # Enter or space: load snapshot + timeline
         if key in (10, 32, ord("i")) and runs:
@@ -656,15 +688,39 @@ def _curses_main(stdscr):
             if question:
                 try:
                     job = submit_clarification(ctx, question, language=language)
-                    pending_job = {"job": job, "ctx": ctx, "label": "clarification"}
+                    pending_job = {
+                        "job": job, "ctx": ctx, "label": "clarification",
+                        "question": question, "language": language,
+                    }
                     status_msg = " Asking... (waiting for answer) "
                     right_lines = ["(asking...)"]
+                    last_clarify = None
                 except ActionUnavailable as exc:
                     status_msg = f" {exc} "
                 except Exception as exc:
                     right_lines = [f"Error: {exc}"]
             else:
                 status_msg = default_status
+
+        # E: escalate last low-confidence clarification to the worker.
+        # Only active when `last_clarify` was set by the most recent answer
+        # and no async job is in flight.
+        if key == ord("E") and last_clarify is not None and pending_job is None:
+            try:
+                resp = do_escalate_clarification(
+                    last_clarify["ctx"],
+                    last_clarify["question"],
+                    language=last_clarify.get("language", language),
+                    reason="tui_low_confidence",
+                    confidence=last_clarify.get("confidence"),
+                )
+                esc_id = resp.get("escalation_id", "")[:12]
+                status_msg = f" Escalated to worker (id={esc_id}) "
+                last_clarify = None
+            except ActionUnavailable as exc:
+                status_msg = f" Escalate unavailable: {exc} "
+            except Exception as exc:
+                status_msg = f" Escalate failed: {exc} "
 
         # p: pause
         if key == ord("p") and runs:

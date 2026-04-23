@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.3.7 (2026-04-22)
+
+### Operator-initiated clarification escalation
+
+- Added `thin-supervisor clarify <run_id> <question> [--escalate] [--operator <name>]` — the first CLI entry point that runs a clarification and, on operator opt-in, records an escalation decision against the run's session log.
+- Added a daemon IPC handler (`escalate_clarification`) and matching `DaemonClient.escalate_clarification` / `operator.actions.do_escalate_clarification` so every surface (CLI, TUI, IM) routes through the same canonical action and capability model. Works through the daemon when one is attached; falls back to writing directly to the run's session log for local/completed runs.
+- Wired a TUI `E` keybind: when a clarification answer comes back below the escalation threshold, `format_clarification` surfaces an "escalate" hint and pressing `E` records the escalation against the selected run without leaving the channel.
+- Added a `/escalate <run_id> [question]` IM command to `command_dispatch`. With no explicit question it pulls the most recent `clarification_response` from the run's session log; with an override it uses the operator's text verbatim.
+- Emits a single `clarification_escalated_to_worker` timeline event — `transport="pending_0_3_8"` — so the audit trail makes clear that the actual side-instruction transport to the worker is deferred to 0.3.8 while the operator decision is already durable.
+
 ## 0.3.6 (2026-04-22)
 
 ### Operator Channel polish

@@ -373,6 +373,8 @@ class DaemonServer:
             response = self._do_assess_drift(request)
         elif action == "request_clarification":
             response = self._do_request_clarification(request)
+        elif action == "escalate_clarification":
+            response = self._do_escalate_clarification(request)
         elif action == "get_job":
             response = self._do_get_job(request.get("job_id", ""))
         elif action == "external_task_create":
@@ -1005,6 +1007,52 @@ class DaemonServer:
 
         job_id = self._job_tracker.submit("clarification", _job)
         return {"ok": True, "job_id": job_id}
+
+    def _do_escalate_clarification(self, request: dict) -> dict:
+        """Record an operator's decision to escalate a clarification to the worker.
+
+        Audit-only in 0.3.7 — actual transport of the question to the worker
+        (via a side-instruction queue drained by SupervisorLoop) and
+        worker-reply capture ship in 0.3.8. The event written here is the
+        durable record that an operator chose to escalate.
+        """
+        run_id = request.get("run_id", "")
+        question = request.get("question", "")
+        language = request.get("language", "en")
+        reason = request.get("reason", "operator_initiated")
+        operator = request.get("operator", "")
+        confidence = request.get("confidence")
+
+        state, session_log = self._resolve_run_store(run_id)
+        if state is None:
+            return {"ok": False, "error": f"run {run_id} not found"}
+        if not question:
+            return {"ok": False, "error": "question is required"}
+
+        escalation_id = uuid.uuid4().hex[:16]
+        payload = {
+            "escalation_id": escalation_id,
+            "question": question,
+            "language": language,
+            "reason": reason,
+            "operator": operator,
+            "confidence": confidence,
+            "transport": "pending_0_3_8",
+        }
+
+        with self._lock:
+            entry = self._runs.get(run_id)
+        store = entry.store if entry else None
+        if store:
+            store.append_session_event(
+                run_id, "clarification_escalated_to_worker", payload,
+            )
+        elif session_log:
+            from supervisor.operator.api import append_timeline_event
+            append_timeline_event(
+                session_log, run_id, "clarification_escalated_to_worker", payload,
+            )
+        return {"ok": True, "escalation_id": escalation_id}
 
     def _do_get_job(self, job_id: str) -> dict:
         job = self._job_tracker.get(job_id)

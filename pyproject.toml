@@ -1,6 +1,6 @@
 [project]
 name = "thin-supervisor"
-version = "0.3.6"
+version = "0.3.7"
 description = "Thin tmux sidecar supervisor for long-running AI coding agent workflows"
 requires-python = ">=3.10"
 license = {text = "MIT"}

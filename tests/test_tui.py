@@ -236,6 +236,25 @@ class TestFormatClarification:
         lines = format_clarification({})
         assert "(no answer)" in "\n".join(lines)
 
+    def test_escalation_hint_shown_when_recommended(self):
+        result = {
+            "answer": "unsure",
+            "confidence": 0.15,
+            "escalation_recommended": True,
+        }
+        text = "\n".join(format_clarification(result))
+        assert "escalate" in text.lower()
+        assert "E" in text  # keybind surfaced
+
+    def test_no_escalation_hint_when_confident(self):
+        result = {
+            "answer": "sure thing",
+            "confidence": 0.9,
+            "escalation_recommended": False,
+        }
+        text = "\n".join(format_clarification(result))
+        assert "escalate" not in text.lower()
+
 
 class TestCollectRunsLocal:
     def _patch(self, monkeypatch, *, known=(), daemons=(), panes=()):

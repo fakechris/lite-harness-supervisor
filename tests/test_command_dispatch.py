@@ -251,6 +251,105 @@ class TestDispatchCommand:
         assert "not found" in result.text
 
 
+# ── /escalate ────────────────────────────────────────────────────
+
+
+class TestEscalateCommand:
+    def _seed(self, tmp_path, run_id, events):
+        from supervisor.operator.api import append_timeline_event
+        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "state.json").write_text('{"run_id": "' + run_id + '"}')
+        log = run_dir / "session_log.jsonl"
+        for et, payload in events:
+            append_timeline_event(log, run_id, et, payload)
+        return {
+            "run_id": run_id, "tag": "local", "top_state": "COMPLETED",
+            "pane_target": "", "worktree": str(tmp_path), "socket": "",
+        }
+
+    def test_missing_args(self):
+        result = dispatch_command("escalate", [])
+        assert result.error
+        assert "Usage" in result.text
+
+    @patch("supervisor.operator.command_dispatch.do_escalate_clarification")
+    @patch("supervisor.operator.command_dispatch.resolve_run")
+    def test_uses_last_clarification_from_log(
+        self, mock_resolve, mock_escalate, tmp_path,
+    ):
+        run = self._seed(tmp_path, "run_esc_a", [
+            ("clarification_request", {"question": "q1"}),
+            ("clarification_response", {
+                "question": "why is the gate failing?",
+                "confidence": 0.2,
+                "escalation_recommended": True,
+            }),
+        ])
+        mock_resolve.return_value = [run]
+        mock_escalate.return_value = {"escalation_id": "abcd1234efgh5678", "source": "local"}
+
+        result = dispatch_command("escalate", ["run_esc_a"])
+        assert not result.error
+        assert "Escalated" in result.text
+        assert "abcd1234efgh" in result.text  # id prefix
+        kwargs = mock_escalate.call_args.kwargs
+        args = mock_escalate.call_args.args
+        assert args[1] == "why is the gate failing?"
+        assert kwargs["confidence"] == 0.2
+        assert kwargs["reason"] == "im_operator"
+
+    @patch("supervisor.operator.command_dispatch.do_escalate_clarification")
+    @patch("supervisor.operator.command_dispatch.resolve_run")
+    def test_picks_newest_clarification_when_multiple(
+        self, mock_resolve, mock_escalate, tmp_path,
+    ):
+        # Regression guard: /escalate must resolve the *latest*
+        # clarification_response, not the earliest in the session log.
+        run = self._seed(tmp_path, "run_esc_multi", [
+            ("clarification_response", {"question": "old q", "confidence": 0.8}),
+            ("clarification_response", {"question": "mid q", "confidence": 0.5}),
+            ("clarification_response", {"question": "latest q", "confidence": 0.1}),
+        ])
+        mock_resolve.return_value = [run]
+        mock_escalate.return_value = {"escalation_id": "11112222aaaabbbb", "source": "local"}
+
+        result = dispatch_command("escalate", ["run_esc_multi"])
+        assert not result.error
+        args = mock_escalate.call_args.args
+        kwargs = mock_escalate.call_args.kwargs
+        assert args[1] == "latest q"
+        assert kwargs["confidence"] == 0.1
+
+    @patch("supervisor.operator.command_dispatch.do_escalate_clarification")
+    @patch("supervisor.operator.command_dispatch.resolve_run")
+    def test_explicit_question_overrides_log(
+        self, mock_resolve, mock_escalate, tmp_path,
+    ):
+        run = self._seed(tmp_path, "run_esc_b", [
+            ("clarification_response", {"question": "old", "confidence": 0.1}),
+        ])
+        mock_resolve.return_value = [run]
+        mock_escalate.return_value = {"escalation_id": "deadbeef00000000", "source": "local"}
+
+        result = dispatch_command(
+            "escalate", ["run_esc_b", "is", "this", "safe?"],
+        )
+        assert not result.error
+        args = mock_escalate.call_args.args
+        kwargs = mock_escalate.call_args.kwargs
+        assert args[1] == "is this safe?"
+        assert kwargs["confidence"] is None  # explicit override has no confidence
+
+    @patch("supervisor.operator.command_dispatch.resolve_run")
+    def test_no_prior_clarification_errors(self, mock_resolve, tmp_path):
+        run = self._seed(tmp_path, "run_esc_c", [])
+        mock_resolve.return_value = [run]
+        result = dispatch_command("escalate", ["run_esc_c"])
+        assert result.error
+        assert "No prior clarification" in result.text
+
+
 # ── AsyncJobPoller ───────────────────────────────────────────────
 
 

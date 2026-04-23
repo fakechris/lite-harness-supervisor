@@ -428,6 +428,68 @@ def submit_clarification(ctx: RunContext, question: str, *,
     return OperatorJob(job_id=job_id, source="local")
 
 
+def do_escalate_clarification(
+    ctx: RunContext,
+    question: str,
+    *,
+    language: str = "en",
+    reason: str = "operator_initiated",
+    operator: str = "",
+    confidence: float | None = None,
+) -> dict[str, Any]:
+    """Record an operator's decision to escalate a clarification to the worker.
+
+    Audit-only in 0.3.7. Emits ``clarification_escalated_to_worker`` into
+    the session log. Actual worker transport + reply capture ship in 0.3.8.
+
+    Returns ``{"escalation_id": <hex>, "source": "daemon"|"local"}``.
+    """
+    import uuid
+
+    question = question.strip()
+    if not question:
+        raise ActionUnavailable("question is required")
+
+    caps = ctx.capabilities()
+    # Piggy-back on explain capability — same preconditions (need a
+    # resolvable run_id + session_log).
+    if caps.explain == ActionMode.UNAVAILABLE:
+        raise ActionUnavailable(caps.unavailable_reasons.get("explain", "unavailable"))
+
+    if caps.explain == ActionMode.ASYNC_DAEMON:
+        client = ctx.get_client()
+        resp = client.escalate_clarification(
+            ctx.run_id, question,
+            language=language, reason=reason,
+            operator=operator, confidence=confidence,
+        )
+        if not resp.get("ok", False):
+            raise ActionUnavailable(resp.get("error", "escalate failed"))
+        return {
+            "escalation_id": resp.get("escalation_id", ""),
+            "source": "daemon",
+        }
+
+    # ASYNC_LOCAL — write directly to the session log
+    from supervisor.operator.api import append_timeline_event
+
+    escalation_id = uuid.uuid4().hex[:16]
+    append_timeline_event(
+        ctx.session_log_path, ctx.run_id,
+        "clarification_escalated_to_worker",
+        {
+            "escalation_id": escalation_id,
+            "question": question,
+            "language": language,
+            "reason": reason,
+            "operator": operator,
+            "confidence": confidence,
+            "transport": "pending_0_3_8",
+        },
+    )
+    return {"escalation_id": escalation_id, "source": "local"}
+
+
 def poll_job(ctx: RunContext, job: OperatorJob) -> dict[str, Any]:
     """Poll for an async job result. Non-blocking.
 
