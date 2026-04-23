@@ -833,6 +833,95 @@ def cmd_observe(args):
     return 0
 
 
+def cmd_clarify(args):
+    """Ask the explainer a free-form question about a run, optionally escalate.
+
+    The answer is served by ``ExplainerClient.request_clarification`` — same
+    async job that powers TUI/IM clarification. When ``--escalate`` is set,
+    records a ``clarification_escalated_to_worker`` session event for
+    operator audit (actual worker transport ships in 0.3.8).
+    """
+    from supervisor.operator.actions import (
+        ActionUnavailable,
+        do_escalate_clarification,
+        poll_job,
+        submit_clarification,
+    )
+    from supervisor.operator.run_context import RunContext
+    from supervisor.operator.session_index import find_session
+
+    rec = find_session(args.run_id)
+    if rec is None:
+        print(f"Error: run not found: {args.run_id}")
+        return 1
+
+    ctx = RunContext.from_run_dict({
+        "run_id": rec.run_id,
+        "worktree": rec.worktree_root,
+        "tag": rec.tag or "local",
+        "top_state": rec.top_state,
+        "pane_target": rec.pane_target,
+        "socket": rec.daemon_socket,
+    })
+
+    question = " ".join(args.question).strip()
+    if not question:
+        print("Error: question is required")
+        return 1
+
+    try:
+        job = submit_clarification(ctx, question, language=args.language)
+    except ActionUnavailable as e:
+        print(f"Error: clarify unavailable: {e}")
+        return 1
+
+    deadline = _time.time() + max(1, args.timeout)
+    result: dict = {}
+    while _time.time() < deadline:
+        status = poll_job(ctx, job)
+        s = status.get("status", "")
+        if s == "completed":
+            result = status.get("result", {}) or {}
+            break
+        if s == "failed":
+            print(f"Error: clarify failed: {status.get('error', 'unknown')}")
+            return 1
+        _time.sleep(0.2)
+    else:
+        print(f"Error: clarify timed out after {args.timeout}s")
+        return 1
+
+    answer = result.get("answer", "")
+    confidence = result.get("confidence")
+    escalation_recommended = result.get("escalation_recommended", False)
+
+    print(f"Run:       {rec.run_id}")
+    print(f"Q:         {question}")
+    print(f"A:         {answer}")
+    if confidence is not None:
+        print(f"Confidence: {confidence}")
+    print(f"Escalate?  {'yes (recommended)' if escalation_recommended else 'no'}")
+
+    if args.escalate:
+        try:
+            esc = do_escalate_clarification(
+                ctx, question,
+                language=args.language,
+                reason=(
+                    "low_confidence" if escalation_recommended
+                    else "operator_initiated"
+                ),
+                operator=args.operator,
+                confidence=confidence,
+            )
+        except ActionUnavailable as e:
+            print(f"Error: escalate unavailable: {e}")
+            return 1
+        print(f"Escalated: id={esc['escalation_id']} via={esc['source']}")
+        print("  (audit-only in 0.3.7; worker-side routing ships in 0.3.8)")
+    return 0
+
+
 def cmd_note(args):
     """Shared notes for cross-run collaboration."""
     from supervisor.daemon.client import DaemonClient
@@ -2945,6 +3034,30 @@ def build_runtime_parser() -> argparse.ArgumentParser:
     p_observe = sub.add_parser("observe", help="Read-only observation of a run")
     p_observe.add_argument("run_id", help="Run ID to observe")
 
+    p_clarify = sub.add_parser(
+        "clarify",
+        help="Ask the explainer about a run; optionally escalate to the worker",
+    )
+    p_clarify.add_argument("run_id", help="Run ID")
+    p_clarify.add_argument("question", nargs="+", help="Free-form question")
+    p_clarify.add_argument(
+        "--language", default="en", choices=["en", "zh"],
+        help="Answer language",
+    )
+    p_clarify.add_argument(
+        "--escalate", action="store_true",
+        help="Record an operator decision to escalate this to the worker "
+             "(audit-only in 0.3.7; worker transport in 0.3.8)",
+    )
+    p_clarify.add_argument(
+        "--operator", default="",
+        help="Optional operator identifier recorded in the escalation event",
+    )
+    p_clarify.add_argument(
+        "--timeout", type=int, default=30,
+        help="Clarify poll timeout (seconds)",
+    )
+
     p_note = sub.add_parser("note", help="Shared notes for cross-run collaboration")
     note_sub = p_note.add_subparsers(dest="note_action")
     p_note_add = note_sub.add_parser("add", help="Add a note")
@@ -3202,6 +3315,8 @@ def main():
         sys.exit(cmd_pane_owner(args))
     elif args.command == "observe":
         sys.exit(cmd_observe(args))
+    elif args.command == "clarify":
+        sys.exit(cmd_clarify(args))
     elif args.command == "note":
         if args.note_action in ("add", "list"):
             sys.exit(cmd_note(args))

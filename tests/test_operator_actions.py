@@ -12,6 +12,7 @@ from supervisor.operator.actions import (
     OperatorJob,
     _local_jobs,
     build_explainer_context,
+    do_escalate_clarification,
     do_exchange,
     do_inspect,
     do_note_add,
@@ -490,6 +491,75 @@ class TestClarificationSummarizers:
         summary = _summarize_event("clarification_response", {"answer": "agent idle"})
         assert "A:" in summary
         assert "agent idle" in summary
+
+
+class TestEscalateClarification:
+    def test_daemon_path(self):
+        ctx = _make_ctx(tag="daemon")
+        mock_client = MagicMock()
+        mock_client.escalate_clarification.return_value = {
+            "ok": True, "escalation_id": "abc123def456abcd",
+        }
+        mock_client.is_running.return_value = True
+        with patch.object(ctx, "get_client", return_value=mock_client):
+            resp = do_escalate_clarification(
+                ctx, "why is verification stuck?",
+                language="en", reason="tui_low_confidence",
+                operator="op1", confidence=0.15,
+            )
+        assert resp["source"] == "daemon"
+        assert resp["escalation_id"] == "abc123def456abcd"
+        mock_client.escalate_clarification.assert_called_once_with(
+            "run_test123", "why is verification stuck?",
+            language="en", reason="tui_low_confidence",
+            operator="op1", confidence=0.15,
+        )
+
+    def test_daemon_error_becomes_unavailable(self):
+        ctx = _make_ctx(tag="daemon")
+        mock_client = MagicMock()
+        mock_client.escalate_clarification.return_value = {
+            "ok": False, "error": "run not found",
+        }
+        mock_client.is_running.return_value = True
+        with patch.object(ctx, "get_client", return_value=mock_client):
+            with pytest.raises(ActionUnavailable, match="run not found"):
+                do_escalate_clarification(ctx, "q?")
+
+    def test_local_path_writes_event(self, tmp_path):
+        run_dir = tmp_path / ".supervisor" / "runtime" / "runs" / "run_e"
+        run_dir.mkdir(parents=True)
+        (run_dir / "state.json").write_text(json.dumps({"run_id": "run_e"}))
+
+        ctx = _make_ctx(
+            tag="completed", run_id="run_e", worktree=str(tmp_path),
+            socket="", state_dir=run_dir, state_path=run_dir / "state.json",
+            session_log_path=run_dir / "session_log.jsonl",
+        )
+        with patch.object(ctx, "_has_daemon", return_value=False):
+            resp = do_escalate_clarification(
+                ctx, "is the migration safe?",
+                language="zh", reason="im_operator",
+                operator="song", confidence=0.2,
+            )
+        assert resp["source"] == "local"
+        assert len(resp["escalation_id"]) == 16
+
+        events = [
+            json.loads(line) for line in
+            (run_dir / "session_log.jsonl").read_text().strip().splitlines()
+        ]
+        assert len(events) == 1
+        ev = events[0]
+        assert ev["event_type"] == "clarification_escalated_to_worker"
+        assert ev["run_id"] == "run_e"
+        assert ev["payload"]["question"] == "is the migration safe?"
+        assert ev["payload"]["language"] == "zh"
+        assert ev["payload"]["reason"] == "im_operator"
+        assert ev["payload"]["operator"] == "song"
+        assert ev["payload"]["confidence"] == 0.2
+        assert ev["payload"]["transport"] == "pending_0_3_8"
+        assert ev["payload"]["escalation_id"] == resp["escalation_id"]
 
 
 class TestAppendTimelineEvent:

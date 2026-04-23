@@ -16,6 +16,7 @@ from typing import Any, Callable
 from supervisor.operator.actions import (
     ActionUnavailable,
     OperatorJob,
+    do_escalate_clarification,
     do_exchange,
     do_inspect,
     do_note_add,
@@ -267,6 +268,7 @@ _HELP_TEXT = """Available commands:
 /explain <id> - explain what the run is doing
 /drift <id> - assess drift from plan
 /ask <id> <question> - ask about the run
+/escalate <id> [question] - escalate last (or given) clarification to the worker
 /pause <id> - pause a run
 /resume <id> - resume a paused run
 /note <id> <text> - add operator note
@@ -306,6 +308,38 @@ def _require_run(args: list[str]) -> tuple[RunContext, dict[str, Any]] | Command
     run = candidates[0]
     ctx = RunContext.from_run_dict(run)
     return ctx, run
+
+
+def _latest_clarification(
+    ctx: RunContext, *, override: str = "",
+) -> tuple[str, float | None]:
+    """Pick the question + confidence to use for ``/escalate``.
+
+    When *override* is non-empty the operator supplied the question
+    explicitly, so we use it verbatim with unknown confidence. Otherwise
+    we scan the session log for the most recent ``clarification_response``
+    event and pull its ``question`` / ``confidence`` fields.
+    """
+    if override:
+        return override, None
+    log_path = ctx.session_log_path
+    if log_path is None or not log_path.exists():
+        return "", None
+    from supervisor.operator.api import timeline_from_session_log
+
+    events = timeline_from_session_log(log_path, limit=50)
+    for ev in events:
+        if ev.event_type == "clarification_response":
+            q = str(ev.payload.get("question", "")).strip()
+            if not q:
+                continue
+            conf = ev.payload.get("confidence")
+            try:
+                conf_val: float | None = float(conf) if conf is not None else None
+            except (TypeError, ValueError):
+                conf_val = None
+            return q, conf_val
+    return "", None
 
 
 def dispatch_command(
@@ -416,6 +450,46 @@ def dispatch_command(
                 text="Working...",
                 job=job,
                 ctx=ctx,
+                buttons=_run_buttons(run["run_id"]),
+            )
+        except ActionUnavailable as exc:
+            return CommandResult(text=str(exc), error=True)
+
+    if cmd == "escalate":
+        if not args:
+            return CommandResult(
+                text="Usage: /escalate <run_id> [question]", error=True,
+            )
+        resolved = _require_run([args[0]])
+        if isinstance(resolved, CommandResult):
+            return resolved
+        ctx, run = resolved
+        explicit_question = " ".join(args[1:]).strip()
+        question, confidence = _latest_clarification(ctx, override=explicit_question)
+        if not question:
+            return CommandResult(
+                text=(
+                    "No prior clarification to escalate. "
+                    "Ask first with /ask, or provide a question: "
+                    "/escalate <run_id> <question>"
+                ),
+                error=True,
+            )
+        try:
+            resp = do_escalate_clarification(
+                ctx, question,
+                language=language,
+                reason="im_operator",
+                confidence=confidence,
+            )
+            esc_id = resp.get("escalation_id", "")[:12]
+            return CommandResult(
+                text=(
+                    f"Escalated to worker (id={esc_id}).\n"
+                    f"Question: {question[:200]}\n"
+                    "Transport lands in 0.3.8 — session log has the audit entry."
+                ),
+                data={"escalation_id": resp.get("escalation_id", "")},
                 buttons=_run_buttons(run["run_id"]),
             )
         except ActionUnavailable as exc:
