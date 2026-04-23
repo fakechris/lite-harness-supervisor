@@ -874,11 +874,20 @@ def cmd_clarify(args):
     except ActionUnavailable as e:
         print(f"Error: clarify unavailable: {e}")
         return 1
+    except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
+        # Daemon may die between run lookup and socket connect; same
+        # narrow race handled in cmd_observe.
+        print(f"Error: daemon unreachable for {rec.run_id}: {e}")
+        return 1
 
     deadline = _time.time() + max(1, args.timeout)
     result: dict = {}
     while _time.time() < deadline:
-        status = poll_job(ctx, job)
+        try:
+            status = poll_job(ctx, job)
+        except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
+            print(f"Error: daemon unreachable for {rec.run_id}: {e}")
+            return 1
         s = status.get("status", "")
         if s == "completed":
             result = status.get("result", {}) or {}
@@ -916,6 +925,9 @@ def cmd_clarify(args):
             )
         except ActionUnavailable as e:
             print(f"Error: escalate unavailable: {e}")
+            return 1
+        except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
+            print(f"Error: daemon unreachable for {rec.run_id}: {e}")
             return 1
         print(f"Escalated: id={esc['escalation_id']} via={esc['source']}")
         print("  (audit-only in 0.3.7; worker-side routing ships in 0.3.8)")

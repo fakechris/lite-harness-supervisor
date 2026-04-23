@@ -499,7 +499,7 @@ def _curses_main(stdscr):
                                 "escalation_recommended": True,
                                 "language": pending_job.get("language", language),
                             }
-                            status_msg = " Low-confidence answer — press 'E' to escalate, any other key to dismiss "
+                            status_msg = " Low-confidence answer — press 'E' to escalate to the worker "
                         else:
                             last_clarify = None
                     else:
@@ -593,14 +593,25 @@ def _curses_main(stdscr):
             continue
 
         if key in (ord("j"), curses.KEY_DOWN) and runs:
+            prev_idx = selected_idx
             selected_idx = min(selected_idx + 1, len(runs) - 1)
             detail_lines = ["(loading...)"]
             right_lines = []
+            if selected_idx != prev_idx and last_clarify is not None:
+                # Escalation target is captured per-answer; clear the
+                # hint so the stale "press E" message doesn't survive
+                # a run change.
+                last_clarify = None
+                status_msg = default_status
 
         if key in (ord("k"), curses.KEY_UP) and runs:
+            prev_idx = selected_idx
             selected_idx = max(selected_idx - 1, 0)
             detail_lines = ["(loading...)"]
             right_lines = []
+            if selected_idx != prev_idx and last_clarify is not None:
+                last_clarify = None
+                status_msg = default_status
 
         # Enter or space: load snapshot + timeline
         if key in (10, 32, ord("i")) and runs:

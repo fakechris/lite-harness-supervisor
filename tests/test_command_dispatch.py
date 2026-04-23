@@ -301,6 +301,28 @@ class TestEscalateCommand:
 
     @patch("supervisor.operator.command_dispatch.do_escalate_clarification")
     @patch("supervisor.operator.command_dispatch.resolve_run")
+    def test_picks_newest_clarification_when_multiple(
+        self, mock_resolve, mock_escalate, tmp_path,
+    ):
+        # Regression guard: /escalate must resolve the *latest*
+        # clarification_response, not the earliest in the session log.
+        run = self._seed(tmp_path, "run_esc_multi", [
+            ("clarification_response", {"question": "old q", "confidence": 0.8}),
+            ("clarification_response", {"question": "mid q", "confidence": 0.5}),
+            ("clarification_response", {"question": "latest q", "confidence": 0.1}),
+        ])
+        mock_resolve.return_value = [run]
+        mock_escalate.return_value = {"escalation_id": "11112222aaaabbbb", "source": "local"}
+
+        result = dispatch_command("escalate", ["run_esc_multi"])
+        assert not result.error
+        args = mock_escalate.call_args.args
+        kwargs = mock_escalate.call_args.kwargs
+        assert args[1] == "latest q"
+        assert kwargs["confidence"] == 0.1
+
+    @patch("supervisor.operator.command_dispatch.do_escalate_clarification")
+    @patch("supervisor.operator.command_dispatch.resolve_run")
     def test_explicit_question_overrides_log(
         self, mock_resolve, mock_escalate, tmp_path,
     ):

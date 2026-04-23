@@ -515,6 +515,17 @@ class TestEscalateClarification:
             operator="op1", confidence=0.15,
         )
 
+    def test_rejects_empty_question_before_capability_check(self):
+        # Shared validation: both transports must refuse an empty /
+        # whitespace-only question.  Using a context with no capabilities
+        # proves the guard fires before we try to talk to the daemon or
+        # touch the filesystem.
+        ctx = _make_ctx(tag="daemon")
+        with pytest.raises(ActionUnavailable, match="question is required"):
+            do_escalate_clarification(ctx, "")
+        with pytest.raises(ActionUnavailable, match="question is required"):
+            do_escalate_clarification(ctx, "   \t  ")
+
     def test_daemon_error_becomes_unavailable(self):
         ctx = _make_ctx(tag="daemon")
         mock_client = MagicMock()

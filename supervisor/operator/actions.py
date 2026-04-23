@@ -446,6 +446,10 @@ def do_escalate_clarification(
     """
     import uuid
 
+    question = question.strip()
+    if not question:
+        raise ActionUnavailable("question is required")
+
     caps = ctx.capabilities()
     # Piggy-back on explain capability — same preconditions (need a
     # resolvable run_id + session_log).
