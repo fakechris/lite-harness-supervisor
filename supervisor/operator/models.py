@@ -10,6 +10,21 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+def coerce_confidence(value: Any) -> float | None:
+    """Parse a confidence value from raw explainer/IPC payloads.
+
+    Returns ``None`` for missing, non-numeric, or unparseable values.
+    Shared by ``ExchangeView``, ``DriftAssessment``, and the clarification
+    pipeline so every consumer applies the same coercion rule.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class RunSnapshot:
     """Current state of a run for operator display.
@@ -191,6 +206,117 @@ class SystemTimelineEvent:
             "run_id": self.run_id,
             "summary": self.summary,
             "payload": self.payload,
+        }
+
+
+@dataclass(frozen=True)
+class ExchangeView:
+    """A human-readable "what just happened between supervisor and worker" view.
+
+    Built from the last checkpoint + last instruction in a run's timeline.
+    Channel adapters (TUI, Telegram, Lark) consume this instead of
+    stringifying raw dicts. The explainer-filled fields (``explanation_*``)
+    are optional — they're populated only when the operator asks for a
+    natural-language translation of the exchange.
+    """
+    run_id: str
+    window_start: str                 # ISO timestamp of earliest event shown
+    window_end: str                   # ISO timestamp of latest event shown
+    worker_text_excerpt: str          # last checkpoint summary/content
+    supervisor_instruction_excerpt: str
+    checkpoint_excerpt: str           # raw checkpoint marker text, if any
+    explanation_zh: str = ""
+    explanation_en: str = ""
+    confidence: float | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], *, run_id: str = "") -> "ExchangeView":
+        """Wrap a raw exchange dict (from ``operator.api.recent_exchange``).
+
+        Accepts both the pre-explainer shape (``last_checkpoint_summary`` +
+        ``last_instruction_summary``) and the post-explainer shape
+        (``explanation``, ``confidence``, …).
+        """
+        conf = coerce_confidence(data.get("confidence"))
+        return cls(
+            run_id=str(data.get("run_id") or run_id or ""),
+            window_start=str(data.get("window_start", "")),
+            window_end=str(data.get("window_end", "")),
+            worker_text_excerpt=str(
+                data.get("worker_text_excerpt")
+                or data.get("last_checkpoint_summary", "")
+            ),
+            supervisor_instruction_excerpt=str(
+                data.get("supervisor_instruction_excerpt")
+                or data.get("last_instruction_summary", "")
+            ),
+            checkpoint_excerpt=str(data.get("checkpoint_excerpt", "")),
+            explanation_zh=str(data.get("explanation_zh", "")),
+            explanation_en=str(data.get("explanation_en", "")),
+            confidence=conf,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "window_start": self.window_start,
+            "window_end": self.window_end,
+            "worker_text_excerpt": self.worker_text_excerpt,
+            "supervisor_instruction_excerpt": self.supervisor_instruction_excerpt,
+            "checkpoint_excerpt": self.checkpoint_excerpt,
+            "explanation_zh": self.explanation_zh,
+            "explanation_en": self.explanation_en,
+            "confidence": self.confidence,
+        }
+
+
+_DRIFT_STATUSES = frozenset({"on_track", "watch", "drifting", "blocked"})
+
+
+@dataclass(frozen=True)
+class DriftAssessment:
+    """Structured answer to "is this run still on track?"
+
+    Built from ``ExplainerClient.assess_drift`` output. The raw dict is
+    kept as the wire format across daemon IPC; this dataclass is for
+    type-safe consumption by TUI / IM channels.
+    """
+    run_id: str
+    status: str                       # on_track | watch | drifting | blocked
+    reasons: list[str]
+    evidence: list[str]
+    codebase_signals: list[str]
+    recommended_action: str
+    confidence: float | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], *, run_id: str = "") -> "DriftAssessment":
+        status = str(data.get("status", "") or "").strip().lower()
+        if status not in _DRIFT_STATUSES:
+            status = "watch"  # unknown → conservative bucket
+        conf = coerce_confidence(data.get("confidence"))
+        return cls(
+            run_id=str(data.get("run_id") or run_id or ""),
+            status=status,
+            reasons=[str(x) for x in (data.get("reasons") or [])],
+            evidence=[str(x) for x in (data.get("evidence") or [])],
+            codebase_signals=[str(x) for x in (data.get("codebase_signals") or [])],
+            recommended_action=str(
+                data.get("recommended_action")
+                or data.get("recommended_operator_action", "")
+            ),
+            confidence=conf,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "status": self.status,
+            "reasons": list(self.reasons),
+            "evidence": list(self.evidence),
+            "codebase_signals": list(self.codebase_signals),
+            "recommended_action": self.recommended_action,
+            "confidence": self.confidence,
         }
 
 

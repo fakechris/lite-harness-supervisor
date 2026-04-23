@@ -198,6 +198,9 @@ def _make_explainer(ctx: RunContext):
         model=config.explainer_model,
         temperature=config.explainer_temperature,
         max_tokens=config.explainer_max_tokens,
+        deep_model=config.deep_explainer_model,
+        deep_temperature=config.deep_explainer_temperature,
+        deep_max_tokens=config.deep_explainer_max_tokens,
     )
 
 
@@ -397,32 +400,29 @@ def submit_clarification(ctx: RunContext, question: str, *,
 
     # ASYNC_LOCAL
     explainer = _make_explainer(ctx)
+    escalation_threshold = ctx.load_config().clarification_escalation_confidence
 
     def _job() -> dict:
         from supervisor.operator.api import append_timeline_event
+        from supervisor.operator.clarification import finalize_clarification
 
-        # Record the question in the timeline
-        append_timeline_event(
-            ctx.session_log_path, ctx.run_id,
-            "clarification_request",
-            {"question": question, "language": language},
-        )
+        def _write(event_type: str, payload: dict[str, Any]) -> None:
+            append_timeline_event(
+                ctx.session_log_path, ctx.run_id, event_type, payload,
+            )
+
+        _write("clarification_request", {"question": question, "language": language})
 
         context = build_explainer_context(ctx, language=language)
         context["question"] = question
         result = explainer.request_clarification(context)
 
-        # Record the answer in the timeline
-        append_timeline_event(
-            ctx.session_log_path, ctx.run_id,
-            "clarification_response",
-            {
-                "question": question,
-                "answer": result.get("answer", ""),
-                "confidence": result.get("confidence"),
-            },
+        return finalize_clarification(
+            result,
+            question=question,
+            escalation_threshold=escalation_threshold,
+            write_event=_write,
         )
-        return result
 
     job_id = _local_jobs.submit("clarification", _job)
     return OperatorJob(job_id=job_id, source="local")

@@ -18,8 +18,9 @@ thin-supervisor fixes this. It's an acceptance-centered run supervisor that sits
 > - [docs/reviews/2026-04-11-deep-code-review.md](docs/reviews/2026-04-11-deep-code-review.md) — latest deep code review log and remaining-risk audit
 > - [docs/reviews/2026-04-12-amp-supervisor-capability-review.md](docs/reviews/2026-04-12-amp-supervisor-capability-review.md) — Amp-vs-thin-supervisor capability review and oracle-layer roadmap
 
-## Current Status (0.3.5)
+## Current Status (0.3.6)
 
+- **Operator channel polish.** `assess_drift` can opt into a heavier reasoner via `deep_explainer_model` while routine explanations stay on the cheap `explainer_model`. Clarification answers now emit a dedicated `explainer_answer` timeline event (tagged `source="explainer"`) and carry `escalation_recommended=True` when confidence falls below `clarification_escalation_confidence` (default `0.4`) so operators know when to route the question to the worker. `DriftAssessment` and `ExchangeView` frozen dataclasses give TUI / IM channels a type-safe projection instead of raw dicts.
 - **JSONL runs close the loop via Stop hook.** `thin-supervisor hook install` wires a Claude Code / Codex Stop hook that reads the supervisor's per-session handoff file, returns the next instruction as the agent's stop `reason`, and writes an ACK so the supervisor can confirm delivery. Observation-only runs no longer dead-end at "pause for human" when nothing else is wrong.
 - **A2A inbound is live.** `thin-supervisor a2a serve` exposes a stdlib-only Google A2A JSON-RPC listener (`tasks/send` / `tasks/get`) behind a shared inbound boundary guard — bearer auth with localhost fallback, per-IP rate-limit, injection scan, and secret redaction with SHA-256 audit hashes. `task_id` equals the client `request_id`, so task identity survives adapter and daemon restarts.
 - **Layered system observability is live.** `thin-supervisor overview` (with `--json` / `--watch`) renders a whole-system view — daemon counts, live/orphaned/completed sessions, event-plane backlog, actionable alerts, and a cross-run timeline — that stays consistent with `status`, `observe`, and the TUI global mode (`g` to toggle).

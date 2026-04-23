@@ -160,6 +160,9 @@ class DaemonServer:
             model=self.config.explainer_model,
             temperature=self.config.explainer_temperature,
             max_tokens=self.config.explainer_max_tokens,
+            deep_model=self.config.deep_explainer_model,
+            deep_temperature=self.config.deep_explainer_temperature,
+            deep_max_tokens=self.config.deep_explainer_max_tokens,
         )
         self._job_tracker = JobTracker()
         # Command channels are per-credential-set singletons with
@@ -980,7 +983,11 @@ class DaemonServer:
                 from supervisor.operator.api import append_timeline_event
                 append_timeline_event(session_log, run_id, event_type, payload)
 
+        escalation_threshold = self.config.clarification_escalation_confidence
+
         def _job():
+            from supervisor.operator.clarification import finalize_clarification
+
             _write_event("clarification_request", {
                 "question": question, "language": language,
             })
@@ -989,12 +996,12 @@ class DaemonServer:
             ctx["question"] = question
             result = self._explainer.request_clarification(ctx)
 
-            _write_event("clarification_response", {
-                "question": question,
-                "answer": result.get("answer", ""),
-                "confidence": result.get("confidence"),
-            })
-            return result
+            return finalize_clarification(
+                result,
+                question=question,
+                escalation_threshold=escalation_threshold,
+                write_event=_write_event,
+            )
 
         job_id = self._job_tracker.submit("clarification", _job)
         return {"ok": True, "job_id": job_id}

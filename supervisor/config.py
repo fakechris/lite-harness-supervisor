@@ -19,6 +19,8 @@ _GLOBAL_INHERITABLE = frozenset({
     "notification_channels", "pause_handling_mode", "max_auto_interventions",
     "poll_interval_sec", "read_lines",
     "explainer_model", "explainer_temperature", "explainer_max_tokens",
+    "deep_explainer_model", "deep_explainer_temperature", "deep_explainer_max_tokens",
+    "clarification_escalation_confidence",
 })
 
 
@@ -103,9 +105,25 @@ class RuntimeConfig:
     judge_max_tokens: int = 512
 
     # -- LLM Explainer (operator-facing, separate from judge) --
+    #
+    # Two tiers: routine `explainer_model` is the cheap/fast default used for
+    # explain_run / explain_exchange / request_clarification. Optional
+    # `deep_explainer_model` is used only for drift/codebase-heavy analysis
+    # (assess_drift) — set to the stronger model you're willing to spend on
+    # when operators ask "is this run still on track?" If `deep_explainer_model`
+    # is None, drift assessment falls back to the routine explainer.
     explainer_model: str | None = None  # None = stub mode (cheap/fast default)
     explainer_temperature: float = 0.3
     explainer_max_tokens: int = 1024
+    deep_explainer_model: str | None = None  # None = reuse explainer_model
+    deep_explainer_temperature: float = 0.2
+    deep_explainer_max_tokens: int = 2048
+
+    # Clarification routing: when the explainer's self-reported confidence
+    # is below this threshold, the channel surfaces `escalation_recommended`
+    # so the operator can explicitly request a worker follow-up. Escalation
+    # is never automatic — the operator remains in the loop.
+    clarification_escalation_confidence: float = 0.4
 
     # -- Runtime paths --
     runtime_dir: str = ".supervisor/runtime"
@@ -246,6 +264,16 @@ class RuntimeConfig:
             f"explainer_model: null\n"
             f"explainer_temperature: {self.explainer_temperature}\n"
             f"explainer_max_tokens: {self.explainer_max_tokens}\n"
+            "\n"
+            "# Optional heavier explainer for drift/codebase analysis (assess_drift).\n"
+            "# Leave null to reuse explainer_model.\n"
+            f"deep_explainer_model: null\n"
+            f"deep_explainer_temperature: {self.deep_explainer_temperature}\n"
+            f"deep_explainer_max_tokens: {self.deep_explainer_max_tokens}\n"
+            "\n"
+            "# Confidence below which clarification surfaces an escalation hint\n"
+            "# (does not auto-escalate — the operator decides).\n"
+            f"clarification_escalation_confidence: {self.clarification_escalation_confidence}\n"
             "\n"
             "# Runtime\n"
             f"runtime_dir: \"{self.runtime_dir}\"\n"
