@@ -442,6 +442,8 @@ Override with environment variables: `SUPERVISOR_SURFACE_TYPE`, `SUPERVISOR_SURF
 
 ## Design Philosophy
 
+> **Foundational stance**: see [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) — why thin-supervisor watches but does not orchestrate.
+
 Inspired by [Anthropic's Scaling Managed Agents](https://www.anthropic.com/engineering/managed-agents):
 
 1. **The system's memory lives in SessionRun, not in the model's context.** Crashes don't lose history. Everything is in `session_log.jsonl`.
